@@ -1,0 +1,36 @@
+# Pattern: eligibility_rules
+# Classification hint file for the Intake agent
+
+name: eligibility_rules
+description: "Add validation/eligibility logic with alert messages"
+complexity: COMPLEX
+agents:
+  - logic-modifier
+
+classification_hints:
+  - "eligibility"
+  - "validation rule"
+  - "alert message"
+  - "not rated"
+  - "restrict"
+  - "minimum requirement"
+
+parameters:
+  - name: rules
+    type: list[object]
+    description: |
+      Each rule is an object with:
+        - condition: VB.NET boolean expression (e.g., "CoverageType = ELITECOMP")
+        - action: What to do when condition is met (e.g., "reject", "warn", "enforce")
+        - alert_message: Human-readable message for the alert
+        - alert_action: TBW alert action (e.g., "aaAlertAction.aanotrated")
+        - enforcement: What to enforce (e.g., "minimum dwelling $500,000")
+    example:
+      - condition: "CoverageType = ELITECOMP"
+        action: "enforce"
+        alert_message: "$5M liability required for Elite Comp"
+        alert_action: "aaAlertAction.aanotrated"
+        enforcement: "Minimum liability $5,000,000"
+
+validators:
+  - traceability

@@ -1,0 +1,29 @@
+# Pattern: included_limits
+# Classification hint file for the Intake agent
+
+name: included_limits
+description: "Change included coverage limits (medical payments, additional living, etc.)"
+complexity: SIMPLE
+agents:
+  - rate-modifier
+
+classification_hints:
+  - "included limit"
+  - "coverage limit"
+  - "medical payments"
+  - "additional living expense"
+  - "change limit"
+
+parameters:
+  - name: limit_name
+    type: string
+    description: "Name of the coverage limit (e.g., Medical Payments, Additional Living Expense)"
+  - name: old_limit
+    type: float
+    description: "Current limit value (for verification)"
+  - name: new_limit
+    type: float
+    description: "New limit value"
+
+validators:
+  - value_sanity

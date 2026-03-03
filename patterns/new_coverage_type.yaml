@@ -1,0 +1,41 @@
+# Pattern: new_coverage_type
+# Classification hint file for the Intake agent
+
+name: new_coverage_type
+description: "Add a new coverage type constant, DAT IDs, rate table routing"
+complexity: COMPLEX
+agents:
+  - logic-modifier
+  - rate-modifier
+
+classification_hints:
+  - "new coverage type"
+  - "add coverage"
+  - "coverage constant"
+  - "DAT IDs"
+  - "rate table routing"
+
+parameters:
+  - name: coverage_type_name
+    type: string
+    example: "Elite Comp."
+    description: "Display name of the coverage type"
+  - name: constant_name
+    type: string
+    example: "ELITECOMP"
+    description: "VB constant name (Public Const)"
+  - name: classifications
+    type: list[string]
+    example: ["PREFERRED", "STANDARD"]
+    description: "Classifications/sub-types for rate table routing"
+  - name: dat_ids
+    type: map[string, int]
+    example:
+      Preferred: 9501
+      Standard: 9502
+    description: "DAT file IDs per classification"
+
+validators:
+  - completeness
+  - cross_lob
+  - traceability

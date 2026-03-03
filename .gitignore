@@ -1,0 +1,21 @@
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Review / development artifacts (not part of production plugin)
+codex-reviews/
+codex-review-plan.md
+
+# Old monolith agent specs (superseded by progressive-loading directories)
+agents/rate-modifier.md
+agents/logic-modifier.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor artifacts
+*.swp
+*.swo
+*~

@@ -1,0 +1,22 @@
+{
+  "name": "iq-update-marketplace",
+  "owner": {
+    "name": "muhammadut"
+  },
+  "metadata": {
+    "description": "Automated rate update pipeline for TBW/IntelliQuote VB.NET rating engines."
+  },
+  "plugins": [
+    {
+      "name": "iq-update",
+      "source": {
+        "source": "github",
+        "repo": "muhammadut/iq-update"
+      },
+      "description": "7-agent pipeline: Intake, Decomposer, Analyzer, Planner, Rate Modifier, Logic Modifier, Reviewer. Two human approval gates.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"]
+    }
+  ]
+}

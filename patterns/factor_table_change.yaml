@@ -1,0 +1,35 @@
+# Pattern: factor_table_change
+# Classification hint file for the Intake agent
+
+name: factor_table_change
+description: "Update a value in a Select Case factor function"
+complexity: SIMPLE
+agents:
+  - rate-modifier
+
+classification_hints:
+  - "deductible factor"
+  - "discount factor"
+  - "surcharge"
+  - "Select Case"
+  - "factor table"
+  - "change factor"
+
+parameters:
+  - name: function_name
+    type: string
+    example: "SetDisSur_Deductible"
+    description: "Name of the function containing the factor table"
+  - name: case_value
+    type: string
+    example: "5000"
+    description: "The Select Case value to modify"
+  - name: old_value
+    type: float
+    description: "Current value (for verification)"
+  - name: new_value
+    type: float
+    description: "New value to set"
+
+validators:
+  - value_sanity

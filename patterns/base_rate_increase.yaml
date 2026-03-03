@@ -1,0 +1,37 @@
+# Pattern: base_rate_increase
+# Classification hint file for the Intake agent
+
+name: base_rate_increase
+description: "Multiply all Array6 base rate values by a factor"
+complexity: SIMPLE
+agents:
+  - rate-modifier
+
+classification_hints:
+  - "base rate"
+  - "rate increase"
+  - "multiply rates"
+  - "percentage increase"
+  - "across the board increase"
+
+parameters:
+  - name: factor
+    type: float
+    example: 1.05
+    description: "Multiplier (e.g., 1.05 for 5% increase)"
+  - name: scope
+    type: enum[all_territories, specific_territories]
+    description: "Whether to apply to all territories or specific ones"
+  - name: territories
+    type: list[int]
+    required: false
+    description: "Only if scope=specific_territories"
+  - name: rounding
+    type: enum[auto, banker, none]
+    default: auto
+    description: "Set to 'auto' by Intake. Analyzer resolves to 'banker' (integer Array6) or 'none' (decimal/factor values)"
+
+validators:
+  - array6_syntax
+  - completeness
+  - value_sanity

@@ -1,0 +1,16 @@
+{
+  "name": "@muhammadut/iq-update",
+  "version": "0.1.0",
+  "description": "Automated rate update pipeline for TBW/IntelliQuote VB.NET rating engines. 7 AI agents handle intake, analysis, planning, execution, and validation with two human approval gates.",
+  "keywords": ["claude-code-plugin", "vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"],
+  "license": "MIT",
+  "files": [
+    ".claude-plugin/",
+    "skills/",
+    "agents/",
+    "patterns/",
+    "validators/",
+    "CLAUDE.md",
+    "fetch-ticket.sh"
+  ]
+}

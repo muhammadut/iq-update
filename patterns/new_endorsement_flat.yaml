@@ -1,0 +1,34 @@
+# Pattern: new_endorsement_flat
+# Classification hint file for the Intake agent
+
+name: new_endorsement_flat
+description: "Add a new flat-rate endorsement option"
+complexity: MEDIUM
+agents:
+  - rate-modifier
+  - logic-modifier
+
+classification_hints:
+  - "new endorsement"
+  - "flat rate endorsement"
+  - "add endorsement"
+  - "endorsement premium"
+  - "optional coverage"
+
+parameters:
+  - name: endorsement_name
+    type: string
+    description: "Human-readable name of the endorsement"
+  - name: option_code
+    type: int
+    description: "TBW option code (or placeholder 9999 if TBD)"
+  - name: premium
+    type: float
+    description: "Flat premium amount"
+  - name: category
+    type: string
+    description: "ENDORSEMENTEXTENSION, OPTIONALCOVERAGE, etc."
+
+validators:
+  - completeness
+  - traceability

@@ -1,0 +1,32 @@
+# Pattern: new_liability_option
+# Classification hint file for the Intake agent
+
+name: new_liability_option
+description: "Add a new liability sub-option with premium array"
+complexity: MEDIUM
+agents:
+  - rate-modifier
+  - logic-modifier
+
+classification_hints:
+  - "liability option"
+  - "new liability"
+  - "liability premium"
+  - "liability sub-option"
+  - "liability tier"
+
+parameters:
+  - name: liability_name
+    type: string
+    description: "Name of the liability sub-option (e.g., RentedDwelling)"
+  - name: premium_array
+    type: list[float]
+    description: |
+      Values for Array6 liability tiers. Typically 5-6 values matching
+      standard liability limits ($100K, $300K, $500K, $1M, $2M, $5M),
+      but the count varies by province and option.
+    example: [0, 0, 0, 0, 324, 462]
+
+validators:
+  - array6_syntax
+  - traceability
