@@ -5,8 +5,7 @@ name: new_coverage_type
 description: "Add a new coverage type constant, DAT IDs, rate table routing"
 complexity: COMPLEX
 agents:
-  - logic-modifier
-  - rate-modifier
+  - change-engine
 
 classification_hints:
   - "new coverage type"

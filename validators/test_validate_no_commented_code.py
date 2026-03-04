@@ -5,7 +5,7 @@ Uses tempfile to create mock workstreams with controlled
 operations_log.yaml and manifest.yaml entries.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_no_commented_code.py -v
 """
 
@@ -86,8 +86,8 @@ def test_clean_pass():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 100, "before": "    Case 500 : dblRate = 0.05", "after": "    Case 500 : dblRate = 0.06"},
@@ -95,8 +95,8 @@ def test_clean_pass():
                 },
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 200, "before": "    varRates = Array6(100, 200, 300)", "after": "    varRates = Array6(110, 220, 330)"},
@@ -104,8 +104,8 @@ def test_clean_pass():
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-003-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-003",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 350, "before": "    Const ACCIDENTBASE = 200", "after": "    Const ACCIDENTBASE = 250"},
@@ -135,8 +135,8 @@ def test_commented_line_modified():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -157,7 +157,7 @@ def test_commented_line_modified():
         finding = result["findings"][0]
         assert finding["issue"] == "commented_line_modified"
         assert finding["line"] == 50
-        assert finding["operation"] == "op-001-01"
+        assert finding["operation"] == "intent-001"
         assert finding["before"] == "' This is an old comment"
         assert finding["after"] == "' This is a modified comment"
 
@@ -175,8 +175,8 @@ def test_inline_comment_only_change():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -211,8 +211,8 @@ def test_pure_insertion_skipped():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-003-01",
-                    "agent": "logic-modifier",
+                    "operation": "intent-003",
+                    "change_type": "structure_insertion",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -244,8 +244,8 @@ def test_multiple_issues():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -315,8 +315,8 @@ def test_failed_operation_skipped():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "FAILED",
                     "changes": [
                         {
@@ -349,8 +349,8 @@ def test_commented_array6_line():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-004-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-004",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -388,8 +388,8 @@ def test_string_with_apostrophe():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-005-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-005",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -423,8 +423,8 @@ def test_indented_comment():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-006-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-006",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {

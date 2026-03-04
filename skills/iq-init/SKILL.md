@@ -32,7 +32,9 @@ None. Everything is auto-detected from the carrier folder structure.
 |-------|--------|----------|-------------|
 | Carrier folder | Current working directory | YES | Must be a TBW carrier folder (contains province-named subdirectories) |
 
-No arguments, no prompts. The skill scans and reports -- like `terraform init`.
+No required arguments. Optional: `/iq-init --refresh` to force rebuild of
+pattern-library.yaml and codebase-profile.yaml even if they already exist.
+Without `--refresh`, existing artifacts are kept and only missing ones are created.
 
 ## Outputs
 
@@ -74,7 +76,125 @@ the whole init because one province is malformed).
 3. Check if `.iq-workstreams/config.yaml` already exists:
    - If YES: this is a RE-INIT (merge mode). Note this for Step 4.
    - If NO: this is a FRESH INIT.
-4. Check for province-like directories to confirm this is a TBW carrier folder:
+4. **Preflight dependency checks.** Verify required tools are available:
+
+   **Python discovery (try in order, use first that succeeds):**
+   ```bash
+   # 1. Check config.yaml for cached python_cmd (from previous /iq-init)
+   # 2. Try: python --version 2>/dev/null
+   # 3. Try: python3 --version 2>/dev/null
+   # 4. Try: py -3 --version 2>/dev/null          # Windows Python Launcher
+   # 5. Try: conda run -n rival_plugin python --version 2>/dev/null  # Conda env
+   ```
+   Once found, verify PyYAML is installed: `{python_cmd} -c "import yaml; print(yaml.__version__)"`.
+   If PyYAML is missing, WARN — the plugin will work for `/iq-plan` but `/iq-execute`
+   and `/iq-review` will STOP because validators require PyYAML. Install it early.
+
+   **Persist the discovered Python command** to config.yaml as `python_cmd` (see template below).
+   This prevents every downstream skill from re-discovering the Python path.
+
+   ```bash
+   # Other dependencies
+   bash --version 2>/dev/null
+   jq --version 2>/dev/null
+   curl --version 2>/dev/null
+   ```
+
+   Report results clearly:
+   ```
+   Dependency check:
+     python   ✓ (3.11.4) — using: C:\Users\...\python.exe
+     bash     ✓ (5.2.15)
+     jq       ✗ MISSING — install from https://jqlang.github.io/jq/download/
+     curl     ✓ (8.4.0)
+   ```
+
+   **Missing python:** STOP — validators require Python with PyYAML.
+   **Missing bash/jq/curl:** WARN — fetch-ticket.sh won't work, but the rest of the
+   plugin functions fine. Continue with a warning.
+
+5. **Azure DevOps connection check (`.env` file).**
+   The `fetch-ticket.sh` script requires Azure DevOps credentials stored in a `.env`
+   file. Check for this file early so the developer knows whether automatic ticket
+   fetching will work.
+
+   **Search order** — check both locations, use the first found:
+   1. `{carrier_root}/.iq-update/.env`
+   2. `{carrier_root}/.env`
+
+   **If `.env` is found:**
+   - Read the file and check whether `ADO_PAT` is set to a non-empty value
+     (look for a line matching `ADO_PAT=` followed by a non-empty string).
+   - If `ADO_PAT` has a value, report success and continue:
+     ```
+     Azure DevOps:  ✓ .env found, ADO_PAT is configured
+     ```
+   - If `ADO_PAT` is missing or empty, treat as "not configured" (fall through
+     to the guidance below).
+
+   **If `.env` is missing OR `ADO_PAT` is empty:**
+   Display the following setup guide, then ask the developer how to proceed:
+
+   ```
+   ═══════════════════════════════════════════════════════
+     Azure DevOps Connection Setup
+   ═══════════════════════════════════════════════════════
+
+   To fetch tickets automatically, this plugin needs an Azure DevOps
+   Personal Access Token (PAT).
+
+   Step 1: Generate a PAT
+     → Go to: https://dev.azure.com/{your-org}/_usersettings/tokens
+     → Click "New Token"
+     → Name: "IQ Update Plugin"
+     → Scopes: Work Items (Read)
+     → Expiration: 90 days (or custom)
+     → Click "Create" and copy the token
+
+   Step 2: Create .env file
+     Create a file at: .iq-update/.env
+     With these contents:
+
+       ADO_PAT=your-token-here
+       ADO_ORG=your-org-name
+       ADO_PROJECT=your-project-name
+       ADO_USE_VSCOM=true
+
+     Notes:
+     - ADO_PAT: Your Personal Access Token (required)
+     - ADO_ORG: Your Azure DevOps organization name (required)
+     - ADO_PROJECT: Your Azure DevOps project name (required)
+     - ADO_USE_VSCOM: Set to "true" for {org}.visualstudio.com URLs,
+       omit for dev.azure.com URLs (optional, default: dev.azure.com)
+
+     Optional variables (rarely needed):
+     - ADO_BASE_URL: Full base URL override (e.g., https://custom-host/org)
+     - ADO_OUT_DIR: Output directory for fetched tickets (default: current dir)
+
+   ═══════════════════════════════════════════════════════
+   ```
+
+   After showing the guide, ask the developer:
+   ```
+   Would you like to:
+     (a) Continue /iq-init without ticket fetching (you can set up .env later)
+     (b) Pause here so you can create .env first, then re-run /iq-init
+   ```
+
+   If the developer chooses (a): log a warning and continue to the next step:
+   ```
+   Azure DevOps:  ⚠ .env not configured — /iq-plan will require manual ticket paste
+   ```
+   If the developer chooses (b): STOP and let them set up the file.
+
+   **IMPORTANT:** The `.env` file contains secrets (the PAT). Verify that `.env` is
+   listed in `.iq-update/.gitignore`. If it is NOT listed, add it automatically and
+   inform the developer:
+   ```
+   NOTE: Added .env to .iq-update/.gitignore to prevent accidental secret exposure.
+   ```
+
+6. Check for province-like directories to confirm this is a TBW carrier folder:
    - Look for at least ONE directory matching a known province name (see the province
      lookup table below)
    - If no province directories found, STOP and tell the developer:
@@ -285,6 +405,11 @@ _meta:
 carrier_name: "{Detected carrier name, e.g., Portage Mutual}"
 carrier_prefix: "{Detected prefix, e.g., PORT}"
 root_path: "{Absolute path to carrier folder}"
+
+# -- Python Environment ------------------------------------------------------
+# Discovered by /iq-init preflight check. Used by all downstream skills
+# to run validators. Cached here so each command doesn't re-discover.
+python_cmd: "{Full path to working python executable, e.g., C:/Users/.../python.exe}"
 
 # -- Province Definitions -----------------------------------------------------
 # Each province has: code, full folder name, hab_code, LOBs, and SHARDCLASS presence.
@@ -526,10 +651,14 @@ For the top-level `functions` map, use the MOST RECENT dated file's definition
 
 #### 6.2 COUNT CALL SITES
 
-For each discovered function/sub name, count non-comment references across all `.vb`
-files under the codebase root:
+For each discovered function/sub name, count non-comment references across `.vb`
+files under the codebase root. **Scope to latest versions only:** For each
+province/LOB combination, identify the most recent date-named version folder
+(highest YYYYMMDD). Only scan `.vb` files from those latest folders, plus the
+province `Code/` and `SHARDCLASS/` / `SharedClass/` directories. This prevents
+older version folders from inflating call counts.
 
-1. Search all `.vb` files for the function name as a whole word (`\b{name}\b`)
+1. Search the scoped `.vb` files for the function name as a whole word (`\b{name}\b`)
 2. **Exclude** the definition line itself (the line matching Step 6.1's regex)
 3. **Exclude** commented lines (lines where the first non-whitespace character is `'`)
 4. **Exclude** lines inside `Imports` statements
@@ -1033,7 +1162,7 @@ echo -n "{concatenated sorted paths}" | sha256sum | cut -d' ' -f1
 - **Intake agent** -- to map province/LOB mentions in the Summary of Changes to real paths
 - **Analyzer agent** -- to find Code/ files, detect shared modules, check blast radius
 - **Planner agent** -- to build execution plans with correct paths
-- **Rate Modifier** -- to locate files and construct new filenames
+- **Change Engine** -- to locate files and construct new filenames
 - **Reviewer** -- to validate completeness across all affected LOBs
 
 If config.yaml is wrong, EVERY downstream agent will fail. This is why /iq-init
@@ -1100,7 +1229,7 @@ After init completes, show the developer the full workflow roadmap:
               dates, updates .vbproj references, and applies all
               rate/logic changes. Internal review included.
 
- /iq-review   Final validation. Runs 7 validators, generates diffs
+ /iq-review   Final validation. Runs 8 validators, generates diffs
               and traceability reports → Gate 2 approval → DONE.
 
  /iq-investigate  Ask targeted questions about the codebase at any

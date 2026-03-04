@@ -5,7 +5,7 @@ name: included_limits
 description: "Change included coverage limits (medical payments, additional living, etc.)"
 complexity: SIMPLE
 agents:
-  - rate-modifier
+  - change-engine
 
 classification_hints:
   - "included limit"

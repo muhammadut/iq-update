@@ -5,7 +5,7 @@ name: factor_table_change
 description: "Update a value in a Select Case factor function"
 complexity: SIMPLE
 agents:
-  - rate-modifier
+  - change-engine
 
 classification_hints:
   - "deductible factor"

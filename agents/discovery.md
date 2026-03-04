@@ -4,22 +4,22 @@
 
 Read the actual code for the target province + LOB. Trace the calculation flow
 from CalcMain through shared code files. Identify every function relevant to the
-SRDs. Return a structured code understanding document that feeds ALL downstream
-agents.
+change requests. Return a structured code understanding document that feeds ALL
+downstream agents.
 
 **Runs EVERY TIME — not confidence-gated.** Tokens are cheap. Always read the code.
 
 ## Pipeline Position
 
 ```
-Intake → [DISCOVERY] → Decomposer → Analyzer → Planner
+Intake → [DISCOVERY] → Analyzer → Decomposer → Planner
           ^^^^^^^^^^^
           YOU ARE HERE
 ```
 
 **Input:**
-- `parsed/change_spec.yaml` — province, LOBs, effective_date, target_folders
-- `parsed/srds/srd-NNN.yaml` — individual SRD files from Intake
+- `parsed/change_requests.yaml` — province, LOBs, effective_date, target_folders
+- `parsed/requests/cr-NNN.yaml` — individual change request files from Intake
 - `.iq-workstreams/config.yaml` — carrier configuration
 - Target .vbproj files, CalcMain.vb, Code/ files (on disk)
 
@@ -36,18 +36,18 @@ steps are the same. The agent discovers what exists rather than assuming.
 
 ### Step 1: FIND THE ENTRY POINT
 
-Read CalcMain.vb from the target version folder (path from change_spec.yaml
+Read CalcMain.vb from the target version folder (path from change_requests.yaml
 target_folders). CalcMain is always a thin shell — a single main function that
 calls out to shared code.
 
-1.1. Pick the first target folder from `change_spec.yaml["target_folders"]`.
+1.1. Pick the first target folder from `change_requests.yaml["target_folders"]`.
      Resolve the full path:
 
 ```python
 import os
 
 codebase_root = manifest["codebase_root"]
-target_folder = change_spec["target_folders"][0]
+target_folder = change_requests["target_folders"][0]
 calcmain_path = os.path.join(codebase_root, target_folder["path"], "CalcMain.vb")
 ```
 
@@ -189,10 +189,10 @@ Category              Pattern                                 Read?
 Shared module (hab)   mod_Common_{PROV}Hab{DATE}.vb           YES — primary target
 Algorithms (auto)     mod_Algorithms_{PROV}Auto{DATE}.vb      YES — if auto LOB
 DisSur (auto)         mod_DisSur_{PROV}Auto{DATE}.vb          YES — if auto LOB
-CalcOption dispatch   CalcOption_{PROV}{LOB}{DATE}.vb          YES — for endorsement SRDs
-Option files          Option_*_{PROV}{LOB}{DATE}.vb            Read if SRD targets endorsements
-Liability files       Liab_*_{PROV}{LOB}{DATE}.vb              Read if SRD targets liability options
-Other                 (everything else)                         Skip unless SRD grep hits
+CalcOption dispatch   CalcOption_{PROV}{LOB}{DATE}.vb          YES — for endorsement requests
+Option files          Option_*_{PROV}{LOB}{DATE}.vb            Read if request targets endorsements
+Liability files       Liab_*_{PROV}{LOB}{DATE}.vb              Read if request targets liability options
+Other                 (everything else)                         Skip unless request grep hits
 ```
 
 2.3. Read the primary shared code file(s). For large files (>2,000 lines), build
@@ -201,17 +201,17 @@ Other                 (everything else)                         Skip unless SRD 
 
 ---
 
-### Step 3: TRACE THE CALL CHAIN (Per SRD)
+### Step 3: TRACE THE CALL CHAIN (Per Change Request)
 
-For each SRD from Intake, find where its target concept appears in the
+For each change request from Intake, find where its target concept appears in the
 calculation flow and read the actual function body.
 
-3.1. For each SRD, determine the search strategy:
+3.1. For each change request, determine the search strategy:
 
 ```
-SRD MATCHING STRATEGIES
+CHANGE REQUEST MATCHING STRATEGIES
 ------------------------------------------------------------
-SRD Title Pattern           Search Strategy
+Request Title Pattern           Search Strategy
 "liability premiums"        Find functions with "Liability" in CalcMain flow
 "deductible factor"         Find functions with "Deductible" or "DisSur" in flow
 "base rates" (auto)         Find functions with "BasePrem" or "BaseRate" in mod_Algorithms
@@ -320,7 +320,7 @@ def find_related_functions(func_index, target_name, category_keywords):
     return related
 ```
 
-3.4. For endorsement/option SRDs, read the CalcOption dispatch file and extract
+3.4. For endorsement/option change requests, read the CalcOption dispatch file and extract
      the routing table:
 
 ```python
@@ -428,9 +428,9 @@ calculation_flow:
     note: "{optional note — e.g., DAT file lookup}"
   # ... one entry per function call from CalcMain, in order
 
-srd_targets:
-  srd-001:
-    title: "{SRD title from Intake}"
+request_targets:
+  cr-001:
+    title: "{change request title from Intake}"
     resolved: true                     # false if function could not be found
     resolved_function: "{exact function name found in code}"
     resolved_file: "{exact path to Code/ file}"
@@ -453,18 +453,18 @@ srd_targets:
       ' First 30 lines of the function body
       ' (enough for downstream agents to understand structure)
 
-  srd-002:
-    # ... same structure per SRD
+  cr-002:
+    # ... same structure per change request
 
-  srd-003:    # Example of an unresolved SRD
-    title: "{SRD title}"
+  cr-003:    # Example of an unresolved request
+    title: "{request title}"
     resolved: false
     resolved_function: null
     resolved_file: null
     search_attempted: "{what was searched for}"
     suggestion: "{grep suggestion for manual investigation}"
 
-# Only present if endorsement/option SRDs exist
+# Only present if endorsement/option change requests exist
 dispatch_map:
   "{PROV}_{LOB}":
     categories:
@@ -473,7 +473,7 @@ dispatch_map:
           function: "{function_name}"
       # ...
 
-# For downstream Logic Modifier — peer function templates
+# For downstream Change Engine — peer function templates
 peer_functions:
   "{target_function_name}":
     - name: "{peer function name}"
@@ -496,10 +496,10 @@ vehicle_types:
 Discovery complete:
   Entry point: {main_function} in {CalcMain path}
   Calculation flow: {N} functions traced
-  SRD targets resolved: {N}/{total SRDs}
-    SRD-001: {title} → {function} in {file}
-    SRD-002: {title} → {function} in {file}
-  Unresolved SRDs: {list, if any — with grep suggestions}
+  Request targets resolved: {N}/{total requests}
+    CR-001: {title} → {function} in {file}
+    CR-002: {title} → {function} in {file}
+  Unresolved requests: {list, if any — with grep suggestions}
   Related functions flagged: {N}
   Peer templates found: {N}
 ```
@@ -512,9 +512,9 @@ If any step fails, the agent continues with partial results:
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
-| CalcMain.vb not found | No calculation_flow | SRD targets still resolved via grep |
+| CalcMain.vb not found | No calculation_flow | Request targets still resolved via grep |
 | .vbproj parse fails | No file categorization | Use config.yaml naming patterns |
-| Function not found for SRD | srd_targets entry has `resolved: false` | Decomposer falls back to heuristics |
+| Function not found for CR | request_targets entry has `resolved: false` | Decomposer falls back to heuristics |
 | CalcOption not readable | No dispatch_map | Decomposer uses pattern matching |
 | Empty code_discovery.yaml | All downstream agents degrade gracefully | Each agent has existing fallback logic |
 | Partial write / malformed YAML | Consumers' `load_yaml` fails | Consumers wrap in try/except, treat as absent |
@@ -533,6 +533,6 @@ The agent does NOT hardcode function names. It follows a universal framework:
 2. **Extract call sequence** → regex for function calls (any TBW CalcMain)
 3. **Resolve files** → .vbproj tells which Code/ file each function lives in
 4. **Read and trace** → follow calls, read bodies (universal)
-5. **Match SRDs to functions** → by name patterns, grep, or CalcOption dispatch
+5. **Match change requests to functions** → by name patterns, grep, or CalcOption dispatch
 
 Different carriers have different names but the same discovery process.

@@ -3,13 +3,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Environment secrets (Azure DevOps PAT, org, project)
+.env
+
 # Review / development artifacts (not part of production plugin)
 codex-reviews/
 codex-review-plan.md
-
-# Old monolith agent specs (superseded by progressive-loading directories)
-agents/rate-modifier.md
-agents/logic-modifier.md
 
 # OS files
 .DS_Store

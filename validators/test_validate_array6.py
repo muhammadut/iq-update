@@ -6,7 +6,7 @@ manifest.yaml, operations_log.yaml, file_hashes.yaml, and fake VB.NET
 source files on disk.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_array6.py -v
 """
 
@@ -139,22 +139,22 @@ def _build_workstream(tmpdir, *, source_files=None, target_files=None,
 # ---------------------------------------------------------------------------
 
 def _make_rate_op(filepath, operation_id, changes, status="COMPLETED",
-                  agent="rate-modifier"):
-    """Build a single operations_log entry for a rate-modifier operation.
+                  change_type="value_editing"):
+    """Build a single operations_log entry for a value-editing operation.
 
     Args:
         filepath: Relative file path.
-        operation_id: Operation ID string (e.g., "op-001-01").
+        operation_id: Intent ID string (e.g., "intent-001").
         changes: list of dicts with "line", "before", "after" keys.
         status: Operation status (default: "COMPLETED").
-        agent: Agent name (default: "rate-modifier").
+        change_type: Change type (default: "value_editing").
 
     Returns:
         dict: An operation entry for operations_log.yaml.
     """
     return {
         "file": filepath,
-        "agent": agent,
+        "change_type": change_type,
         "status": status,
         "operation": operation_id,
         "changes": changes,
@@ -182,21 +182,21 @@ def test_clean_pass_all_array6_valid():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-001-01", [
+            _make_rate_op(rel_path, "intent-001", [
                 {
                     "line": 4,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00, 28.73, 410.00, 28.73, 130.00)",
                     "after":  "    Case 1 : varRates = Array6(512.59, 28.73, 463.03, 28.73, 575.10, 28.73, 420.16, 28.73, 132.74)",
                 },
             ]),
-            _make_rate_op(rel_path, "op-001-02", [
+            _make_rate_op(rel_path, "intent-002", [
                 {
                     "line": 5,
                     "before": "    Case 2 : varRates = Array6(480.00, 25.50, 430.00, 25.50, 540.00, 25.50, 390.00, 25.50, 120.00)",
                     "after":  "    Case 2 : varRates = Array6(490.00, 25.50, 440.00, 25.50, 550.00, 25.50, 400.00, 25.50, 125.00)",
                 },
             ]),
-            _make_rate_op(rel_path, "op-001-03", [
+            _make_rate_op(rel_path, "intent-003", [
                 {
                     "line": 6,
                     "before": "    Case 3 : varRates = Array6(520.00, 30.00, 470.00, 30.00, 590.00, 30.00, 430.00, 30.00, 135.00)",
@@ -238,7 +238,7 @@ def test_arg_count_mismatch():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-001-01", [
+            _make_rate_op(rel_path, "intent-001", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00, 28.73, 410.00, 28.73, 130.00)",
@@ -266,7 +266,7 @@ def test_arg_count_mismatch():
         assert finding["expected"] == "9 arguments"
         assert finding["actual"] == "8 arguments"
         assert finding["file"] == rel_path
-        assert finding["operation"] == "op-001-01"
+        assert finding["operation"] == "intent-001"
 
 
 # ===========================================================================
@@ -288,7 +288,7 @@ def test_empty_argument():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-002-01", [
+            _make_rate_op(rel_path, "intent-004", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00, 28.73, 410.00, 28.73, 130.00)",
@@ -337,7 +337,7 @@ def test_unmatched_parens():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-003-01", [
+            _make_rate_op(rel_path, "intent-005", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00)",
@@ -392,7 +392,7 @@ def test_full_file_scan_clean():
 
         # Operation touches the file but changes are non-Array6
         ops = [
-            _make_rate_op(rel_path, "op-004-01", [
+            _make_rate_op(rel_path, "intent-006", [
                 {
                     "line": 20,
                     "before": "    dblDedDiscount = -0.075",
@@ -436,7 +436,7 @@ def test_full_file_scan_corruption():
         # don't involve the corrupt line (the corruption is pre-existing
         # or was introduced by a different edit)
         ops = [
-            _make_rate_op(rel_path, "op-005-01", [
+            _make_rate_op(rel_path, "intent-007", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(90.00, 190.00, 290.00)",
@@ -481,7 +481,7 @@ def test_test_usage_skipped():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-006-01", [
+            _make_rate_op(rel_path, "intent-008", [
                 {
                     "line": 2,
                     "before": "    If IsItemInArray(intClass, Array6(1, 2, 3, 4)) Then",
@@ -524,7 +524,7 @@ def test_commented_array6_skipped():
 
         # A simple non-Array6 operation to put this file in inventory
         ops = [
-            _make_rate_op(rel_path, "op-007-01", [
+            _make_rate_op(rel_path, "intent-009", [
                 {
                     "line": 4,
                     "before": "    Case 1 : varRates = Array6(140.00, 240.00, 340.00)",
@@ -567,14 +567,14 @@ def test_no_array6_in_changes():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-008-01", [
+            _make_rate_op(rel_path, "intent-010", [
                 {
                     "line": 4,
                     "before": "    Case 1000 : dblDedDiscount = -0.075",
                     "after":  "    Case 1000 : dblDedDiscount = -0.080",
                 },
             ]),
-            _make_rate_op(rel_path, "op-008-02", [
+            _make_rate_op(rel_path, "intent-011", [
                 {
                     "line": 5,
                     "before": "    Case 2500 : dblDedDiscount = -0.140",
@@ -614,7 +614,7 @@ def test_assignment_to_test_mutation():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-009-01", [
+            _make_rate_op(rel_path, "intent-012", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00)",
@@ -639,7 +639,7 @@ def test_assignment_to_test_mutation():
         assert mutation_findings[0]["file"] == rel_path
         assert mutation_findings[0]["expected"] == "rate assignment (var = Array6(...))"
         assert mutation_findings[0]["actual"] == "test/lookup usage"
-        assert mutation_findings[0]["operation"] == "op-009-01"
+        assert mutation_findings[0]["operation"] == "intent-012"
 
 
 # ===========================================================================
@@ -664,7 +664,7 @@ def test_assignment_pattern_lost():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-010-01", [
+            _make_rate_op(rel_path, "intent-013", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00)",
@@ -710,7 +710,7 @@ def test_assignment_variable_changed():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-011-01", [
+            _make_rate_op(rel_path, "intent-014", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00)",
@@ -762,9 +762,9 @@ def test_snapshot_arg_count_mismatch():
             End Function
         """)
 
-        # Operation adds this file to the rate-modifier inventory
+        # Operation adds this file to the value_editing inventory
         ops = [
-            _make_rate_op(rel_path, "op-012-01", [
+            _make_rate_op(rel_path, "intent-015", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00)",
@@ -779,7 +779,7 @@ def test_snapshot_arg_count_mismatch():
             ops_log_operations=ops,
             effective_date="20260101",
             snapshot_files={
-                "mod_Common_BCHab20260101.vb.snapshot": snapshot_content,
+                "BritishColumbia__Code__mod_Common_BCHab20260101.vb.snapshot": snapshot_content,
             },
         )
 
@@ -814,14 +814,14 @@ def test_non_completed_operations_skipped():
 
         # One PENDING op with bad arg count, one FAILED op with empty arg
         ops = [
-            _make_rate_op(rel_path, "op-013-01", [
+            _make_rate_op(rel_path, "intent-016", [
                 {
                     "line": 2,
                     "before": "    Case 1 : varRates = Array6(100.00, 200.00, 300.00)",
                     "after":  "    Case 1 : varRates = Array6(100.00, 200.00)",
                 },
             ], status="PENDING"),
-            _make_rate_op(rel_path, "op-013-02", [
+            _make_rate_op(rel_path, "intent-017", [
                 {
                     "line": 2,
                     "before": "    Case 1 : varRates = Array6(100.00, 200.00, 300.00)",
@@ -844,12 +844,12 @@ def test_non_completed_operations_skipped():
 
 
 # ===========================================================================
-# Test 15: Non-rate-modifier agents are skipped
+# Test 15: Non-value-editing change types are skipped
 # ===========================================================================
 
-def test_non_rate_modifier_agent_skipped():
-    """Operations from agents other than rate-modifier or orchestrator
-    should not be checked by Phase 1."""
+def test_non_value_editing_change_type_skipped():
+    """Operations with change_type other than value_editing or
+    structure_insertion should not be checked by Phase 1."""
     with tempfile.TemporaryDirectory() as tmpdir:
         rel_path = "Alberta/Code/CalcOption_ABHome20260101.vb"
         file_content = textwrap.dedent("""\
@@ -859,15 +859,15 @@ def test_non_rate_modifier_agent_skipped():
             End Function
         """)
 
-        # logic-modifier operation with Array6 in changes (unusual but possible)
+        # flow_modification operation with Array6 in changes (unusual but possible)
         ops = [
-            _make_rate_op(rel_path, "op-014-01", [
+            _make_rate_op(rel_path, "intent-018", [
                 {
                     "line": 2,
                     "before": "    varRates = Array6(100.00, 200.00, 300.00)",
                     "after":  "    varRates = Array6(100.00, 200.00)",
                 },
-            ], agent="logic-modifier"),
+            ], change_type="flow_modification"),
         ]
 
         manifest_path = _build_workstream(
@@ -878,8 +878,8 @@ def test_non_rate_modifier_agent_skipped():
         )
 
         result = validate(manifest_path)
-        # logic-modifier ops are not checked by _check_ops_log
-        # and this file is not in rate_modifier_files inventory
+        # flow_modification ops are not checked by _check_ops_log
+        # and this file is not in value_files inventory
         assert result["passed"] is True
         assert len(result["findings"]) == 0
 
@@ -904,7 +904,7 @@ def test_full_file_scan_empty_arg():
 
         # A clean operation to get this file into inventory
         ops = [
-            _make_rate_op(rel_path, "op-015-01", [
+            _make_rate_op(rel_path, "intent-019", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(90.00, 190.00, 290.00)",
@@ -947,7 +947,7 @@ def test_multiple_findings_one_operation():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-016-01", [
+            _make_rate_op(rel_path, "intent-020", [
                 {
                     "line": 3,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00, 28.73, 560.00, 28.73, 410.00, 28.73, 130.00)",
@@ -973,12 +973,12 @@ def test_multiple_findings_one_operation():
 
 
 # ===========================================================================
-# Test 18: Orchestrator agent changes are also checked
+# Test 18: structure_insertion changes are also checked
 # ===========================================================================
 
-def test_orchestrator_agent_checked():
-    """Operations by the 'orchestrator' agent (not just 'rate-modifier')
-    should also be checked for Array6 issues."""
+def test_structure_insertion_also_checked():
+    """Operations with change_type 'structure_insertion' (not just
+    'value_editing') should also be checked for Array6 issues."""
     with tempfile.TemporaryDirectory() as tmpdir:
         rel_path = "Alberta/Code/mod_Common_ABHab20260101.vb"
         file_content = textwrap.dedent("""\
@@ -988,13 +988,13 @@ def test_orchestrator_agent_checked():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-017-01", [
+            _make_rate_op(rel_path, "intent-021", [
                 {
                     "line": 2,
                     "before": "    Case 1 : varRates = Array6(500.00, 28.73, 450.00)",
                     "after":  "    Case 1 : varRates = Array6(512.59, 28.73)",
                 },
-            ], agent="orchestrator"),
+            ], change_type="structure_insertion"),
         ]
 
         manifest_path = _build_workstream(
@@ -1025,7 +1025,7 @@ def test_file_not_found_fullscan():
         rel_path = "Alberta/Code/mod_MISSING_FILE20260101.vb"
 
         ops = [
-            _make_rate_op(rel_path, "op-018-01", [
+            _make_rate_op(rel_path, "intent-022", [
                 {
                     "line": 3,
                     "before": "    varRates = Array6(100.00, 200.00)",
@@ -1065,7 +1065,7 @@ def test_message_on_clean_pass():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-019-01", [
+            _make_rate_op(rel_path, "intent-023", [
                 {
                     "line": 2,
                     "before": "    Case 1 : varRates = Array6(90.00, 190.00, 290.00)",
@@ -1099,7 +1099,7 @@ def test_message_on_failure():
         """)
 
         ops = [
-            _make_rate_op(rel_path, "op-020-01", [
+            _make_rate_op(rel_path, "intent-024", [
                 {
                     "line": 2,
                     "before": "    Case 1 : varRates = Array6(90.00, 190.00, 290.00)",
@@ -1222,3 +1222,39 @@ class TestSplitTopLevelCommas:
 
     def test_single_value(self):
         assert split_top_level_commas("42") == ["42"]
+
+
+# ===========================================================================
+# Test: Path traversal produces BLOCKER finding, not a crash
+# ===========================================================================
+
+def test_path_traversal_blocked():
+    """A file path like '../../etc/passwd' in the operations log should
+    produce a 'path_traversal' BLOCKER finding, not a crash or file read
+    outside the carrier root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        traversal_path = "../../etc/passwd"
+
+        ops = [
+            _make_rate_op(traversal_path, "intent-099", [
+                {
+                    "line": 1,
+                    "before": "    varRates = Array6(100.00, 200.00)",
+                    "after":  "    varRates = Array6(110.00, 210.00)",
+                },
+            ]),
+        ]
+
+        manifest_path = _build_workstream(
+            tmpdir,
+            ops_log_operations=ops,
+            effective_date="20260101",
+        )
+
+        result = validate(manifest_path)
+        assert result["passed"] is False
+
+        traversal_findings = [f for f in result["findings"]
+                              if f["issue"] == "path_traversal"]
+        assert len(traversal_findings) == 1
+        assert "etc/passwd" in traversal_findings[0]["actual"]

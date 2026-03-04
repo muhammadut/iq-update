@@ -6,25 +6,27 @@ Produce a dependency-ordered execution plan and the approval document presented 
 Gate 1. The plan should be so clear and informative that the developer spends minimal
 time reviewing it. Capture file hashes for TOCTOU protection.
 
-The Planner is a FULLY AUTOMATED agent -- it has NO developer interaction. It reads
-Analyzer output, computes optimal execution ordering, generates before/after previews,
-and writes two output files: a human-readable plan (`plan/execution_plan.md`) and a
-machine-readable execution order (`plan/execution_order.yaml`). The orchestrator
-(/iq-plan) presents the human-readable plan to the developer at Gate 1.
+The Planner has ONE developer interaction point: resolving open questions from the
+intent graph. It reads Analyzer output, collects any open questions from intents,
+presents them to the developer, records answers, then computes optimal execution
+ordering, generates before/after previews, and writes two output files: a
+human-readable plan (`plan/execution_plan.md`) and a machine-readable execution
+order (`plan/execution_order.yaml`). The orchestrator (/iq-plan) presents the
+human-readable plan to the developer at Gate 1.
 
 **Core philosophy: Make the plan scannable.** A simple 5% rate increase should take
-10 seconds to review. A complex multi-SRD hab workflow should clearly show phases,
+10 seconds to review. A complex multi-CR hab workflow should clearly show phases,
 dependencies, and risk areas so the developer knows exactly what will happen.
 
 ## Pipeline Position
 
 ```
-[INPUT] --> Intake --> Decomposer --> Analyzer --> PLANNER --> [GATE 1] --> Modifiers --> Reviewer --> [GATE 2]
-                                                  ^^^^^^^
+[INPUT] --> Intake --> Discovery --> Analyzer --> Decomposer --> PLANNER --> [GATE 1] --> Change Engine --> Reviewer --> [GATE 2]
+                                                                ^^^^^^^
 ```
 
-- **Upstream:** Analyzer agent (provides updated `analysis/operations/op-{SRD}-{NN}.yaml` with line numbers + `analysis/blast_radius.md` + `analysis/files_to_copy.yaml` + `analysis/dependency_graph.yaml`)
-- **Downstream:** Rate Modifier and Logic Modifier agents (consume `plan/execution_order.yaml`); Developer reviews `plan/execution_plan.md` at Gate 1; /iq-execute reads `execution/file_hashes.yaml`
+- **Upstream:** Decomposer agent (provides `analysis/intent_graph.yaml` with intents, dependencies, and open questions) + Analyzer agent (provides `analysis/blast_radius.md` + `analysis/files_to_copy.yaml`)
+- **Downstream:** Change Engine (consumes `plan/execution_order.yaml`); Developer reviews `plan/execution_plan.md` at Gate 1; /iq-execute reads `execution/file_hashes.yaml`
 
 ---
 
@@ -44,7 +46,7 @@ lobs: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]  # Target LOBs
 effective_date: "20260101"                     # Target effective date (YYYYMMDD)
 state: "ANALYZING"                             # Current workflow state (Planner expects ANALYZING)
 risk_indicators:                               # Risk flags from earlier agents
-  shared_module: true                          # true if any operation targets a shared module
+  shared_module: true                          # true if any intent targets a shared module
   cross_lob: false                             # true if cross-LOB file references detected
   cross_province_shared: false                 # true if cross-province shared files flagged
 ```
@@ -74,85 +76,131 @@ naming:
 uses this for display labels and naming pattern validation -- NOT for discovering
 files (the Analyzer already did that).
 
-### analysis/dependency_graph.yaml (from Decomposer, preserved by Analyzer)
+### analysis/intent_graph.yaml (from Decomposer)
 
 ```yaml
 workflow_id: "20260101-SK-Hab-rate-update"
-decomposer_version: "1.0"
+decomposer_version: "2.0"
 decomposed_at: "2026-02-27T10:00:00"
-total_operations: 6                            # Total operations decomposed
-total_out_of_scope: 1                          # SRDs marked out of scope (DAT file, etc.)
+total_intents: 4                               # Total intents decomposed
+total_out_of_scope: 1                          # CRs marked out of scope (DAT file, etc.)
 
-out_of_scope:                                  # SRDs with no operations (tracked for audit)
-  - srd: "srd-001"
+out_of_scope:                                  # CRs with no intents (tracked for audit)
+  - cr: "cr-001"
     title: "[DAT FILE] Increase hab dwelling base rates by 5%"
     reason: "dat_file_warning: Hab dwelling base rates are in DAT files, not VB code"
 
-shared_operations:                             # Operations targeting shared modules
-  op-002-01:
-    srd: "srd-002"
-    description: "Change $5000 deductible factor from -0.20 to -0.22"
+intents:
+  - id: "intent-001"
+    cr: "cr-002"
+    title: "Change $5000 deductible factor from -0.20 to -0.22"
+    description: "Modify the $5000 deductible discount factor"
+    capability: "value_editing"                # value_editing | structure_insertion | file_creation
+    strategy_hint: "factor-table"              # Optional hint for Change Engine
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "SetDisSur_Deductible"
-    agent: "rate-modifier"
-    depends_on: []                             # List of op IDs this depends on
-  # ... more operations
+    depends_on: []                             # List of intent IDs this depends on
+    confidence: 0.95                           # 0.0 to 1.0
+    open_questions: []                         # Questions needing developer input
+    # -- Analyzer-enriched fields --
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 2100
+    function_line_end: 2250
+    target_lines:
+      - line: 2202
+        content: "                Case 5000 : dblDedDiscount = -0.2"
+        context: "Case 5000 deductible"
+        rounding: null
+        value_count: 1
+    parameters:
+      old_value: -0.20
+      new_value: -0.22
+    candidates_shown: 1
+    developer_confirmed: true
 
-lob_operations:                                # Operations targeting LOB-specific files
-  op-005-01:
-    srd: "srd-005"
-    description: "Add DAT IDs to ResourceID.vb"
-    file: "Saskatchewan/Home/20260101/ResourceID.vb"
-    file_type: "lob_specific"
-    agent: "logic-modifier"
+  - id: "intent-002"
+    cr: "cr-003"
+    title: "Add $50,000 sewer backup coverage tier"
+    description: "Insert new Case block for $50K sewer backup"
+    capability: "structure_insertion"
+    strategy_hint: null
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    file_type: "shared_module"
+    function: "GetSewerBackupPremium"
     depends_on: []
-  # ... more operations
+    confidence: 0.7
+    open_questions:
+      - "Ticket specifies $50K tier but no premium amount. What value?"
+      - "Insert before or after existing $25K case?"
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 3800
+    function_line_end: 3900
+    insertion_point:
+      line: 3850
+      position: "after"
+      context: "After Case 25000 block"
+      section: "GetSewerBackupPremium Select Case"
+    parameters:
+      coverage_amount: 50000
+      premium: null                            # Needs developer answer
+    candidates_shown: 1
+    developer_confirmed: true
 
-partial_approval_constraints: []               # Inter-SRD coupling for Gate 1
+  # ... more intents
+
+partial_approval_constraints: []               # Inter-CR coupling for Gate 1
 # Non-empty example:
-#   - srd: "srd-003"
-#     requires_srd: "srd-001"
-#     reason: "op-003-01 depends on op-001-01"
-#     blocking_operations: ["op-003-01"]
-#     required_operations: ["op-001-01"]
+#   - cr: "cr-003"
+#     requires_cr: "cr-001"
+#     reason: "intent-003 depends on intent-001"
+#     blocking_intents: ["intent-003"]
+#     required_intents: ["intent-001"]
 
 execution_order:                               # Topological order from Decomposer
-  - "op-002-01"
-  - "op-003-01"
-  - "op-004-01"
-  - "op-004-02"
-  - "op-005-01"
-  - "op-005-02"
+  - "intent-001"
+  - "intent-002"
+  - "intent-003"
+  - "intent-004"
 ```
 
 **Purpose:** The Planner uses `execution_order` as the starting point for phase
-grouping, `depends_on` edges to build the DAG, and `partial_approval_constraints`
-to carry forward into the plan for Gate 1 partial approval.
+grouping, `depends_on` edges to build the DAG, `open_questions` for the Q&A step,
+and `partial_approval_constraints` to carry forward into the plan for Gate 1
+partial approval. The `cr` field on each intent links back to the parent change
+request for partial approval grouping.
 
-### analysis/operations/op-{SRD}-{NN}.yaml (from Analyzer)
+### Intent fields used by the Planner
 
-Each operation file contains Decomposer fields + Analyzer additions. The Planner
-reads ALL operation files. Key fields used by the Planner:
+Each intent in `intent_graph.yaml` contains Decomposer fields + Analyzer
+enrichments. The Planner reads ALL intents. Key fields used by the Planner:
 
-**Common fields (all operation types):**
+**Core intent fields (all intents):**
 
 | Field | Type | Purpose for Planner |
 |-------|------|-------------------|
-| `id` | string | Operation identifier (e.g., "op-002-01") |
-| `srd` | string | Parent SRD ID (for partial approval grouping) |
+| `id` | string | Intent identifier (e.g., "intent-001") |
+| `cr` | string | Parent CR ID (for partial approval grouping) |
 | `title` | string | Human-readable title (used in phase titles) |
 | `description` | string | Detailed description (included in plan) |
+| `capability` | string | "value_editing", "structure_insertion", or "file_creation" |
+| `strategy_hint` | string or null | Optional hint for Change Engine (e.g., "array6-multiply") |
 | `file` | string | Target file path (for file grouping) |
 | `file_type` | string | shared_module, lob_specific, etc. (for risk) |
 | `function` | string or null | Target function name (for display) |
-| `agent` | string | "rate-modifier" or "logic-modifier" (for display) |
-| `depends_on` | list | Operation IDs this depends on (for DAG) |
-| `blocked_by` | list | Reverse of depends_on (for reference) |
-| `pattern` | string | Change pattern type (for display) |
+| `depends_on` | list | Intent IDs this depends on (for DAG) |
+| `confidence` | float | 0.0 to 1.0 (for risk assessment) |
+| `open_questions` | list | Questions needing developer input (for Q&A step) |
+| `strategy_hint` | string or null | Optional hint for Change Engine; used by Planner for before/after display |
 | `parameters` | dict | Pattern-specific parameters (for before/after) |
 
-**Analyzer-added fields (rate-modifier operations):**
+**Analyzer-enriched fields (value_editing intents):**
 
 | Field | Type | Purpose for Planner |
 |-------|------|-------------------|
@@ -177,7 +225,7 @@ reads ALL operation files. Key fields used by the Planner:
 | `analysis_notes` | string | Analyzer's notes (included in plan) |
 | `has_expressions` | bool | Whether Array6 args contain arithmetic (for risk) |
 
-**Analyzer-added fields (logic-modifier operations):**
+**Analyzer-enriched fields (structure_insertion intents):**
 
 | Field | Type | Purpose for Planner |
 |-------|------|-------------------|
@@ -193,7 +241,7 @@ reads ALL operation files. Key fields used by the Planner:
 | `insertion_point.section` | string | Section of file (for display) |
 | `existing_constants` | list | Already-defined constants (for context) |
 | `duplicate_check` | string | Whether constant already exists |
-| `needs_new_file` | bool | Whether Logic Modifier must CREATE a file |
+| `needs_new_file` | bool | Whether Change Engine must CREATE a file |
 | `template_reference` | string or null | Path to template file (if needs_new_file) |
 | `candidates_shown` | int | How many candidates shown |
 | `developer_confirmed` | bool | Whether developer confirmed |
@@ -210,7 +258,7 @@ files:
     source_hash: "sha256:a1b2c3d4..."          # For TOCTOU cross-check
     target_exists: false                        # Whether target already on disk
     shared_by: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-    operations_in_file: ["op-002-01", "op-003-01", "op-004-01", "op-004-02"]
+    intents_in_file: ["intent-001", "intent-002", "intent-003", "intent-004"]
     vbproj_updates:                            # .vbproj reference updates needed
       - vbproj: "Saskatchewan/Home/20260101/Cssi.IntelliQuote.PORTSKHOME20260101.vbproj"
         old_include: "..\\Code\\mod_Common_SKHab20250901.vb"
@@ -231,7 +279,7 @@ Human-readable blast radius report. The Planner reads this for:
 ### Actual source files (on disk)
 
 The Planner reads the actual VB.NET source files referenced by `source_file` in each
-operation to:
+intent to:
 - Extract current code lines for before/after display
 - Compute expected new values for the "after" column
 - Verify that file_hash values are still fresh
@@ -245,7 +293,7 @@ operation to:
 Human-readable plan for developer approval at Gate 1. Two formats depending on
 complexity.
 
-#### SIMPLE format (1-2 operations, single file, LOW or MEDIUM risk)
+#### SIMPLE format (1-2 intents, single file, LOW or MEDIUM risk)
 
 ```markdown
 EXECUTION PLAN: {province_name} {LOB(s)} {effective_date}
@@ -257,7 +305,7 @@ FILE COPIES:
   {source_filename} -> {target_filename}
     .vbproj updates: {N} file(s)
 
-Phase 1: {title} ({op_id}) [{agent}]
+Phase 1: {title} ({intent_id}) [{capability}]
   File: {target_file}
   Function: {function_name}()
   Action: {description}
@@ -273,18 +321,18 @@ Phase 1: {title} ({op_id}) [{agent}]
 Approve this plan? Say "approve" to proceed or tell me what to change.
 ```
 
-#### COMPLEX format (3+ operations, multiple files, or HIGH risk)
+#### COMPLEX format (3+ intents, multiple files, or HIGH risk)
 
 ```markdown
 EXECUTION PLAN: {province_name} {LOB(s)} {effective_date}
 ====================================================
 
-Summary: {N} operations across {N} files, {risk} risk
+Summary: {N} intents across {N} files, {risk} risk
 LOBs affected: {comma-separated list}
 Shared module: {filename} (if applicable)
 
 OUT OF SCOPE (flagged, not executed):
-  SRD-{NNN}: {title} -- {reason}
+  CR-{NNN}: {title} -- {reason}
 
 FILE COPIES:
   {source_filename} -> {target_filename}
@@ -295,11 +343,11 @@ FILE COPIES:
     Used by: {LOB}
     .vbproj updates: {N} file(s)
 
-Phase 1: {title} ({op_id}) [{agent}]
+Phase 1: {title} ({intent_id}) [{capability}]
   File: {target_file}
-  {details depending on operation type -- see below}
+  {details depending on intent type -- see below}
 
-Phase 2: {title} ({op_id}) [{agent}, depends on Phase {N}]
+Phase 2: {title} ({intent_id}) [{capability}, depends on Phase {N}]
   File: {target_file}
   {details}
 
@@ -312,25 +360,25 @@ IMPACT SUMMARY:
   Risk level: {risk} -- {reason}
 
 CONTEXT TIERS:
-  Tier 1 (value substitution):  {N} operations
-  Tier 2 (logic with patterns): {N} operations
-  Tier 3 (full context):        {N} operations
+  Tier 1 (value substitution):  {N} intents
+  Tier 2 (logic with patterns): {N} intents
+  Tier 3 (full context):        {N} intents
 
 WARNINGS:
   {any warnings from analysis or risk computation}
 
 PARTIAL APPROVAL CONSTRAINTS:
-  {if any inter-SRD dependencies exist, show them here}
+  {if any inter-CR dependencies exist, show them here}
   {otherwise omit this section}
 
 Approve this plan? Say "approve" to proceed or tell me what to change.
 ```
 
-#### Phase detail formats by operation type
+#### Phase detail formats by capability type
 
-**rate-modifier (base_rate_increase with Array6):**
+**value_editing (Array6 multiply):**
 ```markdown
-Phase {N}: {title} ({op_id}) [rate-modifier]
+Phase {N}: {title} ({intent_id}) [value_editing]
   File: {target_file}
   Function: {function_name}()
   Action: Multiply all Array6 values by {factor}
@@ -350,9 +398,9 @@ Phase {N}: {title} ({op_id}) [rate-modifier]
   Range: {min%} to {max%} (rounding variation)
 ```
 
-**rate-modifier (factor_table_change):**
+**value_editing (factor table):**
 ```markdown
-Phase {N}: {title} ({op_id}) [rate-modifier]
+Phase {N}: {title} ({intent_id}) [value_editing]
   File: {target_file}
   Function: {function_name}()
   Action: Change Case {case_value} factor
@@ -370,9 +418,9 @@ Phase {N}: {title} ({op_id}) [rate-modifier]
     After:  {line}
 ```
 
-**logic-modifier (insertion):**
+**structure_insertion (code insertion):**
 ```markdown
-Phase {N}: {title} ({op_id}) [logic-modifier{, depends on Phase M}]
+Phase {N}: {title} ({intent_id}) [structure_insertion{, depends on Phase M}]
   File: {target_file}
   {Function: {function_name}() | Location: {location}}
   Action: {description}
@@ -383,9 +431,9 @@ Phase {N}: {title} ({op_id}) [logic-modifier{, depends on Phase M}]
     + {new code line 3}
 ```
 
-**logic-modifier (new file):**
+**file_creation (new file):**
 ```markdown
-Phase {N}: {title} ({op_id}) [logic-modifier]
+Phase {N}: {title} ({intent_id}) [file_creation]
   CREATE NEW FILE: {target_file}
   Template: {template_reference}
   Action: {description}
@@ -398,24 +446,24 @@ Machine-readable plan consumed by /iq-execute.
 ```yaml
 # File: plan/execution_order.yaml
 # Generated by Planner agent
-# Consumed by /iq-execute orchestrator and modifier agents
+# Consumed by /iq-execute orchestrator and Change Engine
 
-planner_version: "1.0"
+planner_version: "2.0"
 generated_at: "2026-02-27T11:00:00"            # ISO 8601 timestamp
 workflow_id: "20260101-SK-Hab-rate-update"      # From manifest.yaml
 
 # Summary metrics
 total_phases: 5                                 # Number of execution phases
-total_operations: 6                             # Number of operations across all phases
+total_intents: 4                                # Number of intents across all phases
 total_value_changes: 107                        # Sum of all value edits
 total_file_copies: 2                            # Number of file copies
 total_vbproj_updates: 7                         # Number of .vbproj reference updates
 risk_level: "MEDIUM"                            # LOW | MEDIUM | HIGH
 risk_reasons:                                   # List of reasons for the risk level
-  - "4 operations in shared module (6 LOBs)"
+  - "3 intents in shared module (6 LOBs)"
   - "Mixed rounding in GetLiabilityBundlePremiums"
 tier_distribution:                               # From Step 9.5
-  tier_1: 4                                      # Value substitution (thin capsule)
+  tier_1: 2                                      # Value substitution (thin capsule)
   tier_2: 2                                      # Logic with patterns (FUB + canonical)
   tier_3: 0                                      # Full context (FUB + peers + cross-file)
 
@@ -443,112 +491,86 @@ file_copies:
         new_include: "..\\Code\\CalcOption_SKHOME20260101.vb"
 
 # Execution phases (dependency-ordered)
-# Operations within the same phase can execute in parallel ONLY if they target
-# different files. Same-file operations are NEVER in the same phase.
+# Intents within the same phase can run in parallel ONLY if they target
+# different files. Same-file intents are NEVER in the same phase.
 phases:
   - phase: 1
-    title: "Add ELITECOMP constant"             # Human-readable phase title
-    operations: ["op-003-01"]                   # List of operation IDs in this phase
-    agent: "logic-modifier"                     # Primary agent (or "mixed" if both)
-    rationale: "Must define constant before referencing it"
+    title: "Change $5000 deductible factor"     # Human-readable phase title
+    intents: ["intent-001"]                     # List of intent IDs in this phase
+    rationale: "Independent, no dependencies"
     depends_on_phases: []                       # Phase numbers this phase depends on
 
   - phase: 2
-    title: "Add rate table selection"
-    operations: ["op-003-02"]
-    agent: "logic-modifier"
-    rationale: "Depends on Phase 1 (ELITECOMP constant)"
-    depends_on_phases: [1]
+    title: "Add $50K sewer backup tier"
+    intents: ["intent-002"]
+    rationale: "Independent of Phase 1"
+    depends_on_phases: []
 
   - phase: 3
-    title: "Base rate increase"
-    operations: ["op-004-01"]
-    agent: "rate-modifier"
-    rationale: "Independent of Phases 1-2"
+    title: "Multiply liability bundle premiums by 1.03"
+    intents: ["intent-003"]
+    rationale: "Independent"
     depends_on_phases: []
 
   - phase: 4
-    title: "Deductible factor changes + Liability extension premiums"
-    operations: ["op-002-01", "op-004-02"]
-    agent: "mixed"
-    rationale: "op-002-01 and op-004-02 target different functions, sequenced after op-004-01 for same-file bottom-to-top"
+    title: "Multiply liability extension premiums by 1.03"
+    intents: ["intent-004"]
+    rationale: "Same file as Phase 3, sequenced for bottom-to-top"
     depends_on_phases: [3]
 
-  - phase: 5
-    title: "Add DAT IDs to ResourceID.vb"
-    operations: ["op-005-01", "op-005-02", "op-005-03", "op-005-04", "op-005-05", "op-005-06"]
-    agent: "logic-modifier"
-    rationale: "LOB-specific changes, all independent, different files"
-    depends_on_phases: []
-
-# Within each file, operations are ordered highest line number first
+# Within each file, intents are ordered highest line number first
 # to prevent line-number drift from insertions/deletions above.
-# The modifier agents MUST follow this order exactly.
+# The Change Engine MUST follow this order exactly.
 file_operation_order:
   "Saskatchewan/Code/mod_Common_SKHab20260101.vb":
-    - op_id: "op-004-02"                       # line 4106 (highest)
+    - intent_id: "intent-004"                  # line 4106 (highest)
       line_ref: 4106                            # Reference line for ordering
       tier: 2                                   # From Step 9.5
-    - op_id: "op-004-01"                       # line 4012
+    - intent_id: "intent-003"                  # line 4012
       line_ref: 4012
       tier: 2
-    - op_id: "op-002-01"                       # line 2108
-      line_ref: 2108
-      tier: 1
-    - op_id: "op-003-02"                       # line ~435
-      line_ref: 435
+    - intent_id: "intent-002"                  # line 3850
+      line_ref: 3850
       tier: 2
-    - op_id: "op-003-01"                       # line ~23 (lowest)
-      line_ref: 23
+    - intent_id: "intent-001"                  # line 2202 (lowest in this file)
+      line_ref: 2202
       tier: 1
 
 # Flat execution sequence combining topological sort + bottom-to-top.
-# /iq-execute processes operations in EXACTLY this order.
+# /iq-execute processes intents in EXACTLY this order.
 # This is the authoritative execution order.
 execution_sequence:
-  - op_id: "op-005-01"                         # Phase 5 - independent, different file
-    phase: 5
-    file: "Saskatchewan/Home/20260101/ResourceID.vb"
-    agent: "logic-modifier"
-    tier: 1                                     # From Step 9.5
-  - op_id: "op-005-02"                         # Phase 5 - independent, different file
-    phase: 5
-    file: "Saskatchewan/Condo/20260101/ResourceID.vb"
-    agent: "logic-modifier"
-    tier: 1
-  # ... (remaining op-005-* for other LOBs)
-  - op_id: "op-004-02"                         # Phase 4 - bottom-to-top (line 4106)
+  - intent_id: "intent-004"                    # Phase 4 - bottom-to-top (line 4106)
     phase: 4
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    agent: "rate-modifier"
-    tier: 2
-  - op_id: "op-004-01"                         # Phase 3 - bottom-to-top (line 4012)
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"            # Optional
+    tier: 2                                     # From Step 9.5
+  - intent_id: "intent-003"                    # Phase 3 - bottom-to-top (line 4012)
     phase: 3
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    agent: "rate-modifier"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
     tier: 2
-  - op_id: "op-002-01"                         # Phase 4 - bottom-to-top (line 2108)
-    phase: 4
-    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    agent: "rate-modifier"
-    tier: 1
-  - op_id: "op-003-02"                         # Phase 2 - bottom-to-top (line ~435)
+  - intent_id: "intent-002"                    # Phase 2 - bottom-to-top (line 3850)
     phase: 2
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    agent: "logic-modifier"
+    capability: "structure_insertion"
+    strategy_hint: null
     tier: 2
-  - op_id: "op-003-01"                         # Phase 1 - bottom-to-top (line ~23)
+  - intent_id: "intent-001"                    # Phase 1 - bottom-to-top (line 2202)
     phase: 1
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    agent: "logic-modifier"
+    capability: "value_editing"
+    strategy_hint: "factor-table"
     tier: 1
 
-# Partial approval constraints (carried from dependency_graph.yaml)
+# Partial approval constraints (carried from intent_graph.yaml)
 partial_approval_constraints: []
 # Non-empty example:
-#   - srd: "srd-003"
-#     requires_srd: "srd-001"
-#     reason: "op-003-01 depends on op-001-01"
+#   - cr: "cr-003"
+#     requires_cr: "cr-001"
+#     reason: "intent-003 depends on intent-001"
 ```
 
 ### execution/file_hashes.yaml
@@ -558,7 +580,7 @@ partial_approval_constraints: []
 # Captured by Planner at plan generation time
 # Used by /iq-execute for TOCTOU protection before each file write
 
-planner_version: "1.0"
+planner_version: "2.0"
 captured_at: "2026-02-27T11:00:00"             # ISO 8601 timestamp
 workflow_id: "20260101-SK-Hab-rate-update"
 
@@ -586,8 +608,8 @@ files:
   # ... one entry per file that will be read, copied, or modified
 ```
 
-**File hash handoff from Analyzer:** The Analyzer writes `file_hash` in each operation
-file. The Planner collects these hashes and writes `execution/file_hashes.yaml` at
+**File hash handoff from Analyzer:** The Analyzer writes `file_hash` in each intent
+entry. The Planner collects these hashes and writes `execution/file_hashes.yaml` at
 plan generation time. If a file's hash has changed between the Analyzer run and the
 Planner run, the Planner MUST abort with a stale hash error (see Step 3).
 
@@ -604,16 +626,15 @@ Before starting, confirm the following exist and are readable:
 
 1. The workflow directory at `.iq-workstreams/changes/{workstream-name}/`
 2. The `manifest.yaml` inside that directory
-3. The `analysis/dependency_graph.yaml` (from Decomposer, preserved by Analyzer)
-4. The `analysis/operations/` directory with individual op-{SRD}-{NN}.yaml files
-5. The `analysis/files_to_copy.yaml` (from Analyzer)
-6. The `analysis/blast_radius.md` (from Analyzer)
-7. The `.iq-workstreams/config.yaml` (for naming patterns and hab flags)
+3. The `analysis/intent_graph.yaml` (from Decomposer, with Analyzer enrichments)
+4. The `analysis/files_to_copy.yaml` (from Analyzer)
+5. The `analysis/blast_radius.md` (from Analyzer)
+6. The `.iq-workstreams/config.yaml` (for naming patterns and hab flags)
 
 If any of these are missing, STOP and report:
 ```
 [Planner] Cannot proceed -- missing required file: {path}
-          Was the Analyzer completed? Check manifest.yaml for analyzer.status = "completed".
+          Was the Decomposer completed? Check manifest.yaml for decomposer.status = "completed".
 ```
 
 ### Step 1: Load Context
@@ -633,19 +654,18 @@ If any of these are missing, STOP and report:
    - `provinces.{province}.hab_code` (e.g., "SKHab")
    - `naming` patterns (for display and validation)
 
-1.3. Read `analysis/dependency_graph.yaml`. Extract:
-   - `total_operations` (int)
+1.3. Read `analysis/intent_graph.yaml`. Extract:
+   - `total_intents` (int)
    - `total_out_of_scope` (int)
    - `out_of_scope` (list -- for inclusion in plan header)
-   - `shared_operations` (dict -- op_id -> operation summary)
-   - `lob_operations` (dict -- op_id -> operation summary)
+   - `intents` (list -- each intent with id, cr, title, capability, etc.)
    - `partial_approval_constraints` (list -- for inclusion in plan)
    - `execution_order` (list -- topological order from Decomposer)
 
 1.4. Read `analysis/files_to_copy.yaml`. Extract:
    - `total_files` (int)
    - `files` (list -- each with source, target, source_hash, target_exists,
-     shared_by, operations_in_file, vbproj_updates)
+     shared_by, intents_in_file, vbproj_updates)
 
 1.5. Build the **plan context** object:
 
@@ -656,114 +676,115 @@ Workflow:       {workflow_id}
 Province:       {province_name} ({province})
 LOBs:           {comma-separated lobs}
 Effective Date: {effective_date}
-Operations:     {total_operations} in scope, {total_out_of_scope} out of scope
+Intents:        {total_intents} in scope, {total_out_of_scope} out of scope
 File Copies:    {total_files} files to copy
 Risk Indicators: shared_module={Y/N}, cross_lob={Y/N}, cross_province={Y/N}
 ```
 
-If `total_operations == 0`:
+If `total_intents == 0`:
 ```
-[Planner] No in-scope operations to plan. All SRDs were out of scope.
-          Out of scope: {list of out_of_scope SRD titles}
+[Planner] No in-scope intents to plan. All CRs were out of scope.
+          Out of scope: {list of out_of_scope CR titles}
           Writing empty plan and exiting.
 ```
 Write an empty execution_plan.md (with the out-of-scope list) and an empty
-execution_order.yaml (total_phases: 0, total_operations: 0), then exit.
+execution_order.yaml (total_phases: 0, total_intents: 0), then exit.
 
-### Step 2: Load and Validate Operations
+### Step 2: Load and Validate Intents
 
-**Action:** Read all operation files and build the operation lookup map.
+**Action:** Read all intents from intent_graph.yaml and build the intent lookup map.
 
-2.1. List all files in `analysis/operations/` matching pattern `op-*.yaml`.
+2.1. Read the `intents` list from `analysis/intent_graph.yaml`.
 
-2.2. For each operation file, read and validate required fields:
+2.2. For each intent, validate required fields:
 
-**For ALL operations:**
-- `id` (string, must match filename pattern op-{SRD}-{NN})
-- `srd` (string, must start with "srd-")
+**For ALL intents:**
+- `id` (string, must match pattern intent-NNN)
+- `cr` (string, must start with "cr-")
 - `title` (string, non-empty)
+- `capability` (string, one of: "value_editing", "structure_insertion", "file_creation")
 - `file` (string, non-empty path)
 - `file_type` (string, one of: shared_module, lob_specific, cross_lob, local)
-- `agent` (string, one of: "rate-modifier", "logic-modifier")
 - `depends_on` (list, may be empty)
+- `confidence` (float, 0.0 to 1.0)
+- `open_questions` (list, may be empty)
 - `source_file` (string, path to existing source file)
 - `target_file` (string, path to target file)
 - `needs_copy` (bool)
 - `file_hash` (string, "sha256:...")
 
-**Additional for rate-modifier operations:**
+**Additional for value_editing intents:**
 - `function_line_start` (int, > 0)
 - `function_line_end` (int, > function_line_start)
 - `target_lines` (list, non-empty, each with line, content, context, rounding)
 
-**Additional for logic-modifier operations:**
+**Additional for structure_insertion intents:**
 - `insertion_point` (dict with line, position, context) OR `needs_new_file: true`
 
 If any required field is missing or invalid:
 ```
-[Planner] ERROR: Operation {op_id} is missing required field: {field_name}
-          File: analysis/operations/{op_id}.yaml
-          Was the Analyzer completed? This field should have been added by the Analyzer.
+[Planner] ERROR: Intent {intent_id} is missing required field: {field_name}
+          Was the Decomposer/Analyzer completed? This field should be present.
 ```
 
-2.3. Build the **operation lookup map**: `op_id -> full operation data`
+2.3. Build the **intent lookup map**: `intent_id -> full intent data`
 
 ```python
 # Pseudocode
-op_map = {}
-for op_file in operation_files:
-    op = read_yaml(op_file)
-    op_map[op['id']] = op
+intent_map = {}
+for intent in intent_graph['intents']:
+    intent_map[intent['id']] = intent
 ```
 
-2.4. Count operations by agent type:
+2.4. Count intents by capability:
 
 ```
-OPERATION COUNTS
+INTENT COUNTS
 ---------------------------------------------------------
-Rate-modifier operations:  {N}
-Logic-modifier operations: {N}
-Total:                     {N}
+value_editing intents:        {N}
+structure_insertion intents:  {N}
+file_creation intents:        {N}
+Total:                        {N}
 ```
 
-2.5. Validate that all operation IDs referenced in `execution_order` from
-dependency_graph.yaml exist in the op_map:
+2.5. Validate that all intent IDs referenced in `execution_order` from
+intent_graph.yaml exist in the intent_map:
 
 ```python
-for op_id in dependency_graph['execution_order']:
-    if op_id not in op_map:
-        STOP("Operation {op_id} in execution_order not found in analysis/operations/")
+for intent_id in intent_graph['execution_order']:
+    if intent_id not in intent_map:
+        STOP("Intent {intent_id} in execution_order not found in intents list")
 ```
 
-2.6. Validate that all `depends_on` references point to existing operations:
+2.6. Validate that all `depends_on` references point to existing intents:
 
 ```python
-for op_id, op in op_map.items():
-    for dep_id in op.get('depends_on', []):
-        if dep_id not in op_map:
-            STOP("Operation {op_id} depends on {dep_id} which does not exist")
+for intent_id, intent in intent_map.items():
+    for dep_id in intent.get('depends_on', []):
+        if dep_id not in intent_map:
+            STOP("Intent {intent_id} depends on {dep_id} which does not exist")
 ```
 
 ### Step 3: Verify File Hashes (Freshness Check)
 
 **Action:** Verify that no source files have changed since the Analyzer ran.
 
-3.1. Collect all unique `source_file` paths across all operations:
+3.1. Collect all unique `source_file` paths across all intents:
 
 ```python
 source_files = {}
-for op_id, op in op_map.items():
-    src = op['source_file']
+for intent_id, intent in intent_map.items():
+    src = intent['source_file']
     if src not in source_files:
         source_files[src] = {
-            'expected_hash': op['file_hash'],
-            'operations': [op_id]
+            'expected_hash': intent['file_hash'],
+            'intents': [intent_id]
         }
     else:
-        source_files[src]['operations'].append(op_id)
-        # Verify consistency: all ops on the same file should have the same hash
-        if source_files[src]['expected_hash'] != op['file_hash']:
-            STOP("Hash inconsistency for {src}: op {op_id} has different hash than others")
+        source_files[src]['intents'].append(intent_id)
+        # Verify consistency: all intents on the same file should have the same hash
+        if source_files[src]['expected_hash'] != intent['file_hash']:
+            STOP("Hash inconsistency for {src}: intent {intent_id} has different hash than others")
 ```
 
 3.2. For each unique source file, compute the current SHA-256:
@@ -780,7 +801,7 @@ for filepath, info in source_files.items():
           File: {filepath}
           Expected hash: {info['expected_hash']}
           Current hash:  {current_hash}
-          Affected operations: {', '.join(info['operations'])}
+          Affected intents: {', '.join(info['intents'])}
 
           Someone modified this file between the Analyzer and Planner runs.
           Re-run from /iq-plan to get fresh analysis.
@@ -792,30 +813,140 @@ for filepath, info in source_files.items():
 [Planner] File hash verification: {N} source files checked, all current.
 ```
 
+### Step 3.5: Resolve Open Questions (Q&A Flow)
+
+**Action:** Collect open questions from intents, present them to the developer,
+record answers, and update intents with resolved values.
+
+3.5.1. Scan all intents for `open_questions`:
+
+```python
+questions_by_intent = {}
+for intent_id, intent in intent_map.items():
+    if intent.get('open_questions'):
+        questions_by_intent[intent_id] = {
+            'title': intent['title'],
+            'questions': intent['open_questions'],
+            'confidence': intent['confidence'],
+        }
+```
+
+3.5.2. If no intents have open questions, skip this step entirely:
+
+```python
+if not questions_by_intent:
+    # Log and skip
+    print("[Planner] No open questions -- skipping Q&A step.")
+    # Proceed directly to Step 4
+```
+
+3.5.3. Present questions to the developer, grouped by intent:
+
+```
+Questions requiring your input:
+
+Intent intent-002: "Add $50,000 sewer backup coverage tier"
+  Q1: Ticket specifies $50K tier but no premium amount. What value?
+  Q2: Insert before or after existing $25K case?
+
+Intent intent-003: "Increase extension premiums by 3%"
+  Q3: GetLiabilityExtensionPremiums found in same category as bundle.
+      Should extension premiums also get the 3% increase? (Y/N)
+```
+
+Number questions sequentially across all intents (Q1, Q2, Q3...) for easy
+reference. Include the intent title for context.
+
+3.5.4. Record answers in `plan/developer_decisions.yaml`:
+
+```yaml
+# File: plan/developer_decisions.yaml
+decisions:
+  - question: "Ticket specifies $50K tier but no premium amount. What value?"
+    answer: "125.00"
+    intent: "intent-002"
+    question_index: 1
+    answered_at: "2026-03-03T10:00:00"
+  - question: "Insert before or after existing $25K case?"
+    answer: "After the $25K case"
+    intent: "intent-002"
+    question_index: 2
+    answered_at: "2026-03-03T10:00:30"
+  - question: "Should extension premiums also get the 3% increase?"
+    answer: "Yes"
+    intent: "intent-003"
+    question_index: 3
+    answered_at: "2026-03-03T10:01:00"
+```
+
+3.5.5. Update intents based on answers:
+
+```python
+for decision in decisions:
+    intent_id = decision['intent']
+    intent = intent_map[intent_id]
+
+    # Fill in missing values from answers
+    # (implementation depends on question type -- e.g., premium amount fills
+    #  intent['parameters']['premium'])
+    apply_answer_to_intent(intent, decision)
+
+    # Remove the answered question from open_questions
+    if decision['question'] in intent['open_questions']:
+        intent['open_questions'].remove(decision['question'])
+
+    # Bump confidence on resolved intents
+    if not intent['open_questions']:
+        # All questions answered -- raise confidence
+        intent['confidence'] = min(intent['confidence'] + 0.2, 1.0)
+```
+
+3.5.6. Verify all open questions are resolved:
+
+```python
+remaining = {
+    intent_id: info
+    for intent_id, info in questions_by_intent.items()
+    if intent_map[intent_id].get('open_questions')
+}
+if remaining:
+    # Some questions unanswered -- warn but don't block
+    print("[Planner] WARNING: {len(remaining)} intent(s) still have open questions.")
+    print("          Plan will proceed with lower confidence for these intents.")
+else:
+    print("[Planner] All open questions resolved. Proceeding with plan generation.")
+```
+
+3.5.7. Log completion:
+```
+[Planner] Q&A step complete: {N} questions answered across {M} intents.
+          Developer decisions saved to plan/developer_decisions.yaml
+```
+
 ### Step 4: Build Dependency DAG
 
 **Action:** Parse dependency edges into a directed acyclic graph and validate it.
 
-4.1. Build adjacency lists from operation `depends_on` fields:
+4.1. Build adjacency lists from intent `depends_on` fields:
 
 ```python
-# Forward edges: op -> list of ops that depend on it
-dependents = {op_id: [] for op_id in op_map}
-# Reverse edges: op -> list of ops it depends on
-dependencies = {op_id: [] for op_id in op_map}
+# Forward edges: intent -> list of intents that depend on it
+dependents = {intent_id: [] for intent_id in intent_map}
+# Reverse edges: intent -> list of intents it depends on
+dependencies = {intent_id: [] for intent_id in intent_map}
 
-for op_id, op in op_map.items():
-    for dep_id in op.get('depends_on', []):
-        dependents[dep_id].append(op_id)
-        dependencies[op_id].append(dep_id)
+for intent_id, intent in intent_map.items():
+    for dep_id in intent.get('depends_on', []):
+        dependents[dep_id].append(intent_id)
+        dependencies[intent_id].append(dep_id)
 ```
 
 4.2. Validate: no self-loops.
 
 ```python
-for op_id, op in op_map.items():
-    if op_id in op.get('depends_on', []):
-        STOP("[Planner] ERROR: Self-loop detected: {op_id} depends on itself")
+for intent_id, intent in intent_map.items():
+    if intent_id in intent.get('depends_on', []):
+        STOP("[Planner] ERROR: Self-loop detected: {intent_id} depends on itself")
 ```
 
 4.3. Validate: all referenced nodes exist (already done in Step 2.6).
@@ -824,8 +955,8 @@ for op_id, op in op_map.items():
 
 ```python
 WHITE, GRAY, BLACK = 0, 1, 2
-color = {op_id: WHITE for op_id in op_map}
-parent = {op_id: None for op_id in op_map}
+color = {intent_id: WHITE for intent_id in intent_map}
+parent = {intent_id: None for intent_id in intent_map}
 cycle_path = []
 
 def dfs(node):
@@ -848,9 +979,9 @@ def dfs(node):
     color[node] = BLACK
     return None
 
-for op_id in op_map:
-    if color[op_id] == WHITE:
-        cycle = dfs(op_id)
+for intent_id in intent_map:
+    if color[intent_id] == WHITE:
+        cycle = dfs(intent_id)
         if cycle:
             cycle_str = ' -> '.join(cycle)
             STOP(f"""
@@ -859,7 +990,7 @@ for op_id in op_map:
 
           This should have been caught by the Decomposer. The dependency
           graph has a cycle that makes it impossible to determine execution
-          order. Please review the depends_on fields in these operations
+          order. Please review the depends_on fields in these intents
           and break the cycle.
 """)
 ```
@@ -878,15 +1009,15 @@ for op_id in op_map:
 ```python
 from collections import deque
 
-in_degree = {op_id: len(dependencies[op_id]) for op_id in op_map}
+in_degree = {intent_id: len(dependencies[intent_id]) for intent_id in intent_map}
 ```
 
 5.2. Initialize queue with all nodes having in-degree 0:
 
 ```python
-# Tie-breaking: sort by op_id for deterministic output
+# Tie-breaking: sort by intent_id for deterministic output
 queue = deque(sorted(
-    [op_id for op_id, deg in in_degree.items() if deg == 0],
+    [intent_id for intent_id, deg in in_degree.items() if deg == 0],
     key=lambda x: x
 ))
 ```
@@ -895,25 +1026,25 @@ queue = deque(sorted(
 
 ```python
 topo_order = []
-topo_level = {}  # op_id -> topological level (for phase grouping)
+topo_level = {}  # intent_id -> topological level (for phase grouping)
 
-current_level = {op_id: 0 for op_id in queue}
+current_level = {intent_id: 0 for intent_id in queue}
 
 while queue:
-    op_id = queue.popleft()
-    topo_order.append(op_id)
-    topo_level[op_id] = current_level[op_id]
+    intent_id = queue.popleft()
+    topo_order.append(intent_id)
+    topo_level[intent_id] = current_level[intent_id]
 
-    for dep_op in sorted(dependents[op_id]):
-        in_degree[dep_op] -= 1
+    for dep_intent in sorted(dependents[intent_id]):
+        in_degree[dep_intent] -= 1
         # Level of dependent = max level of all its dependencies + 1
-        current_level.setdefault(dep_op, 0)
-        current_level[dep_op] = max(
-            current_level[dep_op],
-            current_level[op_id] + 1
+        current_level.setdefault(dep_intent, 0)
+        current_level[dep_intent] = max(
+            current_level[dep_intent],
+            current_level[intent_id] + 1
         )
-        if in_degree[dep_op] == 0:
-            queue.append(dep_op)
+        if in_degree[dep_intent] == 0:
+            queue.append(dep_intent)
     # Re-sort queue for deterministic tie-breaking
     queue = deque(sorted(queue, key=lambda x: x))
 ```
@@ -921,13 +1052,13 @@ while queue:
 5.4. Verify completeness:
 
 ```python
-if len(topo_order) != len(op_map):
+if len(topo_order) != len(intent_map):
     processed = set(topo_order)
-    stuck = [op_id for op_id in op_map if op_id not in processed]
+    stuck = [intent_id for intent_id in intent_map if intent_id not in processed]
     STOP(f"""
 [Planner] ERROR: Topological sort incomplete!
-          Processed: {len(topo_order)} of {len(op_map)} operations
-          Stuck operations: {', '.join(stuck)}
+          Processed: {len(topo_order)} of {len(intent_map)} intents
+          Stuck intents: {', '.join(stuck)}
 
           This indicates a cycle that DFS missed (should not happen).
           Re-run from /iq-plan to re-analyze.
@@ -936,13 +1067,13 @@ if len(topo_order) != len(op_map):
 
 5.5. Log the topological order:
 ```
-[Planner] Topological sort complete: {N} operations in {max_level + 1} levels.
+[Planner] Topological sort complete: {N} intents in {max_level + 1} levels.
           Order: {', '.join(topo_order)}
 ```
 
 ### Step 6: Group into Phases
 
-**Action:** Group operations into execution phases based on topological level and
+**Action:** Group intents into execution phases based on topological level and
 file conflicts.
 
 6.1. Start with topological levels as initial phase grouping:
@@ -950,14 +1081,14 @@ file conflicts.
 ```python
 # Group by topological level
 level_groups = {}
-for op_id in topo_order:
-    level = topo_level[op_id]
+for intent_id in topo_order:
+    level = topo_level[intent_id]
     level_groups.setdefault(level, [])
-    level_groups[level].append(op_id)
+    level_groups[level].append(intent_id)
 ```
 
-6.2. Within each level, split operations on the SAME file into separate phases.
-Operations on different files at the same topological level can stay together
+6.2. Within each level, split intents on the SAME file into separate phases.
+Intents on different files at the same topological level can stay together
 (they execute on different files, so no line-drift conflict):
 
 ```python
@@ -965,29 +1096,29 @@ phases = []
 phase_num = 0
 
 for level in sorted(level_groups.keys()):
-    ops_at_level = level_groups[level]
+    intents_at_level = level_groups[level]
 
     # Group by target file
     file_groups = {}
-    for op_id in ops_at_level:
-        target = op_map[op_id]['target_file']
+    for intent_id in intents_at_level:
+        target = intent_map[intent_id]['target_file']
         file_groups.setdefault(target, [])
-        file_groups[target].append(op_id)
+        file_groups[target].append(intent_id)
 
-    # Determine how many sub-phases needed (max ops on any single file)
-    max_per_file = max(len(ops) for ops in file_groups.values())
+    # Determine how many sub-phases needed (max intents on any single file)
+    max_per_file = max(len(intents) for intents in file_groups.values())
 
     for sub_phase_idx in range(max_per_file):
         phase_num += 1
-        phase_ops = []
-        for target_file, ops in file_groups.items():
-            if sub_phase_idx < len(ops):
-                phase_ops.append(ops[sub_phase_idx])
+        phase_intents = []
+        for target_file, intents in file_groups.items():
+            if sub_phase_idx < len(intents):
+                phase_intents.append(intents[sub_phase_idx])
 
-        if phase_ops:
+        if phase_intents:
             phases.append({
                 'phase': phase_num,
-                'operations': phase_ops,
+                'intents': phase_intents,
                 'topo_level': level,
             })
 ```
@@ -996,36 +1127,32 @@ for level in sorted(level_groups.keys()):
 
 ```python
 for phase in phases:
-    ops = phase['operations']
+    intents = phase['intents']
 
     # Determine title
-    if len(ops) == 1:
-        phase['title'] = op_map[ops[0]]['title']
+    if len(intents) == 1:
+        phase['title'] = intent_map[intents[0]]['title']
     else:
-        # Check if all ops share the same pattern
-        patterns = set(op_map[op_id]['pattern'] for op_id in ops)
-        if len(patterns) == 1:
-            pattern = patterns.pop()
-            phase['title'] = f"{len(ops)} {pattern.replace('_', ' ')} changes"
+        # Check if all intents share the same capability
+        capabilities = set(intent_map[intent_id]['capability'] for intent_id in intents)
+        if len(capabilities) == 1:
+            cap = capabilities.pop()
+            phase['title'] = f"{len(intents)} {cap.replace('_', ' ')} changes"
         else:
-            phase['title'] = f"Mixed changes ({len(ops)} operations)"
-
-    # Determine agent
-    agents = set(op_map[op_id]['agent'] for op_id in ops)
-    phase['agent'] = agents.pop() if len(agents) == 1 else "mixed"
+            phase['title'] = f"Mixed changes ({len(intents)} intents)"
 
     # Determine rationale
     if phase.get('topo_level', 0) == 0 and not any(
-        op_map[op_id].get('depends_on') for op_id in ops
+        intent_map[intent_id].get('depends_on') for intent_id in intents
     ):
         phase['rationale'] = "Independent, no dependencies"
     else:
         # Find which phases this depends on
         dep_phases = set()
-        for op_id in ops:
-            for dep_id in op_map[op_id].get('depends_on', []):
+        for intent_id in intents:
+            for dep_id in intent_map[intent_id].get('depends_on', []):
                 for prev_phase in phases:
-                    if dep_id in prev_phase['operations']:
+                    if dep_id in prev_phase['intents']:
                         dep_phases.add(prev_phase['phase'])
         if dep_phases:
             phase['rationale'] = f"Depends on Phase(s) {', '.join(str(p) for p in sorted(dep_phases))}"
@@ -1040,105 +1167,107 @@ for phase in phases:
 6.4. Log the phase structure:
 ```
 [Planner] Grouped into {N} phases:
-          Phase 1: {title} ({N} ops)
-          Phase 2: {title} ({N} ops)
+          Phase 1: {title} ({N} intents)
+          Phase 2: {title} ({N} intents)
           ...
 ```
 
 ### Step 7: Within-File Bottom-to-Top Ordering
 
-**Action:** For each file that has multiple operations across different phases,
+**Action:** For each file that has multiple intents across different phases,
 sort them by line number DESCENDING (highest line first).
 
-7.1. Build the file-to-operations map:
+7.1. Build the file-to-intents map:
 
 ```python
-file_ops = {}  # target_file -> list of (line_ref, op_id)
+file_intents = {}  # target_file -> list of (line_ref, intent_id)
 
-for op_id, op in op_map.items():
-    target = op['target_file']
-    file_ops.setdefault(target, [])
+for intent_id, intent in intent_map.items():
+    target = intent['target_file']
+    file_intents.setdefault(target, [])
 
     # Determine the reference line number for ordering
-    if op['agent'] == 'rate-modifier':
+    if intent['capability'] == 'value_editing':
         # Use the HIGHEST target_line for ordering
-        if op.get('target_lines'):
-            max_line = max(tl['line'] for tl in op['target_lines'])
+        if intent.get('target_lines'):
+            max_line = max(tl['line'] for tl in intent['target_lines'])
             line_ref = max_line
         else:
-            line_ref = op.get('function_line_start', 0)
-    elif op['agent'] == 'logic-modifier':
+            line_ref = intent.get('function_line_start', 0)
+    elif intent['capability'] == 'structure_insertion':
         # Use insertion_point.line for ordering
-        if op.get('insertion_point'):
-            line_ref = op['insertion_point']['line']
-        elif op.get('function_line_start'):
-            line_ref = op['function_line_start']
+        if intent.get('insertion_point'):
+            line_ref = intent['insertion_point']['line']
+        elif intent.get('function_line_start'):
+            line_ref = intent['function_line_start']
         else:
             line_ref = 0  # New files go last
+    else:
+        line_ref = intent.get('function_line_start', 0)
 
-    file_ops[target].append((line_ref, op_id))
+    file_intents[target].append((line_ref, intent_id))
 ```
 
-7.2. Sort each file's operations DESCENDING by line number:
+7.2. Sort each file's intents DESCENDING by line number:
 
 ```python
 file_operation_order = {}
 
-for target_file, ops_with_lines in file_ops.items():
+for target_file, intents_with_lines in file_intents.items():
     # Sort descending by line number (highest first = bottom-to-top)
-    sorted_ops = sorted(ops_with_lines, key=lambda x: x[0], reverse=True)
+    sorted_intents = sorted(intents_with_lines, key=lambda x: x[0], reverse=True)
     file_operation_order[target_file] = [
-        {'op_id': op_id, 'line_ref': line_ref}
-        for line_ref, op_id in sorted_ops
+        {'intent_id': intent_id, 'line_ref': line_ref}
+        for line_ref, intent_id in sorted_intents
     ]
 ```
 
-7.3. Log the bottom-to-top ordering for files with multiple operations:
+7.3. Log the bottom-to-top ordering for files with multiple intents:
 
 ```
 [Planner] Bottom-to-top ordering:
-          {target_file}: {op_id1} (line {N}) -> {op_id2} (line {M}) -> ...
+          {target_file}: {intent_id1} (line {N}) -> {intent_id2} (line {M}) -> ...
 ```
 
-**Why bottom-to-top matters:** When the Rate Modifier or Logic Modifier adds or
-removes lines in a file, all line numbers BELOW the edit stay the same, but all
-line numbers ABOVE the edit shift. By starting from the bottom (highest line
-numbers first), each edit only affects lines that have already been processed,
-so line-number references for remaining operations stay valid.
+**Why bottom-to-top matters:** When the Change Engine adds or removes lines in
+a file, all line numbers BELOW the edit stay the same, but all line numbers
+ABOVE the edit shift. By starting from the bottom (highest line numbers first),
+each edit only affects lines that have already been processed, so line-number
+references for remaining intents stay valid.
 
 ### Step 8: Extract Before/After Values
 
 **Action:** Read actual source files and compute expected before/after for each
-operation. This is the core of what makes the plan useful for developer review.
+intent. This is the core of what makes the plan useful for developer review.
 
 8.1. Read each unique source file once:
 
 ```python
 file_contents = {}
-for op_id, op in op_map.items():
-    src = op['source_file']
+for intent_id, intent in intent_map.items():
+    src = intent['source_file']
     if src not in file_contents:
         with open(src, 'r') as f:
             file_contents[src] = f.readlines()
 ```
 
-8.2. For each **rate-modifier** operation with `target_lines`:
+8.2. For each **value_editing** intent with `target_lines`:
 
 ```python
-for op_id, op in op_map.items():
-    if op['agent'] != 'rate-modifier':
+for intent_id, intent in intent_map.items():
+    if intent['capability'] != 'value_editing':
         continue
 
-    op['before_after'] = []
-    pattern = op['pattern']
-    params = op['parameters']
+    intent['before_after'] = []
+    strategy = intent.get('strategy_hint', '')
+    params = intent['parameters']
 
-    for tl in op.get('target_lines', []):
+    for tl in intent.get('target_lines', []):
         content = tl['content']
         line_num = tl['line']
         rounding = tl.get('rounding')
 
-        if pattern == 'base_rate_increase':
+        if strategy in ('array6-multiply', None) and params.get('factor'):
             factor = params['factor']
             # Parse Array6 values from content (or use pre-evaluated args if available)
             # e.g., "Array6(basePremium, 233, 274, 319, 372, 432, 502)"
@@ -1166,7 +1295,7 @@ for op_id, op in op_map.items():
 
             new_content = rebuild_array6_line(content, new_values)
 
-            op['before_after'].append({
+            intent['before_after'].append({
                 'line': line_num,
                 'context': tl['context'],
                 'before': content.strip(),
@@ -1175,7 +1304,7 @@ for op_id, op in op_map.items():
                 'value_count': tl.get('value_count', len(values)),
             })
 
-        elif pattern == 'factor_table_change':
+        elif strategy == 'factor-table' or params.get('case_value'):
             old_val = params['old_value']
             new_val = params['new_value']
             new_content = content.replace(str(old_val), str(new_val))
@@ -1185,7 +1314,7 @@ for op_id, op in op_map.items():
             else:
                 pct = None
 
-            op['before_after'].append({
+            intent['before_after'].append({
                 'line': line_num,
                 'context': tl['context'],
                 'before': content.strip(),
@@ -1194,47 +1323,51 @@ for op_id, op in op_map.items():
                 'pct_change': pct,
             })
 
-        elif pattern == 'included_limits':
+        else:
+            # Generic explicit value replacement
             old_val = params.get('old_value')
             new_val = params.get('new_value')
-            new_content = content.replace(str(old_val), str(new_val))
+            if old_val is not None and new_val is not None:
+                new_content = content.replace(str(old_val), str(new_val))
+            else:
+                new_content = content  # No computation possible
 
-            op['before_after'].append({
+            intent['before_after'].append({
                 'line': line_num,
                 'context': tl['context'],
                 'before': content.strip(),
                 'after': new_content.strip(),
-                'change': f"{old_val} -> {new_val}",
+                'change': f"{old_val} -> {new_val}" if old_val is not None else "",
             })
 ```
 
-8.3. For each **logic-modifier** operation:
+8.3. For each **structure_insertion** intent:
 
 ```python
-for op_id, op in op_map.items():
-    if op['agent'] != 'logic-modifier':
+for intent_id, intent in intent_map.items():
+    if intent['capability'] != 'structure_insertion':
         continue
 
-    if op.get('insertion_point'):
-        ip = op['insertion_point']
-        src_lines = file_contents[op['source_file']]
+    if intent.get('insertion_point'):
+        ip = intent['insertion_point']
+        src_lines = file_contents[intent['source_file']]
 
         # Extract context lines around insertion point
         line_idx = ip['line'] - 1  # 0-indexed
         context_before = src_lines[max(0, line_idx - 2):line_idx + 1]
         context_after = src_lines[line_idx + 1:min(len(src_lines), line_idx + 3)]
 
-        op['insertion_context'] = {
+        intent['insertion_context'] = {
             'lines_before': [l.rstrip() for l in context_before],
             'lines_after': [l.rstrip() for l in context_after],
             'insert_after_line': ip['line'],
             'insert_after_content': ip['context'],
         }
 
-    elif op.get('needs_new_file'):
-        op['new_file_info'] = {
-            'target_path': op['target_file'],
-            'template': op.get('template_reference', 'none'),
+    elif intent.get('needs_new_file'):
+        intent['new_file_info'] = {
+            'target_path': intent['target_file'],
+            'template': intent.get('template_reference', 'none'),
         }
 ```
 
@@ -1244,9 +1377,9 @@ for op_id, op in op_map.items():
 total_value_changes = 0
 all_pct_changes = []
 
-for op_id, op in op_map.items():
-    if op['agent'] == 'rate-modifier':
-        for ba in op.get('before_after', []):
+for intent_id, intent in intent_map.items():
+    if intent['capability'] == 'value_editing':
+        for ba in intent.get('before_after', []):
             if 'value_count' in ba:
                 total_value_changes += ba['value_count']
             else:
@@ -1279,6 +1412,12 @@ preserving exact whitespace and formatting from the original line. Replace only
 the numeric values inside the parentheses, keeping variable names and commas in
 their original positions.
 
+> **Note:** Before/after previews are **approximate**. The Planner computes preview
+> values using standard floating-point arithmetic. The Change Engine may produce
+> slightly different results due to its use of `Decimal` precision and
+> `ROUND_HALF_EVEN` (banker's rounding). Small discrepancies (< 0.01) between
+> previews and actual results are expected and not indicative of errors.
+
 ### Step 9: Compute Risk Level
 
 **Action:** Determine the overall risk level for the plan.
@@ -1294,24 +1433,24 @@ risk_reasons = []
 
 ```python
 # Multiple files
-unique_files = set(op['target_file'] for op in op_map.values())
+unique_files = set(intent['target_file'] for intent in intent_map.values())
 if len(unique_files) > 1:
     risk_level = "MEDIUM"
     risk_reasons.append(f"Multiple target files ({len(unique_files)})")
 
 # Shared module involved
-if any(op['file_type'] == 'shared_module' for op in op_map.values()):
+if any(intent['file_type'] == 'shared_module' for intent in intent_map.values()):
     risk_level = "MEDIUM"
-    shared_count = sum(1 for op in op_map.values() if op['file_type'] == 'shared_module')
-    risk_reasons.append(f"{shared_count} operations in shared module")
+    shared_count = sum(1 for intent in intent_map.values() if intent['file_type'] == 'shared_module')
+    risk_reasons.append(f"{shared_count} intents in shared module")
 
 # More than 100 value changes
 if total_value_changes > 100:
     risk_level = "MEDIUM"
     risk_reasons.append(f"{total_value_changes} value changes (>100)")
 
-# Any MEDIUM-complexity operations (mixed rounding)
-if any(op.get('rounding_resolved') == 'mixed' for op in op_map.values()):
+# Any MEDIUM-complexity intents (mixed rounding)
+if any(intent.get('rounding_resolved') == 'mixed' for intent in intent_map.values()):
     risk_level = "MEDIUM"
     risk_reasons.append("Mixed rounding detected (per-line handling required)")
 ```
@@ -1319,49 +1458,49 @@ if any(op.get('rounding_resolved') == 'mixed' for op in op_map.values()):
 9.3. Check for HIGH conditions:
 
 ```python
-# Cross-file dependencies (operation depends on op in a different file)
-for op_id, op in op_map.items():
-    for dep_id in op.get('depends_on', []):
-        if op['target_file'] != op_map[dep_id]['target_file']:
+# Cross-file dependencies (intent depends on intent in a different file)
+for intent_id, intent in intent_map.items():
+    for dep_id in intent.get('depends_on', []):
+        if intent['target_file'] != intent_map[dep_id]['target_file']:
             risk_level = "HIGH"
-            risk_reasons.append(f"Cross-file dependency: {op_id} -> {dep_id}")
+            risk_reasons.append(f"Cross-file dependency: {intent_id} -> {dep_id}")
 
 # Cross-LOB shared module with LOBs outside target list
 if manifest_risk_indicators.get('cross_lob'):
     risk_level = "HIGH"
     risk_reasons.append("Cross-LOB file references detected")
 
-# Any logic-modifier operations with complexity
-logic_ops = [op for op in op_map.values() if op['agent'] == 'logic-modifier']
-if len(logic_ops) > 2:
+# Many structure_insertion intents indicate complexity
+insertion_intents = [i for i in intent_map.values() if i['capability'] == 'structure_insertion']
+if len(insertion_intents) > 2:
     risk_level = "HIGH"
-    risk_reasons.append(f"{len(logic_ops)} logic-modifier operations")
+    risk_reasons.append(f"{len(insertion_intents)} structure_insertion intents")
 
-# has_expressions in any operation
-if any(op.get('has_expressions') for op in op_map.values()):
+# has_expressions in any intent
+if any(intent.get('has_expressions') for intent in intent_map.values()):
     risk_level = "HIGH"
     risk_reasons.append("Array6 arguments contain arithmetic expressions")
 
-# developer_confirmed: false on any operation
-unconfirmed = [op['id'] for op in op_map.values() if not op.get('developer_confirmed', True)]
+# developer_confirmed: false on any intent
+unconfirmed = [intent['id'] for intent in intent_map.values() if not intent.get('developer_confirmed', True)]
 if unconfirmed:
     risk_level = "HIGH"
-    risk_reasons.append(f"Unconfirmed operations: {', '.join(unconfirmed)}")
+    risk_reasons.append(f"Unconfirmed intents: {', '.join(unconfirmed)}")
 
 # needs_new_file: true
-if any(op.get('needs_new_file') for op in op_map.values()):
+if any(intent.get('needs_new_file') for intent in intent_map.values()):
     risk_level = max_risk(risk_level, "MEDIUM")
     risk_reasons.append("New file creation required")
 
 # skipped_lines present (may indicate unexpected code patterns)
-if any(op.get('skipped_lines') for op in op_map.values()):
-    risk_reasons.append("Analyzer skipped some lines (see operation details)")
+if any(intent.get('skipped_lines') for intent in intent_map.values()):
+    risk_reasons.append("Analyzer skipped some lines (see intent details)")
 
 # Rule dependency warnings from codebase profile
 profile_path = ".iq-workstreams/codebase-profile.yaml"
 rule_deps = load_yaml_section(profile_path, "rule_dependencies")
 if rule_deps:
-    target_functions = set(op.get('function') for op in op_map.values() if op.get('function'))
+    target_functions = set(intent.get('function') for intent in intent_map.values() if intent.get('function'))
     for dep in rule_deps:
         dep_functions = set(dep.get("functions", []))
         if dep_functions & target_functions:  # overlap exists
@@ -1380,40 +1519,41 @@ if rule_deps:
           Reasons: {risk_reasons}
 ```
 
-### Step 9.5: Assign Operation Tiers
+### Step 9.5: Assign Intent Tiers
 
-After computing risk_level in Step 9, assign a `tier` (1, 2, or 3) to each operation.
+After computing risk_level in Step 9, assign a `tier` (1, 2, or 3) to each intent.
 The tier determines how much context the capsule builder (/iq-execute) includes for
-that operation's worker. Tier 1 = thin capsule (current format, no FUB). Tier 2 =
+that intent's worker. Tier 1 = thin capsule (current format, no FUB). Tier 2 =
 adds Function Understanding Block + canonical patterns. Tier 3 = adds peer function
 bodies + cross-file context.
 
-**This step is fully automated — no developer interaction.**
+**This step is fully automated -- no developer interaction.**
 
 ```
 TIER ASSIGNMENT TABLE
 ─────────────────────────────────────────────────────────────────────
 Condition                                                    Tier
 ─────────────────────────────────────────────────────────────────────
-rate-modifier, simple pattern, no mixed rounding,             1
+value_editing, simple strategy, no mixed rounding,            1
   no expressions
 
-rate-modifier with mixed rounding OR has_expressions          2
+value_editing with mixed rounding OR has_expressions          2
 
-logic-modifier, simple constant insertion, no code_patterns   1
+structure_insertion, simple constant, no code_patterns        1
 
-logic-modifier with code_patterns OR fub present              2
+structure_insertion with code_patterns OR fub present         2
 
-logic-modifier with needs_new_file                            2
+file_creation (needs_new_file)                                2
 
-logic-modifier with pattern == "UNKNOWN"                      3
+Any intent with strategy_hint == null and confidence < 0.8    3
 
-Any op with cross-file dependency (depends_on in diff file)   3
+Any intent with cross-file dependency                         3
 
-Any op with developer_confirmed == false                      3
+Any intent with developer_confirmed == false                  3
 
-Any op where function_line_end - function_line_start > 100    2
-  (large functions benefit from FUB even for simple patterns)
+Any intent where function_line_end - function_line_start >    2
+  100 (large functions benefit from FUB even for simple
+  strategies)
 
 DEFAULT (no match)                                            1
   (surfaces gaps via logging rather than silently adding context)
@@ -1422,8 +1562,8 @@ Highest tier wins when multiple conditions match.
 ```
 
 ```python
-def assign_tier(op, op_map):
-    """Assign a context tier (1, 2, or 3) to an operation.
+def assign_tier(intent, intent_map):
+    """Assign a context tier (1, 2, or 3) to an intent.
 
     Tier determines capsule richness:
       1 = thin (value substitution, no FUB)
@@ -1433,54 +1573,53 @@ def assign_tier(op, op_map):
     Highest matching tier wins.
     """
     tier = 0  # Will take max of all matching conditions
-    agent = op.get("agent", "rate-modifier")
-    pattern = op.get("pattern", "")
+    capability = intent.get("capability", "value_editing")
+    strategy = intent.get("strategy_hint", "")
 
-    if agent == "rate-modifier":
-        # Simple rate-modifier: no mixed rounding, no expressions
-        has_mixed = op.get("rounding_resolved") == "mixed"
-        has_expr = op.get("has_expressions", False)
+    if capability == "value_editing":
+        # Simple value editing: no mixed rounding, no expressions
+        has_mixed = intent.get("rounding_resolved") == "mixed"
+        has_expr = intent.get("has_expressions", False)
         if not has_mixed and not has_expr:
             tier = max(tier, 1)
         else:
             tier = max(tier, 2)
 
-    elif agent == "logic-modifier":
+    elif capability == "structure_insertion":
         # Simple constant insertion without code_patterns
         is_simple_const = (
-            pattern == "new_coverage_type"
-            and op.get("parameters", {}).get("constant_name")
-            and not op.get("parameters", {}).get("case_block_type")
-            and not op.get("code_patterns")
+            intent.get("parameters", {}).get("constant_name")
+            and not intent.get("parameters", {}).get("case_block_type")
+            and not intent.get("code_patterns")
         )
         if is_simple_const:
             tier = max(tier, 1)
 
         # Has code_patterns or FUB
-        if op.get("code_patterns") or op.get("fub"):
+        if intent.get("code_patterns") or intent.get("fub"):
             tier = max(tier, 2)
 
-        # Needs new file creation
-        if op.get("needs_new_file"):
-            tier = max(tier, 2)
+    elif capability == "file_creation":
+        # New file creation always needs patterns
+        tier = max(tier, 2)
 
-        # Unknown pattern → maximum context
-        if pattern == "UNKNOWN":
-            tier = max(tier, 3)
+    # Low confidence without strategy hint → maximum context
+    if not intent.get("strategy_hint") and intent.get("confidence", 1.0) < 0.8:
+        tier = max(tier, 3)
 
-    # Cross-file dependency: depends_on an op in a different file
-    for dep_id in op.get("depends_on", []):
-        dep_op = op_map.get(dep_id)
-        if dep_op and op.get("target_file") != dep_op.get("target_file"):
+    # Cross-file dependency: depends_on an intent in a different file
+    for dep_id in intent.get("depends_on", []):
+        dep_intent = intent_map.get(dep_id)
+        if dep_intent and intent.get("target_file") != dep_intent.get("target_file"):
             tier = max(tier, 3)
 
     # Unconfirmed targets → maximum context for safety
-    if not op.get("developer_confirmed", True):
+    if not intent.get("developer_confirmed", True):
         tier = max(tier, 3)
 
-    # Large functions (>100 lines) benefit from FUB even for simple patterns
-    func_start = op.get("function_line_start", 0)
-    func_end = op.get("function_line_end", 0)
+    # Large functions (>100 lines) benefit from FUB even for simple strategies
+    func_start = intent.get("function_line_start", 0)
+    func_end = intent.get("function_line_end", 0)
     if func_start and func_end and (func_end - func_start) > 100:
         tier = max(tier, 2)
 
@@ -1488,15 +1627,15 @@ def assign_tier(op, op_map):
     # via logging rather than silently consuming extra tokens)
     if tier == 0:
         tier = 1
-        # Log: "No tier condition matched for op {op_id} — defaulting to Tier 1.
-        #        Review tier assignment table if this operation needs richer context."
+        # Log: "No tier condition matched for intent {intent_id} — defaulting to Tier 1.
+        #        Review tier assignment table if this intent needs richer context."
 
     return tier
 
 
-# Apply tiers to all operations
-for op_id, op in op_map.items():
-    op["tier"] = assign_tier(op, op_map)
+# Apply tiers to all intents
+for intent_id, intent in intent_map.items():
+    intent["tier"] = assign_tier(intent, intent_map)
 ```
 
 9.5.1. Add `tier` to `execution_sequence` and `file_operation_order` entries:
@@ -1504,20 +1643,20 @@ for op_id, op in op_map.items():
 ```python
 # In execution_sequence:
 for entry in execution_sequence:
-    entry["tier"] = op_map[entry["op_id"]]["tier"]
+    entry["tier"] = intent_map[entry["intent_id"]]["tier"]
 
 # In file_operation_order:
-for file_path, ops in file_operation_order.items():
-    for entry in ops:
-        entry["tier"] = op_map[entry["op_id"]]["tier"]
+for file_path, intents in file_operation_order.items():
+    for entry in intents:
+        entry["tier"] = intent_map[entry["intent_id"]]["tier"]
 ```
 
 9.5.2. Compute tier distribution summary:
 
 ```python
 tier_counts = {1: 0, 2: 0, 3: 0}
-for op in op_map.values():
-    tier_counts[op["tier"]] += 1
+for intent in intent_map.values():
+    tier_counts[intent["tier"]] += 1
 
 tier_distribution = {
     "tier_1": tier_counts[1],
@@ -1530,9 +1669,9 @@ tier_distribution = {
 
 ```
 [Planner] Tier assignments:
-          Tier 1 (value substitution):   {N} operations
-          Tier 2 (logic with patterns):  {N} operations
-          Tier 3 (full context):         {N} operations
+          Tier 1 (value substitution):   {N} intents
+          Tier 2 (logic with patterns):  {N} intents
+          Tier 3 (full context):         {N} intents
 ```
 
 ### Step 10: Generate execution_plan.md
@@ -1541,14 +1680,14 @@ tier_distribution = {
 
 10.1. Determine format: SIMPLE or COMPLEX.
 
-SIMPLE criteria: few operations, single file, and risk no higher than MEDIUM.
+SIMPLE criteria: few intents, single file, and risk no higher than MEDIUM.
 A single shared-module change is common (e.g., 5% rate increase) and should
-still get a scannable SIMPLE plan. COMPLEX kicks in at 3+ operations, multiple
+still get a scannable SIMPLE plan. COMPLEX kicks in at 3+ intents, multiple
 files, or HIGH risk.
 
 ```python
 use_simple = (
-    total_operations <= 2
+    total_intents <= 2
     and len(unique_files) <= 1
     and risk_level in ("LOW", "MEDIUM")
 )
@@ -1572,18 +1711,18 @@ plan_lines.append("")
 # Summary line
 if use_simple:
     plan_lines.append(
-        f"Summary: {total_operations} change(s), {len(unique_files)} file(s), "
+        f"Summary: {total_intents} change(s), {len(unique_files)} file(s), "
         f"{total_value_changes} value edits, {risk_level} risk"
     )
 else:
     plan_lines.append(
-        f"Summary: {total_operations} operations across {len(unique_files)} files, "
+        f"Summary: {total_intents} intents across {len(unique_files)} files, "
         f"{risk_level} risk"
     )
     plan_lines.append(f"LOBs affected: {', '.join(lobs)}")
     shared_modules = [f for f in unique_files
-                      if any(op['file_type'] == 'shared_module'
-                             for op in op_map.values() if op['target_file'] == f)]
+                      if any(intent['file_type'] == 'shared_module'
+                             for intent in intent_map.values() if intent['target_file'] == f)]
     if shared_modules:
         for sm in shared_modules:
             plan_lines.append(f"Shared module: {sm.split('/')[-1]}")
@@ -1596,7 +1735,7 @@ if out_of_scope:
     plan_lines.append("")
     plan_lines.append("OUT OF SCOPE (flagged, not executed):")
     for oos in out_of_scope:
-        plan_lines.append(f"  {oos['srd'].upper()}: {oos['title']}")
+        plan_lines.append(f"  {oos['cr'].upper()}: {oos['title']}")
         plan_lines.append(f"    Reason: {oos['reason']}")
 ```
 
@@ -1623,7 +1762,7 @@ else:
 10.5. Write each phase with before/after details:
 
 For SIMPLE plans, show ALL before/after entries.
-For COMPLEX plans with more than 10 entries per operation, show the first 2
+For COMPLEX plans with more than 10 entries per intent, show the first 2
 entries and a summary line "(showing 2 of N -- all follow same pattern)".
 
 ```python
@@ -1634,31 +1773,31 @@ for phase in phases:
         deps = ', '.join(str(p) for p in phase['depends_on_phases'])
         dep_str = f", depends on Phase {deps}"
 
-    ops_str = ', '.join(phase['operations'])
+    intents_str = ', '.join(phase['intents'])
     plan_lines.append(
-        f"Phase {phase['phase']}: {phase['title']} ({ops_str}) "
-        f"[{phase['agent']}{dep_str}]"
+        f"Phase {phase['phase']}: {phase['title']} ({intents_str}) "
+        f"[{phase['capability']}{dep_str}]"
     )
 
-    for op_id in phase['operations']:
-        op = op_map[op_id]
+    for intent_id in phase['intents']:
+        intent = intent_map[intent_id]
 
-        plan_lines.append(f"  File: {op['target_file']}")
-        if op.get('function'):
-            plan_lines.append(f"  Function: {op['function']}()")
+        plan_lines.append(f"  File: {intent['target_file']}")
+        if intent.get('function'):
+            plan_lines.append(f"  Function: {intent['function']}()")
 
-        if op['agent'] == 'rate-modifier':
-            write_rate_modifier_details(plan_lines, op, use_simple)
-        elif op['agent'] == 'logic-modifier':
-            write_logic_modifier_details(plan_lines, op)
+        if intent['capability'] == 'value_editing':
+            write_value_editing_details(plan_lines, intent, use_simple)
+        elif intent['capability'] in ('structure_insertion', 'file_creation'):
+            write_insertion_details(plan_lines, intent)
 
-        # Show warnings for this operation
-        if not op.get('developer_confirmed', True):
+        # Show warnings for this intent
+        if not intent.get('developer_confirmed', True):
             plan_lines.append("")
             plan_lines.append(f"  *** WARNING: Targets NOT confirmed by developer ***")
             plan_lines.append(f"  *** Review before approving ***")
 
-        if op.get('has_expressions'):
+        if intent.get('has_expressions'):
             plan_lines.append("")
             plan_lines.append(f"  *** NOTE: Array6 arguments contain arithmetic expressions ***")
             plan_lines.append(f"  *** Expressions will be evaluated before modification ***")
@@ -1683,12 +1822,12 @@ if not use_simple:
     # Context tiers (from Step 9.5)
     plan_lines.append("")
     plan_lines.append("CONTEXT TIERS:")
-    plan_lines.append(f"  Tier 1 (value substitution):  {tier_distribution['tier_1']} operations")
-    plan_lines.append(f"  Tier 2 (logic with patterns): {tier_distribution['tier_2']} operations")
-    plan_lines.append(f"  Tier 3 (full context):        {tier_distribution['tier_3']} operations")
+    plan_lines.append(f"  Tier 1 (value substitution):  {tier_distribution['tier_1']} intents")
+    plan_lines.append(f"  Tier 2 (logic with patterns): {tier_distribution['tier_2']} intents")
+    plan_lines.append(f"  Tier 3 (full context):        {tier_distribution['tier_3']} intents")
 
     # Warnings section
-    warnings = collect_warnings(op_map)
+    warnings = collect_warnings(intent_map)
     if warnings:
         plan_lines.append("")
         plan_lines.append("WARNINGS:")
@@ -1702,10 +1841,10 @@ if not use_simple:
         plan_lines.append("  The following SRDs are coupled by dependencies:")
         for pac in partial_approval_constraints:
             plan_lines.append(
-                f"  - {pac['srd'].upper()} requires {pac['requires_srd'].upper()}: "
+                f"  - {pac['cr'].upper()} requires {pac['requires_cr'].upper()}: "
                 f"{pac['reason']}"
             )
-        plan_lines.append("  Rejecting a required SRD will also block the dependent SRD.")
+        plan_lines.append("  Rejecting a required CR will also block the dependent CR.")
 
 plan_lines.append("")
 plan_lines.append("Approve this plan? Say \"approve\" to proceed or tell me what to change.")
@@ -1721,19 +1860,20 @@ with open(f"{plan_dir}/execution_plan.md", 'w') as f:
     f.write('\n'.join(plan_lines))
 ```
 
-**`write_rate_modifier_details` helper:**
+**`write_value_editing_details` helper:**
 
 ```python
-def write_rate_modifier_details(lines, op, use_simple):
-    params = op['parameters']
-    ba_list = op.get('before_after', [])
+def write_value_editing_details(lines, intent, use_simple):
+    params = intent['parameters']
+    ba_list = intent.get('before_after', [])
+    strategy = intent.get('strategy_hint', '')
 
-    if op['pattern'] == 'base_rate_increase':
+    if strategy in ('array6-multiply', None) and params.get('factor'):
         lines.append(f"  Action: Multiply all Array6 values by {params['factor']}")
-        if op.get('rounding_resolved'):
-            lines.append(f"  Rounding: {op['rounding_resolved']}")
-            if op.get('rounding_detail'):
-                lines.append(f"    {op['rounding_detail'].strip()}")
+        if intent.get('rounding_resolved'):
+            lines.append(f"  Rounding: {intent['rounding_resolved']}")
+            if intent.get('rounding_detail'):
+                lines.append(f"    {intent['rounding_detail'].strip()}")
         lines.append("")
 
         # Show before/after entries
@@ -1762,7 +1902,7 @@ def write_rate_modifier_details(lines, op, use_simple):
         total_vals = sum(ba.get('value_count', 1) for ba in ba_list)
         lines.append(f"  Impact: {len(ba_list)} lines x ~{total_vals // max(len(ba_list), 1)} values = {total_vals} changes")
 
-    elif op['pattern'] == 'factor_table_change':
+    elif strategy == 'factor-table' or params.get('case_value'):
         lines.append(f"  Action: Change Case {params.get('case_value')} factor")
         lines.append("")
         for ba in ba_list:
@@ -1773,8 +1913,9 @@ def write_rate_modifier_details(lines, op, use_simple):
             lines.append(f"  Change: {ba.get('change', '')}")
             lines.append("")
 
-    elif op['pattern'] == 'included_limits':
-        lines.append(f"  Action: Change included limit value")
+    else:
+        # Generic value editing -- show before/after pairs
+        lines.append(f"  Action: {intent['description']}")
         lines.append("")
         for ba in ba_list:
             lines.append(f"  Before: {ba['before']}")
@@ -1782,32 +1923,32 @@ def write_rate_modifier_details(lines, op, use_simple):
             lines.append("")
 ```
 
-**`write_logic_modifier_details` helper:**
+**`write_insertion_details` helper:**
 
 ```python
-def write_logic_modifier_details(lines, op):
-    params = op['parameters']
+def write_insertion_details(lines, intent):
+    params = intent['parameters']
 
-    if op.get('insertion_point'):
-        ip = op['insertion_point']
-        lines.append(f"  Action: {op['description']}")
+    if intent.get('insertion_point'):
+        ip = intent['insertion_point']
+        lines.append(f"  Action: {intent['description']}")
         lines.append(f"  Insert {ip['position']} line {ip['line']} ({ip['context']}):")
 
         # Show the new code to be added (from parameters)
-        if op['pattern'] == 'new_coverage_type':
-            lines.append(f"    + Public Const {params['constant_name']} As String = \"{params['coverage_type_name']}\"")
+        if params.get('constant_name'):
+            lines.append(f"    + Public Const {params['constant_name']} As String = \"{params.get('coverage_type_name', 'VALUE')}\"")
         elif 'code_to_add' in params:
             for code_line in params['code_to_add']:
                 lines.append(f"    + {code_line}")
         else:
-            lines.append(f"    (code will be generated by Logic Modifier per pattern: {op['pattern']})")
+            lines.append(f"    (code will be generated by Change Engine)")
 
-    elif op.get('needs_new_file'):
+    elif intent.get('needs_new_file'):
         lines.append(f"  Action: CREATE NEW FILE")
-        lines.append(f"  Target: {op['target_file']}")
-        if op.get('template_reference'):
-            lines.append(f"  Template: {op['template_reference']}")
-        lines.append(f"  Description: {op['description']}")
+        lines.append(f"  Target: {intent['target_file']}")
+        if intent.get('template_reference'):
+            lines.append(f"  Template: {intent['template_reference']}")
+        lines.append(f"  Description: {intent['description']}")
 ```
 
 ### Step 11: Generate execution_order.yaml
@@ -1819,7 +1960,7 @@ def write_logic_modifier_details(lines, op):
 - Bottom-to-top within each file (highest line first)
 
 The execution_sequence is the AUTHORITATIVE order that /iq-execute follows.
-It interleaves cross-file operations and within-file operations correctly:
+It interleaves cross-file intents and within-file intents correctly:
 
 ```python
 execution_sequence = []
@@ -1827,27 +1968,28 @@ execution_sequence = []
 # Process phases in order
 for phase in phases:
     # Within each phase, process files in deterministic order
-    phase_ops_by_file = {}
-    for op_id in phase['operations']:
-        target = op_map[op_id]['target_file']
-        phase_ops_by_file.setdefault(target, [])
-        phase_ops_by_file[target].append(op_id)
+    phase_intents_by_file = {}
+    for intent_id in phase['intents']:
+        target = intent_map[intent_id]['target_file']
+        phase_intents_by_file.setdefault(target, [])
+        phase_intents_by_file[target].append(intent_id)
 
-    for target_file in sorted(phase_ops_by_file.keys()):
-        ops = phase_ops_by_file[target_file]
+    for target_file in sorted(phase_intents_by_file.keys()):
+        intents = phase_intents_by_file[target_file]
         # Within same file in same phase, use bottom-to-top order
         if target_file in file_operation_order:
-            full_order = [entry['op_id'] for entry in file_operation_order[target_file]]
-            ops_sorted = [op_id for op_id in full_order if op_id in ops]
+            full_order = [entry['intent_id'] for entry in file_operation_order[target_file]]
+            intents_sorted = [iid for iid in full_order if iid in intents]
         else:
-            ops_sorted = ops
+            intents_sorted = intents
 
-        for op_id in ops_sorted:
+        for intent_id in intents_sorted:
             execution_sequence.append({
-                'op_id': op_id,
+                'intent_id': intent_id,
                 'phase': phase['phase'],
-                'file': op_map[op_id]['target_file'],
-                'agent': op_map[op_id]['agent'],
+                'file': intent_map[intent_id]['target_file'],
+                'capability': intent_map[intent_id]['capability'],
+                'strategy_hint': intent_map[intent_id].get('strategy_hint'),
             })
 ```
 
@@ -1855,11 +1997,11 @@ for phase in phases:
 
 ```python
 execution_order = {
-    'planner_version': '1.0',
+    'planner_version': '2.0',
     'generated_at': now_iso8601(),
     'workflow_id': workflow_id,
     'total_phases': len(phases),
-    'total_operations': len(op_map),
+    'total_intents': len(intent_map),
     'total_value_changes': total_value_changes,
     'total_file_copies': len(files_to_copy),
     'total_vbproj_updates': total_vbproj_updates,
@@ -1870,8 +2012,8 @@ execution_order = {
         {
             'phase': p['phase'],
             'title': p['title'],
-            'operations': p['operations'],
-            'agent': p['agent'],
+            'intents': p['intents'],
+            'capability': p['capability'],
             'rationale': p['rationale'],
             'depends_on_phases': p['depends_on_phases'],
         }
@@ -1911,8 +2053,8 @@ for fc in files_to_copy:
     }
 
 # Files that already exist and will be modified in place
-for op_id, op in op_map.items():
-    target = op['target_file']
+for intent_id, intent in intent_map.items():
+    target = intent['target_file']
     if target not in file_hash_entries:
         # This file already exists (not being created by a copy)
         if os.path.exists(target):
@@ -1948,7 +2090,7 @@ exec_dir = f"{workstream_path}/execution"
 os.makedirs(exec_dir, exist_ok=True)
 
 file_hashes = {
-    'planner_version': '1.0',
+    'planner_version': '2.0',
     'captured_at': now_iso8601(),
     'workflow_id': workflow_id,
     'files': file_hash_entries,
@@ -1963,7 +2105,7 @@ with open(f"{exec_dir}/file_hashes.yaml", 'w') as f:
 [Planner] Wrote execution/file_hashes.yaml: {N} files tracked.
 [Planner] Plan generation complete.
           Output: plan/execution_plan.md ({N} lines)
-          Output: plan/execution_order.yaml ({N} phases, {N} operations)
+          Output: plan/execution_order.yaml ({N} phases, {N} intents)
           Output: execution/file_hashes.yaml ({N} files)
 ```
 
@@ -1973,73 +2115,62 @@ with open(f"{exec_dir}/file_hashes.yaml", 'w') as f:
 
 These examples demonstrate the full Planner flow for common scenarios.
 
-### Example A: Simple -- Single file, 1 SRD, 5% rate multiply
+### Example A: Simple -- Single file, 1 CR, 5% rate multiply
 
-**Scenario:** New Brunswick Home, effective 2026-07-01. Single SRD: increase
+**Scenario:** New Brunswick Home, effective 2026-07-01. Single CR: increase
 GetBasePremium_Home Array6 values by 5%.
 
-**Input from Analyzer:**
+**Input from Decomposer + Analyzer (intent_graph.yaml):**
 
 ```yaml
-# analysis/operations/op-001-01.yaml
-id: "op-001-01"
-srd: "srd-001"
-title: "Increase home base premiums by 5%"
-file: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
-file_type: "shared_module"
-function: "GetBasePremium_Home"
-agent: "rate-modifier"
-depends_on: []
-pattern: "base_rate_increase"
-parameters:
-  factor: 1.05
-  scope: "all_territories"
-  rounding: "auto"
-
-# -- Added by Analyzer --
-source_file: "New Brunswick/Code/mod_Common_NBHab20260401.vb"
-target_file: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
-needs_copy: true
-file_hash: "sha256:abc123..."
-function_line_start: 312
-function_line_end: 418
-rounding_resolved: "banker"
-rounding_detail: "All Array6 values are integers -- banker rounding applied."
-target_lines:
-  - line: 322
-    content: "                Case 1 : varRates = Array6(basePremium, 233, 274, 319, 372, 432, 502)"
-    context: "Territory 1"
-    rounding: "banker"
-    value_count: 6
-  - line: 324
-    content: "                Case 2 : varRates = Array6(basePremium, 198, 233, 271, 316, 367, 427)"
-    context: "Territory 2"
-    rounding: "banker"
-    value_count: 6
-  # ... 13 more territories
-candidates_shown: 1
-developer_confirmed: true
-```
-
-```yaml
-# analysis/dependency_graph.yaml
+# analysis/intent_graph.yaml (abbreviated -- single intent)
 workflow_id: "20260701-NB-Home-base-rates"
-total_operations: 1
+total_intents: 1
 total_out_of_scope: 0
 out_of_scope: []
-shared_operations:
-  op-001-01:
-    srd: "srd-001"
-    description: "Increase home base premiums by 5%"
+
+intents:
+  - id: "intent-001"
+    cr: "cr-001"
+    title: "Increase home base premiums by 5%"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
     file: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
     file_type: "shared_module"
     function: "GetBasePremium_Home"
-    agent: "rate-modifier"
     depends_on: []
-lob_operations: {}
+    confidence: 0.95
+    open_questions: []
+    parameters:
+      factor: 1.05
+      scope: "all_territories"
+    # -- Analyzer-enriched --
+    source_file: "New Brunswick/Code/mod_Common_NBHab20260401.vb"
+    target_file: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
+    needs_copy: true
+    file_hash: "sha256:abc123..."
+    function_line_start: 312
+    function_line_end: 418
+    rounding_resolved: "banker"
+    rounding_detail: "All Array6 values are integers -- banker rounding applied."
+    target_lines:
+      - line: 322
+        content: "                Case 1 : varRates = Array6(basePremium, 233, 274, 319, 372, 432, 502)"
+        context: "Territory 1"
+        rounding: "banker"
+        value_count: 6
+      - line: 324
+        content: "                Case 2 : varRates = Array6(basePremium, 198, 233, 271, 316, 367, 427)"
+        context: "Territory 2"
+        rounding: "banker"
+        value_count: 6
+      # ... 13 more territories
+    candidates_shown: 1
+    developer_confirmed: true
+
 partial_approval_constraints: []
 execution_order:
-  - "op-001-01"
+  - "intent-001"
 ```
 
 ```yaml
@@ -2051,7 +2182,7 @@ files:
     source_hash: "sha256:abc123..."
     target_exists: false
     shared_by: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-    operations_in_file: ["op-001-01"]
+    intents_in_file: ["intent-001"]
     vbproj_updates:
       - vbproj: "New Brunswick/Home/20260701/Cssi.IntelliQuote.PORTNBHOME20260701.vbproj"
         old_include: "..\\Code\\mod_Common_NBHab20260401.vb"
@@ -2061,17 +2192,19 @@ files:
 
 **Step 3 -- Hash check:** 1 source file, hash matches. Proceed.
 
+**Step 3.5 -- Q&A:** No open questions. Skipped.
+
 **Step 4 -- DAG:** 1 node, 0 edges. Trivially valid.
 
-**Step 5 -- Topo sort:** 1 node at level 0. Order: ["op-001-01"].
+**Step 5 -- Topo sort:** 1 node at level 0. Order: ["intent-001"].
 
 **Step 6 -- Phase grouping:** 1 phase.
 
 ```
-Phase 1: "Increase home base premiums by 5%" (op-001-01) [rate-modifier]
+Phase 1: "Increase home base premiums by 5%" (intent-001) [value_editing]
 ```
 
-**Step 7 -- Bottom-to-top:** 1 operation, trivially ordered.
+**Step 7 -- Bottom-to-top:** 1 intent, trivially ordered.
 
 **Step 8 -- Before/after (first 2 territories):**
 
@@ -2087,14 +2220,14 @@ Territory 2:
   %:                         +5.1  +5.2  +5.2  +5.1  +4.9  +4.9
 ```
 
-**Step 9 -- Risk:** MEDIUM (shared module involved, but only 1 operation so LOW
+**Step 9 -- Risk:** MEDIUM (shared module involved, but only 1 intent so LOW
 would apply if not for shared module).
 
-Actually: 1 file, 1 operation, shared_module = true, < 100 value changes (90).
+Actually: 1 file, 1 intent, shared_module = true, < 100 value changes (90).
 Risk = MEDIUM (shared module criterion).
 
-Wait -- re-examine: this is a single-SRD simple change. The shared module flag
-makes it MEDIUM, not LOW. Risk reasons: ["1 operation in shared module (6 LOBs)"].
+Wait -- re-examine: this is a single-CR simple change. The shared module flag
+makes it MEDIUM, not LOW. Risk reasons: ["1 intent in shared module (6 LOBs)"].
 
 **Step 10 -- execution_plan.md output:**
 
@@ -2109,7 +2242,7 @@ FILE COPIES:
     Shared by: Home, Condo, Tenant, FEC, Farm, Seasonal
     .vbproj updates: 6 file(s)
 
-Phase 1: Increase home base premiums by 5% (op-001-01) [rate-modifier]
+Phase 1: Increase home base premiums by 5% (intent-001) [value_editing]
   File: New Brunswick/Code/mod_Common_NBHab20260701.vb
   Function: GetBasePremium_Home()
   Action: Multiply all Array6 values by 1.05
@@ -2136,17 +2269,17 @@ Approve this plan? Say "approve" to proceed or tell me what to change.
 **Step 11 -- execution_order.yaml output:**
 
 ```yaml
-planner_version: "1.0"
+planner_version: "2.0"
 generated_at: "2026-02-27T11:00:00"
 workflow_id: "20260701-NB-Home-base-rates"
 total_phases: 1
-total_operations: 1
+total_intents: 1
 total_value_changes: 90
 total_file_copies: 1
 total_vbproj_updates: 6
 risk_level: "MEDIUM"
 risk_reasons:
-  - "1 operation in shared module (6 LOBs)"
+  - "1 intent in shared module (6 LOBs)"
 file_copies:
   - source: "New Brunswick/Code/mod_Common_NBHab20260401.vb"
     target: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
@@ -2161,78 +2294,79 @@ file_copies:
 phases:
   - phase: 1
     title: "Increase home base premiums by 5%"
-    operations: ["op-001-01"]
-    agent: "rate-modifier"
+    intents: ["intent-001"]
+    capability: "value_editing"
     rationale: "Independent, no dependencies"
     depends_on_phases: []
 file_operation_order:
   "New Brunswick/Code/mod_Common_NBHab20260701.vb":
-    - op_id: "op-001-01"
+    - intent_id: "intent-001"
       line_ref: 350                              # max(target_lines[].line), NOT function_line_end
 execution_sequence:
-  - op_id: "op-001-01"
+  - intent_id: "intent-001"
     phase: 1
     file: "New Brunswick/Code/mod_Common_NBHab20260701.vb"
-    agent: "rate-modifier"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
 partial_approval_constraints: []
 ```
 
 ---
 
-### Example B: Medium -- Shared module, 3 SRDs, mixed agents
+### Example B: Medium -- Shared module, 3 CRs, mixed capabilities
 
 **Scenario:** Saskatchewan Habitational, effective 2026-01-01.
-- SRD-002: Deductible factor change ($5000: -0.20 to -0.22) -- rate-modifier
-- SRD-003: Deductible factor change ($2500: -0.15 to -0.17) -- rate-modifier
-- SRD-004: Liability premium increase (bundle + extension, 1.03x) -- rate-modifier (2 ops)
-- SRD-005: Add ELITECOMP constant + Case block -- logic-modifier (2 ops)
-  - op-005-01: Add constant (line ~23)
-  - op-005-02: Add Case block in GetRateTableID (line ~435), depends on op-005-01
+- CR-002: Deductible factor change ($5000: -0.20 to -0.22) -- value_editing
+- CR-003: Deductible factor change ($2500: -0.15 to -0.17) -- value_editing
+- CR-004: Liability premium increase (bundle + extension, 1.03x) -- value_editing (2 intents)
+- CR-005: Add ELITECOMP constant + Case block -- structure_insertion (2 intents)
+  - intent-005: Add constant (line ~23)
+  - intent-006: Add Case block in GetRateTableID (line ~435), depends on intent-005
 
 **Dependency graph edges:**
-- op-005-02 depends on op-005-01 (Case block references ELITECOMP constant)
+- intent-006 depends on intent-005 (Case block references ELITECOMP constant)
 - All others are independent
 
 **Step 4 -- DAG:** 6 nodes, 1 edge. Valid, no cycles.
 
 **Step 5 -- Topo sort:**
-- Level 0: op-002-01, op-003-01, op-004-01, op-004-02, op-005-01 (in-degree 0)
-- Level 1: op-005-02 (depends on op-005-01)
-- Order: [op-002-01, op-003-01, op-004-01, op-004-02, op-005-01, op-005-02]
+- Level 0: intent-001, intent-002, intent-003, intent-004, intent-005 (in-degree 0)
+- Level 1: intent-006 (depends on intent-005)
+- Order: [intent-001, intent-002, intent-003, intent-004, intent-005, intent-006]
 
 **Step 6 -- Phase grouping:**
-- Level 0 has 5 operations. But op-002-01, op-003-01, op-004-01, op-004-02 are ALL
-  on the same file (mod_Common_SKHab20260101.vb). Only op-005-01 is on a different
-  file but is ALSO on mod_Common_SKHab20260101.vb (module-level constants).
-- So all 5 level-0 ops are on the same file -> max_per_file = 5 -> 5 sub-phases.
-- Level 1 has 1 op (op-005-02, same file) -> 1 sub-phase.
+- Level 0 has 5 intents. But intent-001 through intent-004 are ALL
+  on the same file (mod_Common_SKHab20260101.vb). intent-005 is ALSO on
+  mod_Common_SKHab20260101.vb (module-level constants).
+- So all 5 level-0 intents are on the same file -> max_per_file = 5 -> 5 sub-phases.
+- Level 1 has 1 intent (intent-006, same file) -> 1 sub-phase.
 - Total: 6 phases.
 
 **Step 7 -- Bottom-to-top for mod_Common_SKHab20260101.vb:**
 
 ```
 file_operation_order["Saskatchewan/Code/mod_Common_SKHab20260101.vb"]:
-  - op-004-02  (line 4106, GetLiabilityExtensionPremiums)
-  - op-004-01  (line 4012, GetLiabilityBundlePremiums)
-  - op-002-01  (line 2202, SetDisSur_Deductible Case 5000)
-  - op-003-01  (line 2180, SetDisSur_Deductible Case 2500)
-  - op-005-02  (line ~435, GetRateTableID insertion)
-  - op-005-01  (line ~23, module-level constant insertion)
+  - intent-004  (line 4106, GetLiabilityExtensionPremiums)
+  - intent-003  (line 4012, GetLiabilityBundlePremiums)
+  - intent-001  (line 2202, SetDisSur_Deductible Case 5000)
+  - intent-002  (line 2180, SetDisSur_Deductible Case 2500)
+  - intent-006  (line ~435, GetRateTableID insertion)
+  - intent-005  (line ~23, module-level constant insertion)
 ```
 
 **Step 9 -- Risk:** MEDIUM.
-Reasons: ["4 operations in shared module (6 LOBs)", "Mixed rounding in GetLiabilityBundlePremiums"]
+Reasons: ["4 intents in shared module (6 LOBs)", "Mixed rounding in GetLiabilityBundlePremiums"]
 
 **Step 10 -- execution_plan.md (abbreviated):**
 
 Phase numbers follow the code's assignment order (topo-level + alphabetical
 tie-breaking within each level). The code assigns:
-- Level 0, 5 ops on same file -> sub-phases 1-5 in topo_order:
-  Phase 1: op-002-01, Phase 2: op-003-01, Phase 3: op-004-01,
-  Phase 4: op-004-02, Phase 5: op-005-01
-- Level 1, 1 op -> Phase 6: op-005-02
+- Level 0, 5 intents on same file -> sub-phases 1-5 in topo_order:
+  Phase 1: intent-001, Phase 2: intent-002, Phase 3: intent-003,
+  Phase 4: intent-004, Phase 5: intent-005
+- Level 1, 1 intent -> Phase 6: intent-006
 
-Phase 6 (op-005-02) depends on Phase 5 (op-005-01) -- this is a valid forward
+Phase 6 (intent-006) depends on Phase 5 (intent-005) -- this is a valid forward
 dependency (later phase depends on earlier phase).
 
 The plan document shows phases in this numbered order. The execution_sequence
@@ -2245,7 +2379,7 @@ correctness.
 EXECUTION PLAN: Saskatchewan Habitational 2026-01-01
 ====================================================
 
-Summary: 6 operations across 1 file, MEDIUM risk
+Summary: 6 intents across 1 file, MEDIUM risk
 LOBs affected: Home, Condo, Tenant, FEC, Farm, Seasonal
 Shared module: mod_Common_SKHab20260101.vb
 
@@ -2254,28 +2388,28 @@ FILE COPIES:
     Shared by: Home, Condo, Tenant, FEC, Farm, Seasonal
     .vbproj updates: 6 file(s)
 
-Phase 1: Change $5000 deductible factor (op-002-01) [rate-modifier]
+Phase 1: Change $5000 deductible factor (intent-001) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: SetDisSur_Deductible()
   Before: dblDedDiscount = -0.2
   After:  dblDedDiscount = -0.22
   ...
 
-Phase 2: Change $2500 deductible factor (op-003-01) [rate-modifier]
+Phase 2: Change $2500 deductible factor (intent-002) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: SetDisSur_Deductible()
   Before: dblDedDiscount = -0.15
   After:  dblDedDiscount = -0.17
   ...
 
-Phase 3: Multiply liability bundle premiums by 1.03 (op-004-01) [rate-modifier]
+Phase 3: Multiply liability bundle premiums by 1.03 (intent-003) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: GetLiabilityBundlePremiums()
   Action: Multiply all Array6 values by 1.03
   Rounding: mixed (42 lines banker, 6 lines none -- per-line detail below)
   ...
 
-Phase 4: Multiply liability extension premiums by 1.03 (op-004-02) [rate-modifier]
+Phase 4: Multiply liability extension premiums by 1.03 (intent-004) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: GetLiabilityExtensionPremiums()
   Action: Multiply all Array6 values by 1.03
@@ -2286,13 +2420,13 @@ Phase 4: Multiply liability extension premiums by 1.03 (op-004-02) [rate-modifie
     Array6(0, 80, 109, 166, 195, 222, 300)
   ...
 
-Phase 5: Add ELITECOMP constant (op-005-01) [logic-modifier]
+Phase 5: Add ELITECOMP constant (intent-005) [structure_insertion]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Location: module-level constants
   Action: Add line after existing constants
     + Public Const ELITECOMP As String = "Elite Comp."
 
-Phase 6: Add Case block for ELITECOMP (op-005-02) [logic-modifier, depends on Phase 5]
+Phase 6: Add Case block for ELITECOMP (intent-006) [structure_insertion, depends on Phase 5]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: GetRateTableID()
   Action: Add Case block after existing coverage types
@@ -2308,123 +2442,123 @@ IMPACT SUMMARY:
   Total file copies: 1
   Total .vbproj updates: 6
   Risk level: MEDIUM
-    - 4 operations in shared module (6 LOBs)
+    - 4 intents in shared module (6 LOBs)
     - Mixed rounding in GetLiabilityBundlePremiums
 
 Approve this plan? Say "approve" to proceed or tell me what to change.
 ```
 
 Note: The execution_sequence in execution_order.yaml reorders these phases
-for bottom-to-top execution within the file: op-004-02 (line 4106) executes
-first, down to op-005-01 (line ~23) last. Phase numbers in the plan document
+for bottom-to-top execution within the file: intent-004 (line 4106) executes
+first, down to intent-005 (line ~23) last. Phase numbers in the plan document
 serve human readability; the execution_sequence is the authoritative machine
 execution order.
 
 ---
 
-### Example C: Complex -- Cross-file deps, 5+ SRDs, partial approval
+### Example C: Complex -- Cross-file deps, 5+ CRs, partial approval
 
-**Scenario:** Saskatchewan Habitational, effective 2026-01-01. 5 SRDs with
-inter-SRD dependencies:
+**Scenario:** Saskatchewan Habitational, effective 2026-01-01. 5 CRs with
+inter-CR dependencies:
 
-- SRD-001: Define ELITECOMP constant (logic-modifier) -- op-001-01
-- SRD-002: Add rate table routing in GetRateTableID (logic-modifier) -- op-002-01, depends on op-001-01
-- SRD-003: Add base rate Array6 for ELITECOMP in GetBasePremium_Home (rate-modifier) -- op-003-01, depends on op-001-01
-- SRD-004: Add DAT IDs to ResourceID.vb in each LOB (logic-modifier) -- op-004-01..06, depends on op-002-01
-- SRD-005: Add eligibility rule in CalcOption (logic-modifier) -- op-005-01, depends on op-001-01 and op-004-01
+- CR-001: Define ELITECOMP constant (structure_insertion) -- intent-001
+- CR-002: Add rate table routing in GetRateTableID (structure_insertion) -- intent-002, depends on intent-001
+- CR-003: Add base rate Array6 for ELITECOMP in GetBasePremium_Home (value_editing) -- intent-003, depends on intent-001
+- CR-004: Add DAT IDs to ResourceID.vb in each LOB (structure_insertion) -- intent-004..009, depends on intent-002
+- CR-005: Add eligibility rule in CalcOption (structure_insertion) -- intent-010, depends on intent-001 and intent-004
 
 **Dependency graph:**
 ```
-op-001-01 (ELITECOMP constant)
+intent-001 (ELITECOMP constant)
   |
-  +---> op-002-01 (rate table routing)
+  +---> intent-002 (rate table routing)
   |       |
-  |       +---> op-004-01 (DAT ID in Home ResourceID)
-  |       +---> op-004-02 (DAT ID in Condo ResourceID)
-  |       +---> op-004-03 (DAT ID in Tenant ResourceID)
-  |       +---> op-004-04 (DAT ID in FEC ResourceID)
-  |       +---> op-004-05 (DAT ID in Farm ResourceID)
-  |       +---> op-004-06 (DAT ID in Seasonal ResourceID)
+  |       +---> intent-004 (DAT ID in Home ResourceID)
+  |       +---> intent-005 (DAT ID in Condo ResourceID)
+  |       +---> intent-006 (DAT ID in Tenant ResourceID)
+  |       +---> intent-007 (DAT ID in FEC ResourceID)
+  |       +---> intent-008 (DAT ID in Farm ResourceID)
+  |       +---> intent-009 (DAT ID in Seasonal ResourceID)
   |                 |
-  +---> op-003-01 (base rate Array6)
+  +---> intent-003 (base rate Array6)
   |
-  +---> op-005-01 (eligibility rule) -- also depends on op-004-01
+  +---> intent-010 (eligibility rule) -- also depends on intent-004
 ```
 
 **Step 5 -- Topo sort:**
-- Level 0: op-001-01
-- Level 1: op-002-01, op-003-01
-- Level 2: op-004-01..06
-- Level 3: op-005-01
+- Level 0: intent-001
+- Level 1: intent-002, intent-003
+- Level 2: intent-004..009
+- Level 3: intent-010
 
-**Step 6 -- Phases:** 6 phases (level 0: 1 phase, level 1: 2 ops on same file
-= 2 phases, level 2: 6 ops on 6 different files = 1 phase, level 3: 1 phase).
+**Step 6 -- Phases:** 6 phases (level 0: 1 phase, level 1: 2 intents on same file
+= 2 phases, level 2: 6 intents on 6 different files = 1 phase, level 3: 1 phase).
 
 Total: 5 phases.
 
 **Step 9 -- Risk:** HIGH.
-Reasons: ["Cross-file dependency: op-005-01 -> op-004-01", "5 logic-modifier operations", "Inter-SRD dependencies"]
+Reasons: ["Cross-file dependency: intent-010 -> intent-004", "5 structure_insertion intents", "Inter-CR dependencies"]
 
-**Partial approval scenario:** Developer says "Approve SRD-001 and SRD-002, reject SRD-003, SRD-004, SRD-005."
+**Partial approval scenario:** Developer says "Approve CR-001 and CR-002, reject CR-003, CR-004, CR-005."
 
 Dependency validation:
-- SRD-003 (rejected): depends on SRD-001 (approved). OK to reject.
-- SRD-004 (rejected): depends on SRD-002 (approved). OK to reject.
-- SRD-005 (rejected): depends on SRD-001 (approved) and SRD-004 (rejected). OK to reject.
-- No approved SRD depends on a rejected SRD. Partial approval is valid.
+- CR-003 (rejected): depends on CR-001 (approved). OK to reject.
+- CR-004 (rejected): depends on CR-002 (approved). OK to reject.
+- CR-005 (rejected): depends on CR-001 (approved) and CR-004 (rejected). OK to reject.
+- No approved CR depends on a rejected CR. Partial approval is valid.
 
-If developer instead says "Approve SRD-004, reject SRD-001":
+If developer instead says "Approve CR-004, reject CR-001":
 ```
-Cannot approve SRD-004 without SRD-001.
-SRD-004 (Add DAT IDs) depends on SRD-002 (rate table routing),
-which depends on SRD-001 (ELITECOMP constant).
+Cannot approve CR-004 without CR-001.
+CR-004 (Add DAT IDs) depends on CR-002 (rate table routing),
+which depends on CR-001 (ELITECOMP constant).
 
 Options:
-  1. Approve SRD-001, SRD-002, and SRD-004 together
+  1. Approve CR-001, CR-002, and CR-004 together
   2. Reject all three
   3. Show me the dependency graph
 ```
 
 ---
 
-### Example D: Edge -- All operations on one file
+### Example D: Edge -- All intents on one file
 
-**Scenario:** 6 operations all targeting mod_Common_SKHab20260101.vb at different
-line numbers. No dependencies between operations (all independent).
+**Scenario:** 6 intents all targeting mod_Common_SKHab20260101.vb at different
+line numbers. No dependencies between intents (all independent).
 
-**Operations:**
-- op-001-01: GetBasePremium_Home (lines 312-418)
-- op-002-01: SetDisSur_Deductible Case 5000 (line 2202)
-- op-003-01: SetDisSur_Deductible Case 2500 (line 2180)
-- op-004-01: GetLiabilityBundlePremiums (lines 4012-4104)
-- op-004-02: GetLiabilityExtensionPremiums (lines 4106-4156)
-- op-005-01: Add constant at line ~23
+**Intents:**
+- intent-001: GetBasePremium_Home (lines 312-418)
+- intent-002: SetDisSur_Deductible Case 5000 (line 2202)
+- intent-003: SetDisSur_Deductible Case 2500 (line 2180)
+- intent-004: GetLiabilityBundlePremiums (lines 4012-4104)
+- intent-005: GetLiabilityExtensionPremiums (lines 4106-4156)
+- intent-006: Add constant at line ~23
 
 **Step 6 -- Phase grouping:** All at topo level 0, all same file. 6 sub-phases
-needed (max 1 operation per file per phase).
+needed (max 1 intent per file per phase).
 
 **Step 7 -- Bottom-to-top ordering is CRITICAL:**
 
 ```yaml
 file_operation_order:
   "Saskatchewan/Code/mod_Common_SKHab20260101.vb":
-    - op_id: "op-004-02"    # line 4106 (highest -- executed first)
+    - intent_id: "intent-005"  # line 4106 (highest -- executed first)
       line_ref: 4106
-    - op_id: "op-004-01"    # line 4012
+    - intent_id: "intent-004"  # line 4012
       line_ref: 4012
-    - op_id: "op-002-01"    # line 2202
+    - intent_id: "intent-002"  # line 2202
       line_ref: 2202
-    - op_id: "op-003-01"    # line 2180
+    - intent_id: "intent-003"  # line 2180
       line_ref: 2180
-    - op_id: "op-001-01"    # line 312
+    - intent_id: "intent-001"  # line 312
       line_ref: 312
-    - op_id: "op-005-01"    # line 23 (lowest -- executed last)
+    - intent_id: "intent-006"  # line 23 (lowest -- executed last)
       line_ref: 23
 ```
 
-The execution_sequence follows this order exactly. If op-005-01 (insertion at
+The execution_sequence follows this order exactly. If intent-006 (insertion at
 line 23) were executed first, it would shift ALL subsequent line numbers by 1+
-lines, making the line references for op-001-01 through op-004-02 incorrect.
+lines, making the line references for intent-001 through intent-005 incorrect.
 Bottom-to-top prevents this drift.
 
 **Plan display:** The plan document can show phases in any readable order (e.g.,
@@ -2438,7 +2572,7 @@ logical grouping), but the execution_sequence MUST follow bottom-to-top.
 mod_Common_SKHab20260101.vb. Now a new workflow has additional changes to the
 same file.
 
-**Analyzer output for operations:**
+**Analyzer output for intents:**
 ```yaml
 source_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"  # Same as target!
 target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
@@ -2457,16 +2591,16 @@ files: []
 EXECUTION PLAN: Saskatchewan Habitational 2026-01-01
 ====================================================
 
-Summary: 2 operations across 1 file, LOW risk
+Summary: 2 intents across 1 file, LOW risk
 
 FILE COPIES: None (target files already exist)
 
-Phase 1: Change $5000 deductible factor (op-001-01) [rate-modifier]
+Phase 1: Change $5000 deductible factor (intent-001) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: SetDisSur_Deductible()
   ...
 
-Phase 2: Change $2500 deductible factor (op-002-01) [rate-modifier]
+Phase 2: Change $2500 deductible factor (intent-002) [value_editing]
   File: Saskatchewan/Code/mod_Common_SKHab20260101.vb
   Function: SetDisSur_Deductible()
   ...
@@ -2479,27 +2613,26 @@ protection -- /iq-execute will verify it hasn't changed since the plan was built
 
 ---
 
-### Example F: Edge -- Zero operations (values already match)
+### Example F: Edge -- Zero intents (values already match)
 
-**Scenario:** The Analyzer found that all current values in the source file already
-equal the requested target values. Perhaps the rate change was already applied in
-a previous workflow.
+**Scenario:** The Decomposer + Analyzer found that all current values in the source
+file already equal the requested target values. Perhaps the rate change was already
+applied in a previous workflow.
 
-**dependency_graph.yaml:**
+**intent_graph.yaml:**
 ```yaml
-total_operations: 0
+total_intents: 0
 total_out_of_scope: 0
 out_of_scope: []
-shared_operations: {}
-lob_operations: {}
+intents: []
 execution_order: []
 ```
 
 **Planner behavior at Step 1.5:**
 
 ```
-[Planner] No in-scope operations to plan.
-          The Analyzer found 0 operations requiring changes.
+[Planner] No in-scope intents to plan.
+          The Decomposer found 0 intents requiring changes.
           This may mean all values already match the requested targets.
           Writing empty plan and exiting.
 ```
@@ -2514,20 +2647,20 @@ Summary: No changes needed -- all values already match requested targets.
 The Analyzer verified that current values in the source files already equal
 the requested values. No modifications are required.
 
-SRDs processed:
-  SRD-001: "Increase deductible factors" -- values already match
-  SRD-002: "Increase liability premiums" -- values already match
+CRs processed:
+  CR-001: "Increase deductible factors" -- values already match
+  CR-002: "Increase liability premiums" -- values already match
 
 No approval needed. The workflow will be marked as COMPLETED with no changes.
 ```
 
 **execution_order.yaml:**
 ```yaml
-planner_version: "1.0"
+planner_version: "2.0"
 generated_at: "2026-02-27T11:00:00"
 workflow_id: "20260101-SK-Hab-match"
 total_phases: 0
-total_operations: 0
+total_intents: 0
 total_value_changes: 0
 total_file_copies: 0
 total_vbproj_updates: 0
@@ -2585,7 +2718,7 @@ appear in the same function.
 **Planner behavior:** The Analyzer already separates these into `target_lines`
 (modify) and `skipped_lines` (don't modify). The Planner:
 - Shows only `target_lines` entries in the before/after section
-- Notes the skipped lines in the plan if `skipped_lines` is non-empty:
+- Notes the skipped lines in the plan if `skipped_lines` is non-empty on the intent:
 
 ```markdown
   Note: {N} Array6 lines skipped (membership tests, not rate values).
@@ -2595,12 +2728,12 @@ appear in the same function.
 ### 3. Developer-Confirmed: false
 
 **Pattern:** The Analyzer couldn't auto-confirm targets (e.g., multiple candidate
-functions, ambiguous match). The operation has `developer_confirmed: false`.
+functions, ambiguous match). The intent has `developer_confirmed: false`.
 
 **Planner behavior:** Flag prominently in the plan:
 
 ```markdown
-Phase {N}: {title} ({op_id}) [rate-modifier]
+Phase {N}: {title} ({intent_id}) [{capability}]
   *** WARNING: Targets NOT confirmed by developer ***
   *** The Analyzer found multiple candidates. Review carefully. ***
   File: {target_file}
@@ -2619,19 +2752,19 @@ checks for this, but the Planner double-checks).
 
 ```
 [Planner] ERROR: Circular dependency detected!
-          Cycle: op-001-01 -> op-003-01 -> op-002-01 -> op-001-01
+          Cycle: intent-001 -> intent-003 -> intent-002 -> intent-001
 
           This should have been caught by the Decomposer. The dependency
           graph has a cycle that makes it impossible to determine execution
-          order. Please review the depends_on fields in these operations
+          order. Please review the depends_on fields in these intents
           and break the cycle.
 ```
 
 Write no output files. The orchestrator must re-run from the Decomposer.
 
-### 5. Very Large Plan (100+ operations)
+### 5. Very Large Plan (100+ intents)
 
-**Pattern:** A massive rate update with many SRDs affecting many functions.
+**Pattern:** A massive rate update with many CRs affecting many functions.
 
 **Planner behavior:** In the execution_plan.md, summarize phases with counts and
 show abbreviated details:
@@ -2640,78 +2773,78 @@ show abbreviated details:
 EXECUTION PLAN: Saskatchewan Habitational 2026-01-01
 ====================================================
 
-Summary: 127 operations across 14 files, HIGH risk
+Summary: 127 intents across 14 files, HIGH risk
 LOBs affected: Home, Condo, Tenant, FEC, Farm, Seasonal
 
 ... (FILE COPIES section as normal) ...
 
-Phase 1: Base rate increases (42 operations) [rate-modifier]
-  Files: mod_Common_SKHab20260101.vb (36 ops), CalcOption_SKHOME20260101.vb (6 ops)
+Phase 1: Base rate increases (42 intents) [value_editing]
+  Files: mod_Common_SKHab20260101.vb (36 intents), CalcOption_SKHOME20260101.vb (6 intents)
 
   Showing first 3 of 42:
 
-    op-001-01: GetBasePremium_Home - multiply by 1.05
+    intent-001: GetBasePremium_Home - multiply by 1.05
       Before: Array6(basePremium, 233, 274, 319, 372, 432, 502)
       After:  Array6(basePremium, 245, 288, 335, 391, 454, 527)
 
-    op-001-02: GetBasePremium_Condo - multiply by 1.05
+    intent-002: GetBasePremium_Condo - multiply by 1.05
       Before: Array6(basePremium, 189, 222, 259, 301, 350, 407)
       After:  Array6(basePremium, 198, 233, 272, 316, 368, 427)
 
-    op-001-03: GetBasePremium_Tenant - multiply by 1.05
+    intent-003: GetBasePremium_Tenant - multiply by 1.05
       Before: Array6(basePremium, 145, 170, 198, 231, 268, 312)
       After:  Array6(basePremium, 152, 179, 208, 243, 281, 328)
 
-  ... (39 more operations following same 1.05x pattern)
+  ... (39 more intents following same 1.05x pattern)
 
-Phase 2: Factor table changes (18 operations) [rate-modifier]
+Phase 2: Factor table changes (18 intents) [value_editing]
   ... (abbreviated similarly)
 
 ... (remaining phases)
 
-FULL DETAIL: See plan/execution_order.yaml for complete operation list.
+FULL DETAIL: See plan/execution_order.yaml for complete intent list.
 ```
 
-The execution_order.yaml always contains ALL operations regardless of plan size.
+The execution_order.yaml always contains ALL intents regardless of plan size.
 
 ### 6. Partial Approval with Diamond Dependencies
 
-**Pattern:** SRD-A -> SRD-B, SRD-A -> SRD-C, SRD-B + SRD-C -> SRD-D. This
+**Pattern:** CR-A -> CR-B, CR-A -> CR-C, CR-B + CR-C -> CR-D. This
 creates a diamond dependency pattern.
 
 ```
-    SRD-A
+    CR-A
    /     \
-SRD-B   SRD-C
+CR-B    CR-C
    \     /
-    SRD-D
+    CR-D
 ```
 
-**Planner behavior:** The partial_approval_constraints surface all inter-SRD
-couplings. Rejecting SRD-A blocks SRD-B, SRD-C, AND SRD-D. Rejecting SRD-B
-blocks SRD-D (but not SRD-C). Rejecting SRD-C blocks SRD-D (but not SRD-B).
+**Planner behavior:** The partial_approval_constraints surface all inter-CR
+couplings. Rejecting CR-A blocks CR-B, CR-C, AND CR-D. Rejecting CR-B
+blocks CR-D (but not CR-C). Rejecting CR-C blocks CR-D (but not CR-B).
 
 The plan shows:
 ```markdown
 PARTIAL APPROVAL CONSTRAINTS:
-  The following SRDs are coupled by dependencies:
-  - SRD-B requires SRD-A: op-002-01 depends on op-001-01
-  - SRD-C requires SRD-A: op-003-01 depends on op-001-01
-  - SRD-D requires SRD-B: op-004-01 depends on op-002-01
-  - SRD-D requires SRD-C: op-004-01 depends on op-003-01
-  Rejecting a required SRD will also block the dependent SRD.
+  The following CRs are coupled by dependencies:
+  - CR-B requires CR-A: intent-002 depends on intent-001
+  - CR-C requires CR-A: intent-003 depends on intent-001
+  - CR-D requires CR-B: intent-004 depends on intent-002
+  - CR-D requires CR-C: intent-004 depends on intent-003
+  Rejecting a required CR will also block the dependent CR.
 ```
 
 ### 7. Cross-Province Shared File Flagged
 
-**Pattern:** An operation references `Code/PORTCommonHeat.vb` -- a cross-province
+**Pattern:** An intent references `Code/PORTCommonHeat.vb` -- a cross-province
 shared file that the plugin MUST NOT modify.
 
-**Planner behavior:** The Analyzer should have flagged this. If the operation
+**Planner behavior:** The Analyzer should have flagged this. If the intent
 still appears, the Planner includes a prominent WARNING:
 
 ```markdown
-Phase {N}: {title} ({op_id}) [WARNING: CROSS-PROVINCE SHARED FILE]
+Phase {N}: {title} ({intent_id}) [WARNING: CROSS-PROVINCE SHARED FILE]
   *** THIS OPERATION WILL NOT BE EXECUTED ***
   File: Code/PORTCommonHeat.vb
   Reason: Cross-province shared file. Modifying this file would affect
@@ -2724,29 +2857,29 @@ Phase {N}: {title} ({op_id}) [WARNING: CROSS-PROVINCE SHARED FILE]
     3. Test all affected provinces
 ```
 
-The operation is included in the plan for visibility but excluded from
+The intent is included in the plan for visibility but excluded from
 execution_sequence in execution_order.yaml.
 
 ### 8. File needs_new_file: true
 
-**Pattern:** The Logic Modifier must CREATE a file from scratch (e.g., a new
+**Pattern:** The Change Engine must CREATE a file from scratch (e.g., a new
 Option_*.vb file for a new endorsement type).
 
 **Planner behavior:**
 
 ```markdown
-Phase {N}: Create Option_EliteComp_SKHOME20260101.vb ({op_id}) [logic-modifier]
+Phase {N}: Create Option_EliteComp_SKHOME20260101.vb ({intent_id}) [file_creation]
   CREATE NEW FILE: Saskatchewan/Code/Option_EliteComp_SKHOME20260101.vb
   Template: Saskatchewan/Code/Option_Comprehensive_SKHOME20250901.vb
   Description: New endorsement option file for Elite Comp coverage.
-               Logic Modifier will use the template as a structural reference
+               The Change Engine will use the template as a structural reference
                and generate the new file with ELITECOMP-specific logic.
 
   *** New file -- no before/after comparison available ***
-  *** Template will guide structure; values come from SRD parameters ***
+  *** Template will guide structure; values come from CR parameters ***
 ```
 
-In execution_order.yaml, the operation appears normally. In file_hashes.yaml,
+In execution_order.yaml, the intent appears normally. In file_hashes.yaml,
 the target file has `hash: null` (does not exist yet).
 
 ### 9. has_expressions: true in Array6
@@ -2757,7 +2890,7 @@ instead of simple numeric values.
 **Planner behavior:** Elevate risk to HIGH and annotate:
 
 ```markdown
-Phase {N}: {title} ({op_id}) [rate-modifier]
+Phase {N}: {title} ({intent_id}) [value_editing]
   File: {target_file}
   Function: {function_name}()
   Action: Multiply all Array6 values by {factor}
@@ -2770,7 +2903,7 @@ Phase {N}: {title} ({op_id}) [rate-modifier]
     Array6(basePremium, 42, 68, 105)
                         ^^ evaluated: (30+10)*1.05=42
 
-  The Rate Modifier will:
+  The Change Engine will:
     1. Evaluate each expression to get the numeric value
     2. Apply the multiplication factor
     3. Replace the expression with the computed result
@@ -2789,7 +2922,7 @@ Planner run. Someone edited a Code/ file while the pipeline was in progress.
           File: Saskatchewan/Code/mod_Common_SKHab20250901.vb
           Expected hash: sha256:a1b2c3d4...
           Current hash:  sha256:x9y8z7w6...
-          Affected operations: op-002-01, op-003-01, op-004-01, op-004-02
+          Affected intents: intent-001, intent-002, intent-003, intent-004
 
           Someone modified this file between the Analyzer and Planner runs.
           The Analyzer's line numbers and target_lines content may be stale.
@@ -2802,36 +2935,38 @@ Write no output files. The orchestrator must re-run the full pipeline.
 
 ## KEY RESPONSIBILITIES (Summary)
 
-1. **Load all Analyzer output:** Read manifest, config, dependency graph, operation
-   files, files_to_copy, and blast radius report.
-2. **Validate operation completeness:** Every operation must have required Analyzer
+1. **Load all upstream output:** Read manifest, config, intent_graph.yaml,
+   files_to_copy, and blast radius report.
+2. **Validate intent completeness:** Every intent must have required Analyzer-enriched
    fields (source_file, target_file, file_hash, function_line_start/end or
    insertion_point, target_lines or equivalent).
 3. **Verify file hashes:** Compute current SHA-256 of every source file and compare
    against Analyzer's recorded hashes. STOP if any mismatch.
-4. **Build and validate the dependency DAG:** Parse depends_on edges, check for
+4. **Resolve open questions:** Collect open_questions from intents, present to
+   developer with code context, record answers, update intent parameters and confidence.
+5. **Build and validate the dependency DAG:** Parse depends_on edges, check for
    self-loops and cycles using DFS 3-color marking.
-5. **Compute topological sort:** Use Kahn's algorithm with deterministic tie-breaking
-   (alphabetical op_id). Track topological levels for phase grouping.
-6. **Group operations into phases:** Same topological level + different files = same
-   phase. Same file = different phases. Assign titles, agents, rationales.
-7. **Order within-file operations bottom-to-top:** Highest line number first within
+6. **Compute topological sort:** Use Kahn's algorithm with deterministic tie-breaking
+   (alphabetical intent_id). Track topological levels for phase grouping.
+7. **Group intents into phases:** Same topological level + different files = same
+   phase. Same file = different phases. Assign titles, capabilities, rationales.
+8. **Order within-file intents bottom-to-top:** Highest line number first within
    each file to prevent line-number drift during execution.
-8. **Extract before/after values:** Read actual source files, compute expected new
+9. **Extract before/after values:** Read actual source files, compute expected new
    values applying factors and rounding, generate side-by-side comparisons.
-9. **Compute risk level:** LOW -> MEDIUM -> HIGH based on file count, shared modules,
-   cross-file dependencies, expression complexity, unconfirmed operations.
-10. **Generate execution_plan.md:** Human-readable plan with scannable format, before/
+10. **Compute risk level:** LOW -> MEDIUM -> HIGH based on file count, shared modules,
+    cross-file dependencies, expression complexity, unconfirmed intents.
+11. **Generate execution_plan.md:** Human-readable plan with scannable format, before/
     after previews, impact metrics, warnings, and partial approval constraints.
-11. **Generate execution_order.yaml:** Machine-readable plan with phases, file operation
+12. **Generate execution_order.yaml:** Machine-readable plan with phases, file operation
     order (bottom-to-top), flat execution sequence, and file copy instructions.
-12. **Write file_hashes.yaml:** Capture SHA-256 of all source, target, and .vbproj
+13. **Write file_hashes.yaml:** Capture SHA-256 of all source, target, and .vbproj
     files for TOCTOU protection during /iq-execute.
-13. **Handle zero-operation case:** When Analyzer found nothing to change, write an
+14. **Handle zero-intent case:** When Decomposer found nothing to change, write an
     empty plan explaining why and exit cleanly.
-14. **Surface cross-province shared file warnings:** Include in plan but exclude from
+15. **Surface cross-province shared file warnings:** Include in plan but exclude from
     execution sequence.
-15. **Carry forward partial approval constraints:** Copy from dependency_graph.yaml
+16. **Carry forward partial approval constraints:** Copy from intent_graph.yaml
     into execution_order.yaml and show in execution_plan.md.
 
 ---
@@ -2840,8 +2975,9 @@ Write no output files. The orchestrator must re-run the full pipeline.
 
 | Responsibility | Planner | Orchestrator (/iq-plan) | /iq-execute |
 |---|---|---|---|
-| Order operations (topo sort) | YES | NO | Follows order |
+| Order intents (topo sort) | YES | NO | Follows order |
 | Bottom-to-top within file | YES | NO | Follows order |
+| Resolve open questions (Q&A) | YES | NO | NO |
 | Present plan to developer | Writes files | Shows to developer | NO |
 | Handle Gate 1 approval/rejection | NO | YES | Requires approved |
 | Handle partial approval | Writes constraints | Processes approval | Executes approved only |
@@ -2850,7 +2986,7 @@ Write no output files. The orchestrator must re-run the full pipeline.
 | File copies | Lists in plan | NO | Executes copies |
 | Before/after computation | YES | Shows to developer | Executes changes |
 | Risk level computation | YES | Displays to developer | NO |
-| Developer interaction | NONE (fully automated) | YES (Gate 1) | YES (if issues) |
+| Developer interaction | Q&A step only (Step 3.5) | YES (Gate 1) | YES (if issues) |
 | Phase grouping | YES | Displays to developer | Follows phases |
 | Cross-province file warning | Includes in plan | Shows warning | Skips execution |
 | .vbproj update instructions | Passes through from Analyzer | NO | Executes updates |
@@ -2865,38 +3001,38 @@ that enables partial approval:
 
 ### What the Planner provides
 
-1. **partial_approval_constraints** in execution_order.yaml -- lists inter-SRD
+1. **partial_approval_constraints** in execution_order.yaml -- lists inter-CR
    couplings so the orchestrator can validate the developer's choices.
 
-2. **SRD grouping** -- every operation has an `srd` field, so the orchestrator
-   can filter by SRD.
+2. **CR grouping** -- every intent has a `cr` field, so the orchestrator
+   can filter by CR.
 
-3. **Dependency chain tracking** -- the `depends_on` edges in each operation
+3. **Dependency chain tracking** -- the `depends_on` edges in each intent
    allow the orchestrator to compute transitive dependencies:
 
 ```python
-def get_blocked_srds(rejected_srds, op_map):
-    """Given rejected SRDs, find all transitively blocked SRDs."""
-    rejected_ops = set()
-    for op in op_map.values():
-        if op['srd'] in rejected_srds:
-            rejected_ops.add(op['id'])
+def get_blocked_crs(rejected_crs, intent_map):
+    """Given rejected CRs, find all transitively blocked CRs."""
+    rejected_intents = set()
+    for intent in intent_map.values():
+        if intent['cr'] in rejected_crs:
+            rejected_intents.add(intent['id'])
 
-    blocked_srds = set()
+    blocked_crs = set()
     changed = True
     while changed:
         changed = False
-        for op in op_map.values():
-            if op['srd'] in rejected_srds or op['srd'] in blocked_srds:
+        for intent in intent_map.values():
+            if intent['cr'] in rejected_crs or intent['cr'] in blocked_crs:
                 continue
-            for dep_id in op.get('depends_on', []):
-                if dep_id in rejected_ops:
-                    blocked_srds.add(op['srd'])
-                    rejected_ops.add(op['id'])
+            for dep_id in intent.get('depends_on', []):
+                if dep_id in rejected_intents:
+                    blocked_crs.add(intent['cr'])
+                    rejected_intents.add(intent['id'])
                     changed = True
                     break
 
-    return blocked_srds
+    return blocked_crs
 ```
 
 ### What the orchestrator does with it
@@ -2919,7 +3055,7 @@ with updated inputs.
 **Scenario 1: Developer corrects a specific value.**
 "Change the factor for Territory 1 from 1.05 to 1.03."
 
-The orchestrator updates the operation file (op-*.yaml) and re-runs the Planner.
+The orchestrator updates the intent in intent_graph.yaml and re-runs the Planner.
 The Planner re-reads all inputs and regenerates the plan. No special handling
 needed -- the Planner always reads from disk.
 
@@ -2928,12 +3064,12 @@ needed -- the Planner always reads from disk.
 
 The orchestrator must re-run from the Analyzer (or possibly the Decomposer)
 to get new line numbers. The Planner is not involved until the Analyzer produces
-updated operation files.
+an updated intent_graph.yaml.
 
 **Scenario 3: Developer requests additional changes.**
 "Also change the $2500 deductible factor."
 
-The orchestrator must re-run from the Intake agent to parse the new SRD.
+The orchestrator must re-run from the Intake agent to parse the new CR.
 The Planner is not involved until the full pipeline produces updated inputs.
 
 ### Planner's role in revision
@@ -2951,25 +3087,25 @@ are up-to-date before invoking the Planner.
 
 ## Error Handling
 
-### Missing Operation Files
+### Missing Intents
 
 ```
-[Planner] ERROR: Expected {N} operation files (from dependency_graph.yaml)
-          but found {M} in analysis/operations/.
-          Missing: {list of missing op IDs}
+[Planner] ERROR: Expected {N} intents (from intent_graph.yaml)
+          but found {M} in the intents list.
+          Missing: {list of missing intent IDs}
 
-          The Analyzer may not have completed successfully.
-          Check manifest.yaml for analyzer.status.
+          The Decomposer/Analyzer may not have completed successfully.
+          Check manifest.yaml for decomposer.status.
 ```
 
-### Invalid Operation Schema
+### Invalid Intent Schema
 
 ```
-[Planner] ERROR: Operation {op_id} has invalid schema.
-          File: analysis/operations/{op_id}.yaml
+[Planner] ERROR: Intent {intent_id} has invalid schema.
+          File: analysis/intent_graph.yaml
           Issue: {specific validation failure}
 
-          Expected fields for {agent} operation:
+          Expected fields for {capability} intent:
             {list of required fields}
 
           Missing: {list of missing fields}
@@ -2978,12 +3114,12 @@ are up-to-date before invoking the Planner.
 ### Source File Not Found
 
 ```
-[Planner] ERROR: Source file not found for operation {op_id}:
+[Planner] ERROR: Source file not found for intent {intent_id}:
           Path: {source_file}
 
           This file should exist on disk. Either:
             - The file was deleted after the Analyzer ran
-            - The path in the operation file is incorrect
+            - The path in the intent_graph.yaml is incorrect
           Re-run from /iq-plan to re-analyze.
 ```
 
@@ -2994,7 +3130,7 @@ are up-to-date before invoking the Planner.
           File: {filepath}
           Expected hash: {expected}
           Current hash:  {actual}
-          Affected operations: {op_ids}
+          Affected intents: {intent_ids}
 
           Someone modified this file between the Analyzer and Planner runs.
           Re-run from /iq-plan to get fresh analysis.
@@ -3007,7 +3143,7 @@ are up-to-date before invoking the Planner.
           Cycle: {cycle_path}
 
           This should have been caught by the Decomposer.
-          Please review the depends_on fields in these operations
+          Please review the depends_on fields in these intents
           and break the cycle.
 ```
 
@@ -3024,8 +3160,8 @@ are up-to-date before invoking the Planner.
 ### Topological Sort Incomplete
 
 ```
-[Planner] ERROR: Topological sort processed {N} of {M} operations.
-          Stuck operations: {list}
+[Planner] ERROR: Topological sort processed {N} of {M} intents.
+          Stuck intents: {list}
 
           This indicates a hidden cycle in the dependency graph.
           Re-run from the Decomposer to rebuild the dependency graph.
@@ -3036,22 +3172,18 @@ are up-to-date before invoking the Planner.
 ## NOT YET IMPLEMENTED (Future Enhancements)
 
 - **Interactive plan builder:** Allow the developer to reorder phases or merge
-  operations interactively before approving. Currently the Planner generates a
+  intents interactively before approving. Currently the Planner generates a
   fixed plan that the developer approves or rejects as-is.
 
-- **Dry-run execution:** Run the Rate Modifier and Logic Modifier in dry-run mode
-  to validate that all changes CAN be applied before presenting the plan. This
-  would catch issues like "function not found at expected line" before Gate 1.
+- **Dry-run execution:** Run the Change Engine in dry-run mode to validate that
+  all changes CAN be applied before presenting the plan. This would catch issues
+  like "function not found at expected line" before Gate 1.
 
 - **Plan diffing:** When the Planner is re-run after a revision, show what changed
   compared to the previous plan. Currently each plan is generated independently.
 
-- **Confidence scores:** Assign per-operation confidence based on how precisely the
-  Analyzer matched targets. High confidence = exact content match, low confidence =
-  pattern-based guess. Show in the plan to help developers focus review.
-
-- **Parallel execution hints:** Currently all same-file operations are sequential.
-  Future versions could analyze whether two operations in the same file but in
+- **Parallel execution hints:** Currently all same-file intents are sequential.
+  Future versions could analyze whether two intents in the same file but in
   different functions could safely execute in parallel (if their line ranges don't
   overlap and neither adds/removes lines).
 

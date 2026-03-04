@@ -1,6 +1,6 @@
 ---
 name: iq-plan
-description: Analyze a rate change ticket and build an execution plan. Runs Intake, Discovery, Decomposer, Analyzer, and Planner agents, then presents Gate 1 for developer approval.
+description: Analyze a ticket and build an execution plan. Runs Intake, Discovery, Analyzer, Decomposer, and Planner agents, then presents Gate 1 for developer approval.
 user-invocable: true
 ---
 
@@ -8,9 +8,9 @@ user-invocable: true
 
 ## 1. Purpose & Trigger
 
-Start a new rate change workflow or resume an existing one. This is the analysis
+Start a new workflow or resume an existing one. This is the analysis
 orchestrator that drives the 5-agent analysis pipeline (Intake → Discovery →
-Decomposer → Analyzer → Planner) through Gate 1 approval. After the developer types `/iq-plan`,
+Analyzer → Decomposer → Planner) through Gate 1 approval. After the developer types `/iq-plan`,
 everything else is conversational: the developer approves, rejects, asks questions,
 provides corrections, and the orchestrator routes work to agents, manages state,
 and produces the execution plan. Execution and review are handled by `/iq-execute`
@@ -164,7 +164,7 @@ Found {N} incomplete workflow(s):
      Province:     {province_name}
      LOBs:         {lobs}
      Last updated: {updated_at}
-     SRD progress: {completed}/{total} SRDs
+     CR progress:  {completed}/{total} change requests
      Last action:  {description of last completed step}
 
 Options:
@@ -242,7 +242,7 @@ Read manifest.yaml -> phase_status section
 
 1. Find the last phase with status: "completed"
 2. Resume from the NEXT phase in sequence:
-   intake -> decomposer -> analyzer -> planner -> gate_1 -> modifiers -> reviewer -> gate_2
+   intake -> discovery -> analyzer -> decomposer -> planner -> gate_1 -> change_engine -> reviewer -> gate_2
 
 3. Also read developer_decisions to avoid re-asking questions:
    "Developer already confirmed: {list of decisions}"
@@ -260,9 +260,10 @@ Read manifest.yaml -> phase_status section
 **Fallback (if phase_status is missing or incomplete):** determine sub-state from artifacts:
 
 ```
-If parsed/change_spec.yaml does NOT exist     -> resume at Intake
-If analysis/dependency_graph.yaml does NOT exist -> resume at Decomposer
+If parsed/change_requests.yaml does NOT exist  -> resume at Intake
+If analysis/code_discovery.yaml does NOT exist -> resume at Discovery
 If analysis/blast_radius.md does NOT exist     -> resume at Analyzer
+If analysis/intent_graph.yaml does NOT exist   -> resume at Decomposer
 If plan/execution_plan.md does NOT exist       -> resume at Planner
 ```
 
@@ -645,9 +646,9 @@ Using the workstream name from Step 4.1, create the full directory structure:
   input/
     attachments/
   parsed/
-    srds/
+    requests/
   analysis/
-    operations/
+    analyzer_output/
   plan/
   execution/
     snapshots/
@@ -657,7 +658,7 @@ Using the workstream name from Step 4.1, create the full directory structure:
 
 Use the Bash tool to create directories:
 ```bash
-mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/srds,analysis/operations,plan,execution/snapshots,verification,summary}
+mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis/analyzer_output,plan,execution/snapshots,verification,summary}
 ```
 
 Write the developer's raw input (held from Step 4.2) to `input/source.md`.
@@ -675,6 +676,7 @@ that was used as `input/source.md`.
 Write the manifest.yaml with initial metadata (see Section 11 for full schema):
 
 ```yaml
+manifest_version: "2.0"
 workflow_id: "{workstream-name}"
 codebase_root: "{root_path from config.yaml}"
 carrier: "{carrier_name from config.yaml}"
@@ -714,8 +716,8 @@ lifecycle:
   archive_after: null                   # completed_at + 14 days (or 7 for DISCARDED)
   archived_at: null                     # set when moved to archive/
 
-srd_count: 0
-srds: {}
+cr_count: 0
+change_requests: {}
 
 error_log: []
 ```
@@ -772,13 +774,13 @@ output files back to the workstream folder. The orchestrator's job is
 ```
 Pipeline flow:
 
-  Steps 1-4 (launched as sub-agents or team):
-    Intake -> Discovery -> Decomposer -> Analyzer -> Planner
-                                          |
-                                    [GATE 1: developer approves plan]
-                                          |
-                                    state: PLANNED -- /iq-plan ends here
-                                          |
+  Steps 1-5 (launched as sub-agents or team):
+    Intake -> Discovery -> Analyzer -> Decomposer -> Planner
+                                                      |
+                                                [GATE 1: developer approves plan]
+                                                      |
+                                                state: PLANNED -- /iq-plan ends here
+                                                      |
   (Execution and review handled by /iq-execute and /iq-review respectively)
 ```
 
@@ -797,9 +799,9 @@ Before Step 1, the orchestrator creates an agent team:
 2. Create 5 tasks with sequential dependencies:
    - "Run Intake agent"       (no blockers)
    - "Run Discovery agent"    (blocked by Intake)
-   - "Run Decomposer agent"   (blocked by Discovery)
-   - "Run Analyzer agent"     (blocked by Decomposer)
-   - "Run Planner agent"      (blocked by Analyzer)
+   - "Run Analyzer agent"     (blocked by Discovery)
+   - "Run Decomposer agent"   (blocked by Analyzer)
+   - "Run Planner agent"      (blocked by Decomposer)
 3. For each step: spawn a teammate agent (see Agent Launch Protocol)
 4. Developer questions are relayed via SendMessage:
    agent -> orchestrator -> developer -> orchestrator -> agent
@@ -837,7 +839,7 @@ Task tool:
 
 ### Agent Launch Protocol
 
-For each agent in Steps 1-4 (Intake, Discovery, Decomposer, Analyzer, Planner),
+For each agent in Steps 1-5 (Intake, Discovery, Analyzer, Decomposer, Planner),
 the orchestrator launches it with the Task tool.
 
 **Team mode** — include `team_name`:
@@ -935,55 +937,62 @@ Save the raw input to `input/source.md`:
 - If text: write the text as-is
 - If PDF/Excel path: copy the file to `input/attachments/`, note the path
   in `source.md`
+- If image path (PNG, JPG, etc.): copy to `input/attachments/`, note the path
+  in `source.md`. The Intake agent will read images using Claude's multimodal
+  capabilities to extract rate tables or annotations.
 - If natural language: write verbatim
+
+**Auto-fetched tickets with attachments:** If `fetch-ticket.sh` downloaded ticket
+attachments (images, PDFs), they are already in `input/ticket-data/`. The Intake
+agent will scan for image files and read them to extract any rate values or context.
 
 **Launch the Intake agent** using the Agent Launch Protocol above:
 
 ```
 Agent:  intake
 Input:  input/source.md, .iq-workstreams/config.yaml
-Output: parsed/change_spec.yaml, parsed/srds/srd-NNN.yaml
+Output: parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml
 ```
 
 The Intake agent reads `.iq-update/agents/intake.md` and autonomously:
-- Parses the input into structured SRDs
-- Classifies each SRD by type and complexity
+- Parses the input into structured change requests (CRs)
+- Understands any ticket format (ADO, Jira, plain text, PDF, Excel)
 - Detects DAT-file-based rate changes (hab dwelling base rates)
 - Detects rounding mode (multiply+round vs explicit values)
 - Asks clarifying questions if input is ambiguous (via developer interaction protocol)
 
 **After the agent completes:**
 
-1. Read `parsed/change_spec.yaml` to get the parsed results.
+1. Read `parsed/change_requests.yaml` to get the parsed results.
 
 2. Show the developer what was parsed:
 
    ```
-   Parsed {N} change(s):
-     SRD-001: {title} ({type}, {complexity})
-     SRD-002: {title} ({type}, {complexity})
+   Parsed {N} change request(s):
+     CR-001: {title} ({complexity})
+     CR-002: {title} ({complexity})
      ...
    ```
 
-   If any SRD has `dat_file_warning: true`:
+   If any CR has `dat_file_warning: true`:
    ```
-   NOTE: SRD-{NNN} targets hab dwelling base rates, which live in external
+   NOTE: CR-{NNN} targets hab dwelling base rates, which live in external
    DAT files -- NOT in VB code. This change is outside the plugin's scope.
    I'll flag it in the summary but won't attempt to edit DAT files.
    ```
 
 3. Update manifest:
-   - `srd_count: {N}`
-   - `srds:` with each SRD ID and status `PENDING`
+   - `cr_count: {N}`
+   - `change_requests:` with each CR ID and status `PENDING`
    - `ticket_ref:` if extracted from input
    - `phase_status.intake.status: "completed"`
-   - `phase_status.intake.summary: "{N} SRDs: {types}"`
+   - `phase_status.intake.summary: "{N} CRs parsed"`
    - `updated_at: "{now}"`
    - Append any developer Q&A to `developer_decisions`
 
 **If the developer says "I forgot to mention X" AFTER intake:** Add the new
 information to `input/source.md`, re-launch the Intake agent (or launch a
-supplemental run). Create additional SRDs and update the manifest accordingly.
+supplemental run). Create additional CRs and update the manifest accordingly.
 
 ---
 
@@ -996,7 +1005,7 @@ supplemental run). Create additional SRDs and update the manifest accordingly.
 
 ```
 Agent:  discovery
-Input:  parsed/change_spec.yaml, parsed/srds/srd-NNN.yaml,
+Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
         target .vbproj files, CalcMain.vb, Code/ files,
         .iq-workstreams/config.yaml
 Output: analysis/code_discovery.yaml
@@ -1005,9 +1014,9 @@ Output: analysis/code_discovery.yaml
 The Discovery agent reads `.iq-update/agents/discovery.md` and autonomously:
 - Reads CalcMain.vb and traces the full calculation flow
 - Reads the primary shared code files (mod_Common, mod_Algorithms, etc.)
-- Matches each SRD to its exact target function by reading actual code
+- Matches each change request to its exact target function by reading actual code
 - Identifies related functions and peer templates for downstream agents
-- Extracts CalcOption dispatch tables (if endorsement SRDs exist)
+- Extracts CalcOption dispatch tables (if endorsement CRs exist)
 
 **After the agent completes:**
 
@@ -1019,22 +1028,22 @@ The Discovery agent reads `.iq-update/agents/discovery.md` and autonomously:
    Code Discovery Complete:
      Entry point: {main_function} in {CalcMain path}
      Calculation flow: {N} functions traced from CalcMain
-     SRD targets resolved:
-       SRD-001: {title} → {function} in {file}
-       SRD-002: {title} → {function} in {file}
+     CR targets resolved:
+       CR-001: {title} → {function} in {file}
+       CR-002: {title} → {function} in {file}
      Related functions flagged: {N}
      Peer templates found: {N}
    ```
 
-   If any SRD has `resolved: false`:
+   If any CR has `resolved: false`:
    ```
-   NOTE: SRD-{NNN} could not be mapped to a specific function.
-   The Decomposer will fall back to heuristic matching for this SRD.
+   NOTE: CR-{NNN} could not be mapped to a specific function.
+   The Decomposer will fall back to heuristic matching for this CR.
    ```
 
 3. Update manifest:
    - `phase_status.discovery.status: "completed"`
-   - `phase_status.discovery.summary: "{N}/{total} SRDs resolved, {N} flow steps"`
+   - `phase_status.discovery.summary: "{N}/{total} CRs resolved, {N} flow steps"`
    - `updated_at: "{now}"`
 
 **If Discovery fails entirely** (e.g., CalcMain not found, .vbproj unreadable):
@@ -1044,41 +1053,7 @@ existing heuristic behavior when `code_discovery.yaml` is absent.
 
 ---
 
-### Step 2: DECOMPOSER
-
-**Manifest update:** Set `phase_status.decomposer.status: "in_progress"`,
-`updated_at: "{now}"`
-
-**Launch the Decomposer agent** using the Agent Launch Protocol:
-
-```
-Agent:  decomposer
-Input:  parsed/change_spec.yaml, parsed/srds/srd-NNN.yaml,
-        analysis/code_discovery.yaml (from Discovery, if exists),
-        target .vbproj files, .iq-workstreams/config.yaml
-Output: analysis/dependency_graph.yaml, analysis/operations/op-NNN.yaml
-```
-
-The Decomposer agent reads `.iq-update/agents/decomposer.md` and autonomously:
-- Breaks each SRD into atomic operations
-- Identifies which file(s) each operation targets
-- Builds a dependency graph with inter-SRD constraints
-- Assigns each operation to `rate-modifier` or `logic-modifier`
-
-**After the agent completes:**
-
-1. Read `analysis/dependency_graph.yaml` to verify operation count.
-
-2. Update manifest:
-   - Update each SRD status to `ANALYZING`
-   - `phase_status.decomposer.status: "completed"`
-   - `phase_status.decomposer.summary: "{N} operations across {N} files"`
-   - `updated_at: "{now}"`
-   - Append any developer Q&A to `developer_decisions`
-
----
-
-### Step 3: ANALYZER
+### Step 2: ANALYZER
 
 **Manifest update:** Set `phase_status.analyzer.status: "in_progress"`,
 `updated_at: "{now}"`
@@ -1087,16 +1062,18 @@ The Decomposer agent reads `.iq-update/agents/decomposer.md` and autonomously:
 
 ```
 Agent:  analyzer
-Input:  analysis/dependency_graph.yaml, analysis/operations/op-NNN.yaml,
+Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
+        analysis/code_discovery.yaml (from Discovery, if exists),
         target .vbproj files, actual Code/ source files,
         .iq-workstreams/config.yaml
-Output: enriched analysis/operations/op-NNN.yaml (with line numbers),
+Output: analysis/analyzer_output/ (function understanding blocks, target mapping),
         analysis/files_to_copy.yaml, analysis/blast_radius.md
 ```
 
 The Analyzer agent reads `.iq-update/agents/analyzer.md` and autonomously:
-- Reads actual VB.NET source files to find exact line numbers
+- Reads actual VB.NET source files to find exact function locations
 - Identifies function boundaries, Array6 calls, Select Case blocks
+- Builds Function Understanding Blocks (FUBs) with branch trees, hazards, context
 - Determines which Code/ files need new dated copies
 - Runs reverse .vbproj lookup for hidden blast radius
 - Computes TOCTOU file hashes
@@ -1112,20 +1089,20 @@ blocks matching "deductible", or 2 functions matching "GetBasePrem*").
   and relays the answer back. Expect 3-5 questions for a typical hab workflow.
   Each question includes candidate details formatted per the Analyzer's .md spec.
 
-- **Sequential mode:** The Analyzer writes candidates to `op-NNN.yaml` with
+- **Sequential mode:** The Analyzer writes candidates to output YAML with
   `status: "pending_confirmation"` and returns. The orchestrator reads all
   pending confirmations, presents them to the developer in batch:
 
   ```
   The Analyzer found ambiguous targets that need your input:
 
-    op-001-02: 4 candidates for "deductible" Select Case
+    CR-001: 4 candidates for "deductible" Select Case
       Candidate 1: SetDisSur_Deductible() at line 1205
       Candidate 2: SetDisSur_Deductible() at line 1340 (farm path)
       ...
     Which one? (enter number, or "all")
 
-    op-002-01: 2 candidates for "GetBasePremium"
+    CR-002: 2 candidates for "GetBasePremium"
       ...
   ```
 
@@ -1146,16 +1123,52 @@ blocks matching "deductible", or 2 functions matching "GetBasePrem*").
      {N} file(s) to copy (new dated versions)
      {N} shared module change(s) (affects {N} LOBs)
      {N} LOB-specific change(s)
-     {N} total operations across {N} files
+     {N} target functions analyzed across {N} files
 
    {Any warnings from reverse lookup or cross-LOB detection}
    ```
 
 2. Update manifest:
    - `phase_status.analyzer.status: "completed"`
-   - `phase_status.analyzer.summary: "{N} files, {N} operations, {warnings}"`
+   - `phase_status.analyzer.summary: "{N} files, {N} functions analyzed, {warnings}"`
    - `updated_at: "{now}"`
    - Append all developer Q&A to `developer_decisions`
+
+---
+
+### Step 3: DECOMPOSER
+
+**Manifest update:** Set `phase_status.decomposer.status: "in_progress"`,
+`updated_at: "{now}"`
+
+**Launch the Decomposer agent** using the Agent Launch Protocol:
+
+```
+Agent:  decomposer
+Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
+        analysis/code_discovery.yaml (from Discovery, if exists),
+        analysis/analyzer_output/ (from Analyzer),
+        analysis/blast_radius.md,
+        target .vbproj files, .iq-workstreams/config.yaml
+Output: analysis/intent_graph.yaml
+```
+
+The Decomposer agent reads `.iq-update/agents/decomposer.md` and autonomously:
+- Breaks each change request into intents grounded in discovered code
+- Uses Analyzer output to map intents to verified target regions
+- Builds the intent graph with dependencies and open questions
+- Tags each intent with a strategy_hint (optional) for the Change Engine
+
+**After the agent completes:**
+
+1. Read `analysis/intent_graph.yaml` to verify intent count.
+
+2. Update manifest:
+   - Update each CR status to `ANALYZING`
+   - `phase_status.decomposer.status: "completed"`
+   - `phase_status.decomposer.summary: "{N} intents across {N} files"`
+   - `updated_at: "{now}"`
+   - Append any developer Q&A to `developer_decisions`
 
 ---
 
@@ -1168,8 +1181,9 @@ blocks matching "deductible", or 2 functions matching "GetBasePrem*").
 
 ```
 Agent:  planner
-Input:  analysis/dependency_graph.yaml, analysis/operations/op-NNN.yaml,
+Input:  analysis/intent_graph.yaml,
         analysis/files_to_copy.yaml, analysis/blast_radius.md,
+        analysis/analyzer_output/,
         actual Code/ source files
 Output: plan/execution_plan.md, plan/execution_order.yaml,
         execution/file_hashes.yaml
@@ -1211,7 +1225,7 @@ FILE COPIES:
   {old_file} -> {new_file}
     .vbproj updates: {N} file(s)
 
-Phase 1: {title} (op-{NNN}) [{agent}]
+Phase 1: {title} (intent-{NNN}) [{capability}]
   File: {filepath}
   Function: {function_name}()
   Action: {description}
@@ -1239,10 +1253,10 @@ Shared module: {filename}
 FILE COPIES:
   {list of copies with .vbproj update counts}
 
-Phase 1: {title} (op-{NNN}) [{agent}]
+Phase 1: {title} (intent-{NNN}) [{capability}]
   {details}
 
-Phase 2: {title} (op-{NNN}) [{agent}, depends on Phase 1]
+Phase 2: {title} (intent-{NNN}) [{capability}, depends on Phase 1]
   {details}
 
 ... (all phases)
@@ -1266,7 +1280,7 @@ Mapping (Section 12):**
 ```
 1. Set manifest state: "PLANNED"
 2. Set manifest phase_status.gate_1.status: "approved"
-3. Set manifest phase_status.gate_1.summary: "Developer approved all {N} SRDs"
+3. Set manifest phase_status.gate_1.summary: "Developer approved all {N} CRs"
 4. Set manifest updated_at: "{now}"
 5. Present the "After Plan Approval" message (Section 9)
 ```
@@ -1277,29 +1291,86 @@ fresh context window. Do NOT attempt to run modifier agents.
 **REJECT** (developer says "no", "wrong", "that's not right", "reject",
 "change X to Y", "the value should be Z"):
 
+**HARD RULE — AGENT OUTPUT IMMUTABILITY:**
+The orchestrator MUST NEVER directly edit files in these directories:
+- `plan/` — owned by Planner agent
+- `analysis/` — owned by Analyzer and Decomposer agents
+- `parsed/` — owned by Intake agent
+
+These files are **agent outputs**. The only way to change them is to re-run
+the agent that produced them. Directly editing these files breaks the contract
+between agents and creates inconsistent state. If you feel tempted to "just
+fix the value in the YAML," STOP — use the structured update loop below.
+
+**Structured Update Loop:**
+
 ```
-1. Capture the developer's feedback
-2. Determine what needs to change:
-   - If specific correction ("change Territory 1 to 0.0935"):
-     update the relevant SRD/operation, re-run Planner
-   - If general rejection ("the whole approach is wrong"):
-     ask what to change, potentially re-run from Analyzer
-3. Re-present the revised plan
-4. Stay at GATE 1 -- wait for approval again
+1. CAPTURE the developer's correction:
+   a. Record it in manifest.yaml → developer_decisions:
+      - phase: "gate_1"
+        action: "correction"
+        timestamp: "{now}"
+        feedback: "{developer's exact words}"
+        correction_type: "value" | "target" | "scope" | "approach"
+        iteration: {N}  # 1-based, increments on each rejection
+
+2. DETERMINE which agent to re-run based on correction_type:
+
+   ┌─────────────────────────────────────────────────────────┐
+   │ Correction Type    │ Re-run From     │ Example          │
+   ├────────────────────┼─────────────────┼──────────────────┤
+   │ value              │ Planner only    │ "Territory 1     │
+   │ (rate/factor wrong)│                 │  should be .0935"│
+   ├────────────────────┼─────────────────┼──────────────────┤
+   │ target             │ Analyzer →      │ "Wrong function, │
+   │ (wrong file/func)  │ Decomposer →    │  it's in SetDed" │
+   │                    │ Planner         │                  │
+   ├────────────────────┼─────────────────┼──────────────────┤
+   │ scope              │ Intake →        │ "Also change the │
+   │ (add/remove CRs)   │ full pipeline   │  NB deductibles" │
+   ├────────────────────┼─────────────────┼──────────────────┤
+   │ approach           │ Analyzer →      │ "The whole        │
+   │ (strategy wrong)   │ Decomposer →    │  approach is      │
+   │                    │ Planner         │  wrong"           │
+   └─────────────────────────────────────────────────────────┘
+
+3. RE-RUN the identified agent (and ALL downstream agents):
+   a. Pass the developer_decisions entry to the agent's prompt
+   b. The agent reads developer_decisions and incorporates the feedback
+   c. The agent produces NEW output files (overwriting old ones)
+   d. Downstream agents run on the updated outputs
+
+4. RE-PRESENT the revised plan at Gate 1:
+   "Revised plan (iteration {N}) — changes based on your feedback:
+    - {summary of what changed}
+    Approve, reject, or keep asking."
+
+5. ESCALATION: If the same correction fails 3 times (iteration >= 3):
+   "I've tried to incorporate your correction 3 times but the result
+    still doesn't match your intent. Options:
+      1. Tell me the EXACT change (file, line, old value → new value)
+         and I'll apply it directly in the plan
+      2. Start fresh with /iq-plan
+      3. Try one more iteration"
+   On option 1: ONLY THEN may the orchestrator directly edit plan files,
+   and MUST log this as correction_type: "manual_override" in
+   developer_decisions with the developer's exact specification.
 ```
 
-**PARTIAL APPROVE** (developer says "approve SRD-001 but reject SRD-003",
+Stay at GATE 1 — wait for approval again.
+
+**PARTIAL APPROVE** (developer says "approve CR-001 but reject CR-003",
 "skip the Elite Comp changes", "do everything except the deductible"):
 
 ```
-1. Parse which SRDs are approved and which are rejected
+1. Parse which CRs are approved and which are rejected
 2. Run dependency validation (see Section 7)
 3. If dependencies block the requested split: inform and offer alternatives
 4. If dependencies are OK:
-   - Mark approved SRDs for execution
-   - Mark rejected SRDs as DEFERRED in manifest
-   - Proceed to Step 5 with only approved operations
-   - Tell developer: "When ready for the deferred SRDs, run /iq-plan
+   - Mark approved CRs for execution
+   - Mark rejected CRs as DEFERRED in manifest
+   - Proceed to Step 5 with only approved intents
+   - Tell developer: "When ready for the deferred CRs, run /iq-plan
      and I'll pick up where we left off."
 ```
 
@@ -1327,44 +1398,44 @@ affect Farm?", "what does line 350 look like?"):
 
 ## 7. Partial Approval Logic
 
-When the developer approves some SRDs and rejects others at Gate 1, the
+When the developer approves some CRs and rejects others at Gate 1, the
 orchestrator must validate dependencies before proceeding.
 
 ### Dependency Validation Algorithm
 
 ```
 1. Parse the developer's response to identify:
-   - approved_srds: list of SRD IDs to execute
-   - rejected_srds: list of SRD IDs to defer
+   - approved_crs: list of CR IDs to execute
+   - rejected_crs: list of CR IDs to defer
 
-2. For each approved SRD:
-   a. Look up all its operations in dependency_graph.yaml
-   b. For each operation, check its depends_on list
-   c. Resolve each dependency to its parent SRD
-   d. If any dependency's SRD is in rejected_srds:
-      -> BLOCK: cannot approve this SRD without its dependency
+2. For each approved CR:
+   a. Look up all its intents in intent_graph.yaml
+   b. For each intent, check its depends_on list
+   c. Resolve each dependency to its parent CR
+   d. If any dependency's CR is in rejected_crs:
+      -> BLOCK: cannot approve this CR without its dependency
 
 3. If any blocks found:
 
-   Cannot approve SRD-{NNN} without SRD-{NNN}.
-   SRD-{NNN} ({title}) depends on SRD-{NNN} ({title}).
+   Cannot approve CR-{NNN} without CR-{NNN}.
+   CR-{NNN} ({title}) depends on CR-{NNN} ({title}).
 
    Options:
-     1. Approve both SRD-{NNN} and SRD-{NNN}
-     2. Reject both SRD-{NNN} and SRD-{NNN}
-     3. Show me the dependency graph
+     1. Approve both CR-{NNN} and CR-{NNN}
+     2. Reject both CR-{NNN} and CR-{NNN}
+     3. Show me the intent graph
 
 4. If no blocks:
-   a. Filter execution_order.yaml to include only approved SRD operations
+   a. Filter execution_order.yaml to include only approved CR intents
    b. Maintain bottom-to-top ordering within each file
-   c. Mark approved SRDs as APPROVED in manifest
-   d. Mark rejected SRDs as DEFERRED in manifest
+   c. Mark approved CRs as APPROVED in manifest
+   d. Mark rejected CRs as DEFERRED in manifest
    e. Set state: PLANNED
    f. Tell developer:
-      "Plan approved for SRD(s): {approved list}.
-       SRD(s) deferred: {deferred list}.
+      "Plan approved for CR(s): {approved list}.
+       CR(s) deferred: {deferred list}.
        You can /clear and run /iq-execute to apply the approved changes.
-       When ready for the deferred SRDs, run /iq-plan to pick them up."
+       When ready for the deferred CRs, run /iq-plan to pick them up."
 ```
 
 ### Resume After Partial Approval
@@ -1372,11 +1443,11 @@ orchestrator must validate dependencies before proceeding.
 When the developer runs `/iq-plan` later:
 
 ```
-1. Resume detection finds the workflow with DEFERRED SRDs
-2. Present: "Found workflow {id} with {N} deferred SRD(s): {list}"
-3. Developer provides updated information for rejected SRDs
-4. Pipeline re-runs from Analyzer (for the deferred SRDs only)
-5. New plan includes only the deferred operations
+1. Resume detection finds the workflow with DEFERRED CRs
+2. Present: "Found workflow {id} with {N} deferred CR(s): {list}"
+3. Developer provides updated information for rejected CRs
+4. Pipeline re-runs from Analyzer (for the deferred CRs only)
+5. New plan includes only the deferred intents
 6. Gate 1 approval as normal
 ```
 
@@ -1426,7 +1497,7 @@ The developer's message is a question (not a command) when it:
 | "What does line {N} look like?" | Read and display specific lines |
 | "Does this affect Farm?" | Check all .vbproj files that reference the shared module |
 | "What other files reference this?" | Run reverse lookup on the file |
-| "What's the status?" | Read manifest.yaml, show state and SRD progress |
+| "What's the status?" | Read manifest.yaml, show state and CR progress |
 | "How many territories does {Province} {LOB} have?" | Search the relevant mod file |
 | "What did the previous version look like?" | Find and display the prior-dated file |
 | "Show me the diff so far" | Compare snapshot to current file state |
@@ -1439,9 +1510,9 @@ If the developer adds new changes mid-workflow:
 
 ```
 If before Gate 1 (state: ANALYZING or PLANNED):
-  1. Add new SRDs to the change spec
-  2. Re-run from Decomposer with the expanded set
-  3. Re-run Analyzer and Planner
+  1. Add new CRs to the change requests
+  2. Re-run from Analyzer with the expanded set
+  3. Re-run Decomposer and Planner
   4. Present updated plan at Gate 1
 
 If after Gate 1 (state: PLANNED, developer about to /iq-execute):
@@ -1481,17 +1552,17 @@ Nothing is lost when you /clear.
 The following files are the handoff to `/iq-execute`:
 
 ```
-manifest.yaml           — state: PLANNED, all SRDs, phase_status, developer_decisions
-parsed/change_spec.yaml — structured SRDs
-parsed/srds/srd-*.yaml  — individual SRD details
-analysis/dependency_graph.yaml
-analysis/operations/op-*.yaml — with exact line numbers, current values
+manifest.yaml              — state: PLANNED, all CRs, phase_status, developer_decisions
+parsed/change_requests.yaml — structured change requests
+parsed/requests/cr-*.yaml  — individual CR details
+analysis/intent_graph.yaml — intents with target regions and dependencies
+analysis/analyzer_output/  — function understanding blocks, code analysis
 analysis/files_to_copy.yaml
 analysis/blast_radius.md
 analysis/developer_choices.yaml — resolved ambiguities (if any)
 execution/file_hashes.yaml — TOCTOU baseline
-plan/execution_plan.md — human-readable approved plan
-plan/execution_order.yaml — machine-readable execution order
+plan/execution_plan.md     — human-readable approved plan
+plan/execution_order.yaml  — machine-readable execution order
 ```
 
 No information lives only in context. Everything is in files.
@@ -1632,38 +1703,35 @@ lifecycle:
   archive_after: null                          # completed_at + 14 days (7 for DISCARDED)
   archived_at: null                            # Set when moved to archive/
 
-# -- SRD Tracking ------------------------------------------------------------
-srd_count: 3
-srds:
-  srd-001:
+# -- Change Request Tracking -------------------------------------------------
+cr_count: 3
+change_requests:
+  cr-001:
     title: "Increase base rates by 5%"
-    type: "base_rate_increase"
     complexity: "SIMPLE"
     status: "COMPLETED"                        # PENDING | ANALYZING | PLANNED |
                                                # APPROVED | EXECUTING | COMPLETED |
                                                # FAILED | DEFERRED | OUT_OF_SCOPE |
                                                # DISCARDED
-    operations:
-      op-001: "COMPLETED"                      # PENDING | IN_PROGRESS | COMPLETED |
+    intents:
+      intent-001: "COMPLETED"                  # PENDING | IN_PROGRESS | COMPLETED |
                                                # FAILED | DEFERRED
-  srd-002:
+  cr-002:
     title: "Change $5000 deductible factor"
-    type: "factor_table_change"
     complexity: "SIMPLE"
     status: "EXECUTING"
-    operations:
-      op-002: "IN_PROGRESS"
+    intents:
+      intent-002: "IN_PROGRESS"
 
-  srd-003:
+  cr-003:
     title: "Add Elite Comp coverage type"
-    type: "new_coverage_type"
     complexity: "COMPLEX"
     status: "PENDING"
-    operations:
-      op-003: "PENDING"
-      op-004: "PENDING"
-      op-005: "PENDING"
-      op-006: "PENDING"
+    intents:
+      intent-003: "PENDING"
+      intent-004: "PENDING"
+      intent-005: "PENDING"
+      intent-006: "PENDING"
 
 # -- Cross-Province Consent (if applicable) ----------------------------------
 cross_province_consent: null                   # Set if developer approves editing
@@ -1681,25 +1749,25 @@ cross_province_consent: null                   # Set if developer approves editi
 phase_status:
   intake:
     status: "completed"                           # pending | in_progress | completed | failed
-    summary: "3 SRDs: 2 base_rate_increase, 1 factor_table_change, no DAT warnings"
+    summary: "3 CRs parsed, no DAT warnings"
   discovery:
     status: "completed"                           # pending | in_progress | completed | skipped | failed
-    summary: "3/3 SRDs resolved, 20 flow steps from TotPrem"
-  decomposer:
-    status: "completed"
-    summary: "7 ops (2 shared, 5 LOB-specific), no conflicts, no inter-SRD deps"
+    summary: "3/3 CRs resolved, 20 flow steps from TotPrem"
   analyzer:
     status: "completed"
-    summary: "All verified, 3 files, 6 LOBs blast radius, mixed rounding on SRD-003"
+    summary: "All verified, 3 files, 6 LOBs blast radius, mixed rounding on CR-003"
+  decomposer:
+    status: "completed"
+    summary: "7 intents (2 shared, 5 LOB-specific), no conflicts, no inter-CR deps"
   planner:
     status: "completed"
-    summary: "7 ops in execution plan, bottom-to-top in 3 files, no partial approval issues"
+    summary: "7 intents in execution plan, bottom-to-top in 3 files, no partial approval issues"
   gate_1:
     status: "approved"                            # pending | approved | rejected | revision_N
-    summary: "Developer approved all 3 SRDs, no changes requested"
+    summary: "Developer approved all 3 CRs, no changes requested"
   # --- Phases below managed by /iq-execute and /iq-review ---
   # --- Included here for complete manifest schema reference ---
-  modifiers:
+  change_engine:
     status: "pending"
     summary: null
   reviewer:
@@ -1725,7 +1793,7 @@ developer_decisions: []
 #   answer: "Farm path"
 # - timestamp: "2026-01-15T11:30:00Z"
 #   phase: "analyzer"
-#   question: "SRD-003 has mixed rounding (42 banker + 6 decimal lines). Proceed?"
+#   question: "CR-003 has mixed rounding (42 banker + 6 decimal lines). Proceed?"
 #   answer: "Yes, proceed with per-line rounding"
 
 # -- Execution Mode ----------------------------------------------------------
@@ -1736,7 +1804,7 @@ execution_mode: "team"                            # "team" (agent team, default)
 error_log: []
 # Example entries:
 # - timestamp: "2026-01-15T11:20:00Z"
-#   operation: "op-003"
+#   operation: "intent-003"
 #   error: "TOCTOU violation: file hash mismatch"
 #   resolution: "Developer chose to re-analyze"
 # - timestamp: "2026-01-15T11:22:00Z"
@@ -1754,6 +1822,10 @@ error_log: []
                                                 v    |
                                            (reject: revise,
                                             loops back to PLANNED)
+                                                |
+                                                v
+                                          GATE_1_REJECTED
+                                          (developer re-runs /iq-plan)
 
 /iq-execute:  PLANNED -----> EXECUTING -----> EXECUTED
                                 |
@@ -1766,9 +1838,15 @@ error_log: []
                                   v    |
                              (reject: rework,
                               re-validate)
+                                  |
+                                  v
+                            GATE_2_REJECTED
+                            (re-enters Change Engine phase)
 
 Special states:
-  DISCARDED -- developer cancelled at any point
+  DISCARDED        -- developer cancelled at any point
+  GATE_1_REJECTED  -- developer rejected plan at Gate 1 (re-run /iq-plan)
+  GATE_2_REJECTED  -- developer rejected changes at Gate 2 (re-enters /iq-execute)
 ```
 
 **Valid state transitions:**
@@ -1779,12 +1857,16 @@ Special states:
 | CREATED | ANALYZING | /iq-plan | Developer provides input |
 | ANALYZING | PLANNED | /iq-plan | Planner completes, developer approves at Gate 1 |
 | PLANNED | PLANNED | /iq-plan | Developer rejects at Gate 1 (revision loop) |
+| PLANNED | GATE_1_REJECTED | /iq-plan | Developer rejects plan outright at Gate 1 |
+| GATE_1_REJECTED | ANALYZING | /iq-plan | Developer re-runs /iq-plan with corrections |
 | PLANNED | EXECUTING | /iq-execute | Execution team starts |
 | EXECUTING | EXECUTED | /iq-execute | All operations complete |
 | EXECUTING | EXECUTING | /iq-execute | Operation retry (self-correction) |
 | EXECUTED | VALIDATING | /iq-review | Review team starts |
 | VALIDATING | COMPLETED | /iq-review | Developer approves at Gate 2 |
 | VALIDATING | VALIDATING | /iq-review | Rework + re-validate loop |
+| VALIDATING | GATE_2_REJECTED | /iq-review | Developer rejects changes at Gate 2 |
+| GATE_2_REJECTED | EXECUTING | /iq-execute | Re-enters Change Engine phase |
 | VALIDATING | PLANNED | /iq-review | Major rework needed, back to /iq-execute |
 | Any | DISCARDED | Any | Developer cancels |
 
@@ -1813,7 +1895,7 @@ action categories and responds accordingly.
 When a message could match multiple categories, use this priority order:
 1. DISCARD (explicit cancellation overrides everything)
 2. ADDENDUM (adding new changes)
-3. PARTIAL APPROVE (mentions specific SRDs)
+3. PARTIAL APPROVE (mentions specific CRs)
 4. APPROVE / REJECT (clear decision)
 5. INVESTIGATE (questions)
 6. STATUS (status queries)
@@ -1825,12 +1907,12 @@ When a message could match multiple categories, use this priority order:
 | APPROVE | "approve", "approved", "yes", "looks good", "LGTM", "go ahead", "proceed", "do it", "ship it", "OK", "fine", "good", "accept" | Approve plan at Gate 1, set state: PLANNED | YES |
 | REJECT | "no", "wrong", "reject", "that's not right", "incorrect", "bad", "nope" | Ask what to change, enter revision loop | NO (stays at gate) |
 | CORRECT | "change X to Y", "the value should be Z", "actually it's 0.0935", "territory 1 is wrong" | Accept correction, revise plan | NO (stays at gate) |
-| PARTIAL APPROVE | "approve SRD-001 but reject SRD-003", "skip the Elite Comp", "do everything except...", "just do the base rates" | Split SRDs into approved/deferred (with dependency validation) | YES (for approved) |
+| PARTIAL APPROVE | "approve CR-001 but reject CR-003", "skip the Elite Comp", "do everything except...", "just do the base rates" | Split CRs into approved/deferred (with dependency validation) | YES (for approved) |
 | INVESTIGATE | "show me...", "what does...", "how many...", "does this affect...", "is there...", any question mark | Answer without changing state, return to current position | NO |
-| STATUS | "what's the status?", "where are we?", "what's left?", "progress", "how far along" | Show current state, SRD progress, next action | NO |
+| STATUS | "what's the status?", "where are we?", "what's left?", "progress", "how far along" | Show current state, CR progress, next action | NO |
 | ADDENDUM | "I forgot to mention...", "also change...", "one more thing...", "add this too" | Add to change spec, re-run from appropriate agent | MAYBE |
 | DISCARD | "never mind", "cancel", "throw this away", "forget it", "abort", "stop" | Set state to DISCARDED, inform developer | YES |
-| RESUME DEFERRED | "pick up the deferred SRDs", "do the rest", "continue with SRD-003" | Re-enter pipeline for deferred SRDs | YES |
+| RESUME DEFERRED | "pick up the deferred CRs", "do the rest", "continue with CR-003" | Re-enter pipeline for deferred CRs | YES |
 
 ### Ambiguity Resolution
 
@@ -1868,7 +1950,7 @@ YAML state files across a potentially long conversation. To prevent context exha
 1. **Rely on YAML files as state memory.** After completing an agent's step and
    updating manifest.yaml, do NOT try to hold the full contents of that agent's
    .md instructions or source files in your active reasoning. Re-read from YAML
-   state files (manifest.yaml, change_spec.yaml, execution_order.yaml) when needed.
+   state files (manifest.yaml, change_requests.yaml, execution_order.yaml) when needed.
 2. **Between Gate 1 and Gate 2**, read `plan/execution_order.yaml` for the plan —
    do not try to recall it from earlier in the conversation.
 3. **One agent at a time.** When transitioning to the next agent, read its .md file
@@ -1881,7 +1963,7 @@ After EVERY agent completes, the orchestrator MUST update manifest.yaml:
 1. **Update `phase_status`** for the completed phase:
    - Set `status` to "completed" (or "failed")
    - Write a 1-2 line `summary` capturing what happened
-   - Example: `summary: "3 SRDs: 2 base_rate_increase, 1 factor_table_change"`
+   - Example: `summary: "3 CRs parsed, no DAT warnings"`
 
 2. **Append to `developer_decisions`** if the developer answered any questions:
    - Record the question, answer, phase, and timestamp
@@ -1901,8 +1983,8 @@ the next `/iq-plan` invocation reads manifest.yaml and knows EVERYTHING:
 ### Execution Mode
 
 The manifest includes `execution_mode` ("team" or "sequential"). This controls
-how Steps 1-4 (Intake, Discovery, Decomposer, Analyzer, Planner) are launched.
-Steps 5-6 (Modifiers, Reviewer) always run inline regardless of this setting.
+how Steps 1-5 (Intake, Discovery, Analyzer, Decomposer, Planner) are launched.
+Change Engine workers and Reviewer always run inline regardless of this setting.
 
 **Team mode (default):**
 
@@ -1916,9 +1998,9 @@ Team lifecycle:
   2. TaskCreate: 5 tasks with sequential dependencies
      - "Run Intake agent"       (no blockers)
      - "Run Discovery agent"    (blocked by Intake)
-     - "Run Decomposer agent"   (blocked by Discovery)
-     - "Run Analyzer agent"     (blocked by Decomposer)
-     - "Run Planner agent"      (blocked by Analyzer)
+     - "Run Analyzer agent"     (blocked by Discovery)
+     - "Run Decomposer agent"   (blocked by Analyzer)
+     - "Run Planner agent"      (blocked by Decomposer)
   3. For each task:
      a. Spawn teammate via Task tool (with team_name parameter)
      b. Monitor for messages:
@@ -1953,7 +2035,7 @@ Launch each analysis agent one at a time as a sub-agent via the Task tool
 
 ```
 Sequential lifecycle:
-  For each agent (Intake, Discovery, Decomposer, Analyzer, Planner):
+  For each agent (Intake, Discovery, Analyzer, Decomposer, Planner):
     1. Launch via Task tool (no team_name)
     2. Agent runs autonomously, returns when done
     3. If agent returned pending_confirmation items:
@@ -1984,7 +2066,7 @@ When executing this skill, use these specific tool strategies:
 
 ### Reading manifest.yaml
 Use the Read tool to read the manifest file. Parse the YAML content to determine
-current state and SRD progress.
+current state and CR progress.
 
 ### Scanning for incomplete workflows
 Use Bash `ls` to list directories in `.iq-workstreams/changes/`, then Read each
@@ -1997,20 +2079,20 @@ sha256sum "{filepath}" | cut -d' ' -f1
 ```
 On Windows, use:
 ```bash
-python -c "import hashlib; print(hashlib.sha256(open('{filepath}','rb').read()).hexdigest())"
+{python_cmd} -c "import hashlib; print(hashlib.sha256(open('{filepath}','rb').read()).hexdigest())"
 ```
 
 ### Creating workflow directories
 Use Bash with mkdir -p:
 ```bash
-mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/srds,analysis/operations,plan,execution/snapshots,verification,summary}
+mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis/analyzer_output,plan,execution/snapshots,verification,summary}
 ```
 
 ### Writing YAML files
 Use the Write tool to write YAML files. Do NOT use Bash echo/cat.
-After writing any YAML file (manifest.yaml, change_spec.yaml, etc.), validate it:
+After writing any YAML file (manifest.yaml, change_requests.yaml, etc.), validate it:
 ```bash
-python -c "import yaml; yaml.safe_load(open('{filepath}')); print('YAML OK')"
+{python_cmd} -c "import yaml; yaml.safe_load(open('{filepath}')); print('YAML OK')"
 ```
 If validation fails, the file has a structural error. Fix and re-write before proceeding.
 
@@ -2041,13 +2123,13 @@ and edge cases. The orchestrator does NOT read these files — the agents read t
 
 | Agent | File | When Called | What It Produces |
 |-------|------|-------------|-----------------|
-| Intake | `.iq-update/agents/intake.md` | Step 1 | `parsed/change_spec.yaml`, `parsed/srds/srd-NNN.yaml` |
+| Intake | `.iq-update/agents/intake.md` | Step 1 | `parsed/change_requests.yaml`, `parsed/requests/cr-NNN.yaml` |
 | Discovery | `.iq-update/agents/discovery.md` | Step 1.5 | `analysis/code_discovery.yaml` |
-| Decomposer | `.iq-update/agents/decomposer.md` | Step 2 | `analysis/dependency_graph.yaml`, `analysis/operations/op-NNN.yaml` |
-| Analyzer | `.iq-update/agents/analyzer.md` | Step 3 | Updated `op-NNN.yaml` with line numbers, `analysis/blast_radius.md`, `analysis/files_to_copy.yaml` |
+| Analyzer | `.iq-update/agents/analyzer.md` | Step 2 | `analysis/analyzer_output/`, `analysis/blast_radius.md`, `analysis/files_to_copy.yaml` |
+| Decomposer | `.iq-update/agents/decomposer.md` | Step 3 | `analysis/intent_graph.yaml` |
 | Planner | `.iq-update/agents/planner.md` | Step 4 | `plan/execution_plan.md`, `plan/execution_order.yaml`, `execution/file_hashes.yaml` |
 
-Execution agents (Rate Modifier, Logic Modifier) are launched by `/iq-execute`.
+The Change Engine is launched by `/iq-execute`.
 Review agent (Reviewer) is launched by `/iq-review`.
 See `skills/iq-execute/SKILL.md` and `skills/iq-review/SKILL.md` for those agent references.
 
@@ -2064,22 +2146,20 @@ For reference, the complete directory structure created per workflow:
     source.md                      <- Original ticket text or description
     attachments/                   <- PDF, Excel files
   parsed/
-    change_spec.yaml               <- Structured change specification
-    srds/
-      srd-001.yaml                 <- Individual change items
-      srd-002.yaml
+    change_requests.yaml           <- Structured change requests
+    requests/
+      cr-001.yaml                  <- Individual change request details
+      cr-002.yaml
       ...
   analysis/
     blast_radius.md                <- Full blast radius report
-    dependency_graph.yaml          <- Operation dependencies
+    code_discovery.yaml            <- CalcMain flow + CR→function mapping (from Discovery)
+    intent_graph.yaml              <- Intents with target regions and dependencies
     files_to_copy.yaml             <- Code/ files needing new dated copies
-    operations/
-      op-001.yaml                  <- Atomic operations (with line numbers after Analyzer)
-      op-002.yaml
-      ...
+    analyzer_output/               <- Function understanding blocks, target analysis
   plan/
     execution_plan.md              <- Human-readable plan (GATE 1 document)
-    execution_order.yaml           <- Machine-readable ordered operations
+    execution_order.yaml           <- Machine-readable ordered intents
   execution/
     operations_log.yaml            <- What was done: file, line, old -> new
     file_hashes.yaml               <- SHA256 hashes for TOCTOU protection
@@ -2087,8 +2167,8 @@ For reference, the complete directory structure created per workflow:
       mod_Common_SKHab20260101.vb.snapshot
       ...
   verification/
-    validator_results.yaml         <- Results from all 7 validators
-    traceability_matrix.md         <- SRD -> file:line mapping
+    validator_results.yaml         <- Results from all 8 validators
+    traceability_matrix.md         <- CR -> file:line mapping
     diff_report.md                 <- Human-readable diff of all changes
     changes.diff                   <- Unified diff format
   summary/

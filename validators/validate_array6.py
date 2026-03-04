@@ -46,6 +46,7 @@ from pathlib import Path
 
 from _helpers import (
     build_inventory,
+    check_path_containment,
     count_array6_args,
     extract_balanced_parens,
     is_array6_test_usage,
@@ -53,6 +54,7 @@ from _helpers import (
     load_context,
     make_result,
     parens_balanced,
+    safe_eval_arithmetic,
     split_top_level_commas,
 )
 
@@ -64,7 +66,7 @@ from _helpers import (
 def _check_ops_log(ops_log, findings):
     """Scan the operations log for Array6 issues in before/after change pairs.
 
-    For each COMPLETED operation by agent "rate-modifier" or "orchestrator",
+    For each COMPLETED value-editing or structure-insertion operation,
     compare each change's before and after lines for:
     - Arg count mismatch (before vs after)
     - Empty arguments (consecutive commas)
@@ -75,8 +77,8 @@ def _check_ops_log(ops_log, findings):
         findings: List to append finding dicts to (mutated in place).
     """
     for entry in ops_log.get("operations", []):
-        agent = entry.get("agent", "")
-        if agent not in ("rate-modifier", "orchestrator"):
+        change_type = entry.get("change_type", "")
+        if change_type not in ("value_editing", "structure_insertion"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
@@ -288,10 +290,9 @@ def _is_parseable_numeric(expr):
     # Safety: only allow digits, decimal points, spaces, and arithmetic operators
     if re.fullmatch(r'[\d.\s+\-*/()]+', cleaned):
         try:
-            # Evaluate the expression in a restricted environment
-            result = eval(cleaned, {"__builtins__": {}}, {})
+            result = safe_eval_arithmetic(cleaned)
             return isinstance(result, (int, float))
-        except Exception:
+        except (ValueError, Exception):
             return False
 
     return False
@@ -351,7 +352,7 @@ def _check_assignment_pattern(before_line, after_line, filepath, line_num,
 def _check_full_file_scan(inventory, carrier_root, snapshots_dir, findings):
     """Scan every modified file on disk for corrupt Array6 calls.
 
-    Reads each file in the rate_modifier_files inventory set and checks
+    Reads each file in the value_files inventory set and checks
     every Array6 call for:
     - Unmatched parentheses
     - Empty arguments
@@ -363,8 +364,19 @@ def _check_full_file_scan(inventory, carrier_root, snapshots_dir, findings):
         snapshots_dir: Path to the execution/snapshots/ directory.
         findings: List to append finding dicts to.
     """
-    for filepath in sorted(inventory["rate_modifier_files"]):
-        full_path = carrier_root / filepath
+    for filepath in sorted(inventory["value_files"]):
+        # Path containment check — reject paths that escape carrier root
+        try:
+            full_path = check_path_containment(filepath, carrier_root)
+        except ValueError:
+            findings.append({
+                "file": filepath,
+                "line": 0,
+                "issue": "path_traversal",
+                "expected": "file path within carrier root",
+                "actual": f"path escapes carrier root: {filepath}",
+            })
+            continue
 
         if not full_path.exists():
             findings.append({
@@ -620,7 +632,8 @@ def _count_total_array6_calls(ops_log, inventory, carrier_root):
 
     # Count from ops log
     for entry in ops_log.get("operations", []):
-        if entry.get("agent", "") not in ("rate-modifier", "orchestrator"):
+        change_type = entry.get("change_type", "")
+        if change_type not in ("value_editing", "structure_insertion"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
@@ -631,7 +644,7 @@ def _count_total_array6_calls(ops_log, inventory, carrier_root):
                 count += 1
 
     # Count from full file scan
-    for filepath in inventory.get("rate_modifier_files", set()):
+    for filepath in inventory.get("value_files", set()):
         full_path = carrier_root / filepath
         if not full_path.exists():
             continue

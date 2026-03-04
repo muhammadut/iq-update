@@ -5,7 +5,7 @@ Uses tempfile to create mock workstreams with controlled
 operations_log.yaml, manifest.yaml, and config.yaml entries.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_value_sanity.py -v
 """
 
@@ -95,8 +95,8 @@ def test_clean_pass():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -108,8 +108,8 @@ def test_clean_pass():
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -144,8 +144,8 @@ def test_large_change_detected():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -184,8 +184,8 @@ def test_sentinel_modified():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -222,8 +222,8 @@ def test_zero_to_nonzero():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -259,8 +259,8 @@ def test_sign_flip():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -298,8 +298,8 @@ def test_factor_table_value():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -337,8 +337,8 @@ def test_configurable_threshold():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -364,20 +364,20 @@ def test_configurable_threshold():
 
 
 # ---------------------------------------------------------------------------
-# Test 8: No rate-modifier ops -- only logic-modifier
+# Test 8: No value-editing ops -- only flow_modification
 # ---------------------------------------------------------------------------
 
-def test_no_rate_modifier_ops():
-    """Operations only from logic-modifier agent. Value sanity skips them.
-    Should pass with 0 values checked."""
+def test_no_value_editing_ops():
+    """Operations only with change_type flow_modification. Value sanity
+    skips them. Should pass with 0 values checked."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-010-01",
-                    "agent": "logic-modifier",
+                    "operation": "intent-010",
+                    "change_type": "flow_modification",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -389,8 +389,8 @@ def test_no_rate_modifier_ops():
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-010-02",
-                    "agent": "logic-modifier",
+                    "operation": "intent-011",
+                    "change_type": "flow_modification",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -424,8 +424,8 @@ def test_arithmetic_expression():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -460,8 +460,8 @@ def test_multiple_issues_combined():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {
@@ -591,3 +591,136 @@ def test_extract_numeric_value_with_comment():
 def test_extract_numeric_value_no_assignment():
     """Line without assignment returns None."""
     assert extract_numeric_value("    If x > 0 Then") is None
+
+
+# ---------------------------------------------------------------------------
+# Threshold Configuration Tests
+# ---------------------------------------------------------------------------
+
+def test_custom_threshold_allows_large_change():
+    """Threshold set to 100% in config. A 60% change (normally flagged at
+    default 50%) should pass because 60 < 100."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = _build_workstream(
+            tmpdir,
+            ops_log_operations=[
+                {
+                    "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
+                    "status": "COMPLETED",
+                    "changes": [
+                        {
+                            "line": 100,
+                            "before": "    varRates = Array6(100, 200)",
+                            "after":  "    varRates = Array6(160, 200)",
+                        },
+                    ],
+                },
+            ],
+            config_extras={
+                "validation": {"value_sanity_threshold_percent": 100},
+            },
+        )
+
+        result = validate(manifest_path)
+        # 60% change is within 100% threshold, should pass
+        assert result["passed"] is True
+        assert len(result["findings"]) == 0
+
+
+def test_string_threshold_coercion():
+    """Threshold set as string "75" in config. Should be coerced to 75.0.
+    A 60% change should pass (60 < 75)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = _build_workstream(
+            tmpdir,
+            ops_log_operations=[
+                {
+                    "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
+                    "status": "COMPLETED",
+                    "changes": [
+                        {
+                            "line": 100,
+                            "before": "    varRates = Array6(100, 200)",
+                            "after":  "    varRates = Array6(160, 200)",
+                        },
+                    ],
+                },
+            ],
+            config_extras={
+                "validation": {"value_sanity_threshold_percent": "75"},
+            },
+        )
+
+        result = validate(manifest_path)
+        # 60% change is within 75% threshold (string coerced to float), should pass
+        assert result["passed"] is True
+        assert len(result["findings"]) == 0
+
+
+def test_invalid_threshold_falls_back_to_50():
+    """Threshold set to invalid value "abc" in config. Should fall back to 50.0.
+    A 60% change should be flagged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = _build_workstream(
+            tmpdir,
+            ops_log_operations=[
+                {
+                    "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
+                    "status": "COMPLETED",
+                    "changes": [
+                        {
+                            "line": 100,
+                            "before": "    varRates = Array6(100, 200)",
+                            "after":  "    varRates = Array6(160, 200)",
+                        },
+                    ],
+                },
+            ],
+            config_extras={
+                "validation": {"value_sanity_threshold_percent": "abc"},
+            },
+        )
+
+        result = validate(manifest_path)
+        # Falls back to 50%, 60% change should be flagged
+        assert result["passed"] is False
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["issue"] == "large_change"
+        assert result["findings"][0]["pct_change"] == 60.0
+
+
+def test_none_config_uses_default_threshold():
+    """No validation key in config at all. Should use default 50%.
+    A 60% change should be flagged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = _build_workstream(
+            tmpdir,
+            ops_log_operations=[
+                {
+                    "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
+                    "status": "COMPLETED",
+                    "changes": [
+                        {
+                            "line": 100,
+                            "before": "    varRates = Array6(100, 200)",
+                            "after":  "    varRates = Array6(160, 200)",
+                        },
+                    ],
+                },
+            ],
+            # No config_extras — empty config.yaml
+        )
+
+        result = validate(manifest_path)
+        # Default 50%, 60% change should be flagged
+        assert result["passed"] is False
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["issue"] == "large_change"

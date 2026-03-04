@@ -2,562 +2,351 @@
 
 ## Purpose
 
-Break each SRD into atomic operations with a dependency graph. Identify which files
-each operation touches. Handle shared modules correctly for multi-LOB tickets by
-ensuring shared modules are edited ONCE, not once per LOB.
+Transform change requests into executable intents by matching ticket requirements
+to analyzed code. Each intent says "change this function to do X" with a capability
+tag and all the context the Change Engine needs to make the edit.
 
-**Core philosophy: ONE operation = ONE change to ONE function in ONE file.**
-When a single SRD spans multiple functions or files, the Decomposer produces
-multiple operations. The Decomposer identifies FILES, not line numbers -- that
-precision is the Analyzer's job.
+**Core philosophy: ONE intent = ONE change to ONE function in ONE file.**
+When a single change request spans multiple functions or files, the Decomposer
+produces multiple intents. The Decomposer does NOT classify changes into predefined
+types -- it reads the code (via Analyzer output), reads the ticket requirement
+(via Intake output), and reasons about what needs to change.
 
 ## Pipeline Position
 
 ```
-[INPUT] --> Intake --> Discovery --> DECOMPOSER --> Analyzer --> Planner --> [GATE 1] --> Modifiers --> Reviewer --> [GATE 2]
-                                     ^^^^^^^^^^
+[INPUT] --> Intake --> Discovery --> Analyzer --> DECOMPOSER --> Planner --> [GATE 1]
+                                                 ^^^^^^^^^^
 ```
 
-- **Upstream:** Intake agent (provides `parsed/change_spec.yaml` + `parsed/srds/srd-NNN.yaml`),
-  Discovery agent (provides `analysis/code_discovery.yaml` — optional, graceful degradation)
-- **Downstream:** Analyzer agent (consumes `analysis/dependency_graph.yaml` + `analysis/operations/op-{SRD}-{NN}.yaml`)
+- **Upstream:**
+  - Intake agent (provides `parsed/change_requests.yaml` + `parsed/requests/cr-NNN.yaml`)
+  - Discovery agent (provides `analysis/code_discovery.yaml` -- function-to-file mappings)
+  - Analyzer agent (provides `analysis/analyzer_output/` -- function bodies, FUBs, line numbers, branch trees, hazards)
+- **Downstream:** Planner agent (consumes `analysis/intent_graph.yaml`)
+
+**Key difference from old pipeline:** The Decomposer runs AFTER the Analyzer. It
+receives verified code understanding -- exact function bodies, line numbers, branch
+trees, hazards. It does not guess about code; it reads what the Analyzer already found.
 
 ## Input Schema
 
 ```yaml
-# Reads: parsed/change_spec.yaml (full schema defined in intake.md)
-# Reads: parsed/srds/srd-NNN.yaml (one per SRD)
+# Reads: parsed/change_requests.yaml (from Intake -- full schema in intake.md)
+# Reads: parsed/requests/cr-NNN.yaml (one per change request -- from Intake)
+# Reads: analysis/code_discovery.yaml (from Discovery -- CalcMain flow, function->file mappings)
+# Reads: analysis/analyzer_output/ (from Analyzer -- function analysis, FUBs, line numbers)
 # Reads: target folder .vbproj files (to identify Code/ file references)
-# Reads: config.yaml (for naming patterns, hab LOB lists, hab flags)
+# Reads: .iq-workstreams/config.yaml (for naming patterns, hab LOB lists, hab flags)
 ```
 
-### change_spec.yaml Fields Used by Decomposer
+### change_requests.yaml Fields Used by Decomposer
 
 ```yaml
 carrier: "Portage Mutual"
 province: "SK"
-province_name: "Saskatchewan"         # Human-readable, used in reporting
+province_name: "Saskatchewan"
 lobs: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-lob_category: "hab"                   # "hab" | "auto" | "mixed" (from Intake Step 2.3)
+lob_category: "hab"                    # "hab" | "auto" | "mixed"
 effective_date: "20260101"
-ticket_ref: "DevOps 24778"           # Optional
+ticket_ref: "DevOps 24778"            # Optional
+request_count: 4
 
 target_folders:
   - path: "Saskatchewan/Home/20260101"
     vbproj: "Cssi.IntelliQuote.PORTSKHOME20260101.vbproj"
-  # ... one per LOB in the workflow
+  # ... one per LOB
 
 shared_modules:
   - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     shared_by: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
 
-srds:
-  - id: "srd-001"
+requests:
+  - id: "cr-001"
     title: "..."
-    type: "base_rate_increase"
-    # ... (abbreviated; full SRD in parsed/srds/)
+    # ... (abbreviated; full CR in parsed/requests/)
 ```
 
-### Individual SRD Fields (parsed/srds/srd-NNN.yaml)
+### Individual CR Fields (parsed/requests/cr-NNN.yaml)
 
-The Decomposer reads these fields from each SRD file:
+The Decomposer reads these fields from each change request file:
 
 ```yaml
-id: "srd-NNN"
-title: "..."
-type: "base_rate_increase|factor_table_change|included_limits|new_endorsement_flat|new_liability_option|new_coverage_type|eligibility_rules|UNKNOWN"
-complexity: "SIMPLE|MEDIUM|COMPLEX"
-method: "multiply|explicit"           # Only for rate changes
-scope: "all_territories|specific_territories"
-lob_scope: "all|specific"
-target_lobs: [...]                    # Only if lob_scope = "specific"
-srd_count: 5                          # Total number of SRDs (for validation)
-dat_file_warning: true|false
-ambiguity_flag: true|false
-ambiguity_note: "..."                 # Present when ambiguity_flag=true (reason for ambiguity)
-source_text: "..."
+id: "cr-NNN"
+title: "Increase liability premiums by 3%"
+description: "All liability bundle premiums should increase by 3% across all territories"
+source_text: "Increase all liability premiums by 3%"
 
-# Pattern-specific fields (varies by type):
-factor: 1.05                          # base_rate_increase
-rounding: "auto"                      # base_rate_increase (Analyzer resolves later)
-rounding_hint: "banker"               # Optional hint from Intake (pass through to op-{SRD}-{NN})
-case_value: 5000                      # factor_table_change
-old_value: -0.20                      # factor_table_change
-new_value: -0.22                      # factor_table_change
-limit_name: "Medical Payments"        # included_limits
-old_limit: 5000.0                     # included_limits
-new_limit: 10000.0                    # included_limits
-target_function: null                 # Intake sets null; Decomposer infers
-target_function_hint: "SetDisSur_*"   # Optional developer hint
-endorsement_name: "..."               # new_endorsement_flat
-option_code: 9999                     # new_endorsement_flat
-premium: 75.0                         # new_endorsement_flat
-category: "ENDORSEMENTEXTENSION"      # new_endorsement_flat
-liability_name: "RentedDwelling"      # new_liability_option
-premium_array: [0, 0, 0, 0, 324, 462] # new_liability_option
-coverage_type_name: "Elite Comp."     # new_coverage_type
-constant_name: "ELITECOMP"            # new_coverage_type
-classifications: ["PREFERRED","STANDARD"]  # new_coverage_type
-dat_ids: {Preferred: 9501, Standard: 9502} # new_coverage_type
-rules: [...]                          # eligibility_rules
+extracted:                              # Concrete values from the ticket text
+  percentage: 3.0                       # Optional
+  factor: 1.03                          # Optional
+  method: "multiply"                    # "multiply" | "explicit" | null
+  scope: "all_territories"              # "all_territories" | "specific_territories" | null
+  lob_scope: "all"                      # "all" | "specific"
+  target_lobs: null                     # Only if lob_scope = "specific"
+  case_value: null                      # For factor table changes
+  old_value: null                       # For explicit replacements
+  new_value: null                       # For explicit replacements
+  target_function_hint: null            # Developer-provided function name
+  target_file_hint: null                # Developer-provided file name
+
+domain_hints:
+  keyword_matches: ["liability", "premium", "increase"]
+  glossary_match: "GetLiabilityBundlePremiums"
+  glossary_confidence: "high"
+  involves_rates: true
+  involves_percentages: true
+  involves_new_code: false
+  rounding_hint: null
+
+dat_file_warning: false
+ambiguity_flag: false
+complexity_estimate: "SIMPLE"
+```
+
+### analysis/code_discovery.yaml (from Discovery)
+
+```yaml
+# Key fields used by Decomposer:
+calculation_flow:                       # Ordered call graph from CalcMain
+  - function: "TotPrem"
+    file: "CalcMain.vb"
+    calls: [...]
+
+cr_targets:                             # Discovery's best guess: CR -> function mapping
+  cr-001:
+    resolved_function: "GetLiabilityBundlePremiums"
+    resolved_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    related_functions:
+      - name: "GetLiabilityExtensionPremiums"
+        note: "Same liability category -- may need same change"
+    contains:
+      array6_count: 14
+      select_case_count: 3
+
+dispatch_map: {}                        # CalcOption routing tables
+peer_functions: {}                      # Functions similar to targets
+```
+
+### analysis/analyzer_output/ (from Analyzer)
+
+The Analyzer produces per-CR analysis files. The Decomposer reads these
+to get verified code understanding:
+
+```yaml
+# Example: analysis/analyzer_output/cr-001-analysis.yaml
+cr: "cr-001"
+title: "Increase liability premiums by 3%"
+analyzed_at: "2026-03-03T10:00:00"
+functions_analyzed:
+  - function: "GetLiabilityBundlePremiums"
+    file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    function_line_start: 3850
+    function_line_end: 4100
+    return_type: "Double"
+    fub:
+      branch_tree:
+        - type: "Select Case"
+          variable: "policyCategory"
+          cases:
+            - label: "Case 1"
+              line: 3870
+      hazards:
+        - "mixed_rounding"
+        - "dual_use_array6"
+      adjacent_context:
+        above: "End Function ' GetLiabilityExtensionWatercraftPremiums"
+        below: "Public Function GetLiabilityExtensionPremiums..."
+      nearby_functions:
+        - name: "GetLiabilityExtensionPremiums"
+          line_start: 4110
+          line_end: 4300
+    target_lines:
+      - line: 3870
+        content: "                Case 1 : varRates = Array6(512.59, 28.73, 463.03)"
+        context: "Territory 1 Home"
+        rounding: "none"
+        value_count: 3
+  - line: 3880
+    content: "                Case 2 : varRates = Array6(612, 32, 553)"
+    context: "Territory 2 Home"
+    rounding: "banker"                  # Integer values
+    value_count: 3
+  # ... more target lines
+
+skipped_lines:
+  - line: 4055
+    content: "                If IsItemInArray(..., Array6(...))"
+    reason: "Array6 in IsItemInArray -- membership test, not rate value"
+
+# File copy information
+source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+needs_copy: true
+file_hash: "sha256:a1b2c3d4..."
 ```
 
 ## Output Schema
 
-### dependency_graph.yaml
+### analysis/intent_graph.yaml
+
+This is the single output artifact. All intents live in one file.
 
 ```yaml
-# File: analysis/dependency_graph.yaml
+# File: analysis/intent_graph.yaml
 
 workflow_id: "20260101-SK-Hab-rate-update"
-decomposer_version: "1.0"
-decomposed_at: "2026-02-27T10:00:00"
-total_operations: 6
-total_out_of_scope: 1                  # SRDs with dat_file_warning = true
+decomposer_version: "2.0"
+decomposed_at: "2026-03-03T10:00:00"
+total_intents: 4
+total_out_of_scope: 1
 
-# SRDs marked out of scope (tracked but no operations generated)
+# CRs marked out of scope (tracked but no intents generated)
 out_of_scope:
-  - srd: "srd-001"
+  - cr: "cr-003"
     title: "[DAT FILE] Increase hab dwelling base rates by 5%"
     reason: "dat_file_warning: Hab dwelling base rates are in DAT files, not VB code"
 
-# Shared module operations (done ONCE, affects all LOBs that compile the file)
-shared_operations:
-  op-002-01:
-    srd: "srd-002"
-    description: "Change $5000 deductible factor from -0.20 to -0.22"
-    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    file_type: "shared_module"
-    function: "SetDisSur_Deductible"
-    agent: "rate-modifier"
-    depends_on: []
-
-  op-003-01:
-    srd: "srd-003"
-    description: "Change $2500 deductible factor from -0.15 to -0.17"
-    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    file_type: "shared_module"
-    function: "SetDisSur_Deductible"
-    agent: "rate-modifier"
-    depends_on: []
-
-  op-004-01:
-    srd: "srd-004"
-    description: "Multiply liability bundle premiums by 1.03"
+intents:
+  - id: "intent-001"
+    cr: "cr-001"                        # Links back to change request
+    title: "Increase liability bundle premiums by 3%"
+    description: "Multiply all rate-value Array6 arguments by 1.03"
+    capability: "value_editing"         # value_editing | structure_insertion | file_creation | flow_modification
+    strategy_hint: "array6-multiply"    # Optional -- reference to old pattern docs
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "GetLiabilityBundlePremiums"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.95
+    open_questions: []
 
-  op-004-02:
-    srd: "srd-004"
-    description: "Multiply liability extension premiums by 1.03"
+    # Analyzer-enriched fields (passed through from analyzer_output)
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 3850
+    function_line_end: 4100
+    target_lines:
+      - line: 3870
+        content: "                Case 1 : varRates = Array6(512.59, 28.73, 463.03)"
+        context: "Territory 1 Home"
+        rounding: "none"
+        value_count: 3
+      # ... more target lines
+    parameters:
+      factor: 1.03
+      scope: "all_territories"
+      rounding: "auto"
+    peer_examples: []
+
+  - id: "intent-002"
+    cr: "cr-002"
+    title: "Change $5000 deductible factor from -0.20 to -0.22"
+    description: "Modify the $5000 deductible discount factor in SetDisSur_Deductible"
+    capability: "value_editing"
+    strategy_hint: "factor-table"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
-    function: "GetLiabilityExtensionPremiums"
-    agent: "rate-modifier"
+    function: "SetDisSur_Deductible"
     depends_on: []
+    confidence: 0.95
+    open_questions: []
 
-# LOB-specific operations (one per target folder per change)
-lob_operations:
-  op-005-01:
-    srd: "srd-005"
-    description: "Add DAT IDs to ResourceID.vb"
-    file: "Saskatchewan/Home/20260101/ResourceID.vb"
-    file_type: "lob_specific"
-    agent: "logic-modifier"
-    depends_on: []
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 2100
+    function_line_end: 2250
+    target_lines:
+      - line: 2202
+        content: "                Case 5000 : dblDedDiscount = -0.2"
+        context: "Case 5000 deductible"
+        rounding: null
+        value_count: 1
+    parameters:
+      old_value: -0.20
+      new_value: -0.22
+    peer_examples: []
 
-  op-005-02:
-    srd: "srd-005"
-    description: "Add DAT IDs to ResourceID.vb"
-    file: "Saskatchewan/Condo/20260101/ResourceID.vb"
-    file_type: "lob_specific"
-    agent: "logic-modifier"
-    depends_on: []
-
-# Partial approval constraints: which SRDs are coupled by inter-SRD dependencies.
-# If SRD X is rejected at Gate 1, these constraints show which other SRDs are
-# blocked as a consequence. Only populated when inter-SRD dependencies exist.
-partial_approval_constraints: []        # Empty in this example (no inter-SRD deps)
-# Non-empty example (see Example D):
-#   - srd: "srd-003"
-#     requires_srd: "srd-001"
-#     reason: "op-003-01 (eligibility rule) depends on op-001-01 (constant definition)"
-#     blocking_operations: ["op-003-01"]
-#     required_operations: ["op-001-01"]
+# Partial approval constraints: which CRs are coupled by inter-CR dependencies.
+partial_approval_constraints: []
+# Non-empty example:
+#   - cr: "cr-003"
+#     requires_cr: "cr-001"
+#     reason: "intent-003 depends on intent-001"
+#     blocking_intents: ["intent-003"]
+#     required_intents: ["intent-001"]
 
 # Topological order for execution (respects depends_on)
 execution_order:
-  - "op-002-01"
-  - "op-003-01"
-  - "op-004-01"
-  - "op-004-02"
-  - "op-005-01"    # Can run in parallel with op-005-02
-  - "op-005-02"    # Can run in parallel with op-005-01
-```
-
-### Individual Operation Files (analysis/operations/op-{SRD}-{NN}.yaml)
-
-```yaml
-# File: analysis/operations/op-002-01.yaml
-id: "op-002-01"
-srd: "srd-002"
-title: "Change $5000 deductible factor from -0.20 to -0.22"
-description: |
-  In function SetDisSur_Deductible, find the Case 5000 block and change
-  the deductible discount value from -0.20 to -0.22. Note: this function
-  has nested If/Else blocks for farm vs non-farm within each Case.
-  The Analyzer must show ALL matching values to the developer.
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "SetDisSur_Deductible"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "factor_table_change"
-parameters:
-  case_value: 5000
-  old_value: -0.20
-  new_value: -0.22
-```
-
-```yaml
-# File: analysis/operations/op-004-01.yaml
-id: "op-004-01"
-srd: "srd-004"
-title: "Multiply liability bundle premiums by 1.03"
-description: |
-  In function GetLiabilityBundlePremiums, find all Array6() calls assigned
-  to a variable (LHS of =). Multiply each numeric argument by 1.03.
-  NOTE: Some Array6 values in this function contain decimals (e.g., 324.29,
-  462.32) -- rounding mode must be determined by the Analyzer after
-  inspecting actual values.
-  IMPORTANT: Do NOT modify Array6 calls inside IsItemInArray() -- those are
-  membership tests, not rate values.
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "GetLiabilityBundlePremiums"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "base_rate_increase"
-parameters:
-  factor: 1.03
-  scope: "all_territories"
-  rounding: "auto"
-```
-
-```yaml
-# File: analysis/operations/op-005-01.yaml (LOB-specific, one of many)
-id: "op-005-01"
-srd: "srd-005"
-title: "Add Elite Comp DAT IDs to Home ResourceID.vb"
-description: |
-  Add DAT resource ID constants for the Elite Comp coverage type to
-  ResourceID.vb in the Home version folder. Add constants for each
-  classification (Preferred, Standard).
-file: "Saskatchewan/Home/20260101/ResourceID.vb"
-file_type: "lob_specific"
-function: null
-agent: "logic-modifier"
-depends_on: []
-blocked_by: []
-pattern: "new_coverage_type"
-parameters:
-  coverage_type_name: "Elite Comp."
-  constant_name: "ELITECOMP"
-  classifications: ["PREFERRED", "STANDARD"]
-  dat_ids:
-    Preferred: 9501
-    Standard: 9502
+  - "intent-001"
+  - "intent-002"
+  - "intent-003"
+  - "intent-004"
 ```
 
 ---
 
 ## EXECUTION STEPS
 
-These are the step-by-step instructions for decomposing SRDs into atomic operations.
-Follow them in order. Each step has clear inputs, actions, and outputs.
+These are the step-by-step instructions for transforming change requests into
+executable intents. Follow them in order.
 
 ### Prerequisites
 
 Before starting, confirm the following exist and are readable:
 
 1. The workflow directory at `.iq-workstreams/changes/{workstream-name}/`
-2. The `parsed/change_spec.yaml` inside that directory (from Intake)
-3. The `parsed/srds/` directory with individual SRD files (from Intake)
-4. The `.iq-workstreams/config.yaml` (for carrier info, province codes, hab flags)
-5. The `.iq-update/patterns/*.yaml` files (for pattern-to-operation mapping guidance)
-6. The target folder .vbproj files listed in change_spec.yaml
+2. The `parsed/change_requests.yaml` inside that directory (from Intake)
+3. The `parsed/requests/` directory with individual CR files (from Intake)
+4. The `analysis/code_discovery.yaml` (from Discovery -- optional but expected)
+5. The `analysis/analyzer_output/` directory with function analysis files (from Analyzer)
+6. The `.iq-workstreams/config.yaml` (for carrier info, province codes, hab flags)
+7. The target folder .vbproj files listed in change_requests.yaml
 
-If any of these are missing, STOP and report:
+If `parsed/change_requests.yaml` or `analysis/analyzer_output/` are missing, STOP:
 ```
 [Decomposer] Cannot proceed -- missing required file: {path}
-              Was Intake completed? Check manifest.yaml for intake.status = "completed".
+             Were Intake and Analyzer completed?
+             Check manifest.yaml for intake.status and analyzer.status.
 ```
 
-### Step 1: Load Context from Intake Output
+If `analysis/code_discovery.yaml` is missing, log a warning and proceed -- Discovery
+output is used for function resolution but the Decomposer can match CRs to Analyzer
+output using domain hints and keyword matching as a fallback.
 
-**Action:** Read the Intake output and build the working context.
+### Step 1: Load Context
 
-1.1. Read `parsed/change_spec.yaml`. Extract:
-   - `province` (e.g., "SK")
-   - `province_name` (e.g., "Saskatchewan")
-   - `lobs` (e.g., ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"])
-   - `lob_category` (e.g., "hab" -- used in Step 5 to determine decomposition context)
-   - `effective_date` (e.g., "20260101")
+**Action:** Read all upstream outputs and build the working context.
+
+1.1. Read `parsed/change_requests.yaml`. Extract:
+   - `province`, `province_name`, `lobs`, `lob_category`, `effective_date`
    - `target_folders` (list of path + vbproj entries)
    - `shared_modules` (list of shared files and which LOBs use them)
-   - `srds` (summary list -- IDs and types)
+   - `requests` (summary list -- IDs and titles)
 
 1.2. Read `config.yaml` from `.iq-workstreams/`. Extract:
    - `provinces.{province_code}.lobs[]` with `is_hab` flags
    - `provinces.{province_code}.hab_code` (e.g., "SKHab")
    - `naming` patterns for file classification
 
-1.3. Build the **LOB context table** -- one row per target folder:
+1.3. Read each individual CR file from `parsed/requests/cr-NNN.yaml`. Store in memory.
 
+1.4. If `request_count` is 0, report and complete:
 ```
-LOB CONTEXT TABLE
-------------------------------------------------------------
-Example: Portage Mutual Saskatchewan Habitational (6 LOBs)
-LOB         Path                         vbproj                                          is_hab
-Home        Saskatchewan/Home/20260101   Cssi.IntelliQuote.PORTSKHOME20260101.vbproj     true
-Condo       Saskatchewan/Condo/20260101  Cssi.IntelliQuote.PORTSKCONDO20260101.vbproj    true
-Tenant      Saskatchewan/Tenant/20260101 Cssi.IntelliQuote.PORTSKTENANT20260101.vbproj   true
-FEC         Saskatchewan/FEC/20260101    Cssi.IntelliQuote.PORTSKFEC20260101.vbproj       true
-Farm        Saskatchewan/Farm/20260101   Cssi.IntelliQuote.PORTSKFARM20260101.vbproj      true
-Seasonal    Saskatchewan/Seasonal/20260101 Cssi.IntelliQuote.PORTSKSEASONAL20260101.vbproj true
+[Decomposer] No change requests to process. Intake produced 0 items.
+             Nothing to do -- workflow complete at Decomposer stage.
 ```
+Write a minimal intent_graph.yaml (total_intents: 0) and exit.
 
-1.4. Read each individual SRD file from `parsed/srds/srd-NNN.yaml`. Store in memory.
+### Step 2: Load Discovery Output
 
-1.5. If `srd_count` in change_spec is 0, report and complete:
-```
-[Decomposer] No SRDs to decompose. Intake produced 0 change items.
-              Nothing to do -- workflow complete at Decomposer stage.
-```
-Write a minimal dependency_graph.yaml (total_operations: 0) and exit.
+**Action:** Load the Discovery agent's code map for function-to-file resolution.
 
-### Step 2: Parse .vbproj Files to Build the File Reference Map
-
-**Action:** Read each target folder's .vbproj to know which Code/ files each project
-compiles.
-
-2.1. For each entry in `target_folders`, read the .vbproj as XML.
-
-**CRITICAL: Use an XML parser, NOT regex.** The .vbproj is MSBuild XML.
-In Python: `import xml.etree.ElementTree as ET`
-
-2.2. Extract all `<Compile Include="...">` elements from the .vbproj. Record each
-Include path and normalize it (resolve `..\..\` relative paths against the
-version folder location to get the absolute path within the codebase).
-
-**Use Python for path resolution** when the Include path contains `..` -- do NOT
-attempt to mentally resolve relative paths (error-prone string manipulation):
-
-```python
-import os
-vbproj_dir = os.path.dirname(os.path.abspath(vbproj_path))
-resolved = os.path.normpath(os.path.join(vbproj_dir, include_path))
-```
-
-This handles arbitrary nesting depth (`..\..\`, `..\..\..\`, etc.) correctly.
-
-The six source types found in .vbproj files:
-
-```
-SOURCE TYPES IN .VBPROJ
-------------------------------------------------------------
-Type                    Example Include Path                              Action
-Local files             CalcMain.vb, ResourceID.vb                        Classify as local
-Province Code/ files    ..\..\Code\mod_Common_SKHab20260101.vb            Classify per rules
-SHARDCLASS files        ..\..\SHARDCLASS\cMessage.vb                      Classify as shardclass
-Hub-level files         ..\..\..\Hub\modAttachScheduledArticleToDwellings.vb  Ignore (not editable)
-Cross-province Code/    ..\..\..\Code\PORTCommonHeat.vb                   NEVER modify
-Shared engine files     ..\..\..\..\Shared Files for Nodes\cCalcEngine.vb Ignore (not editable)
-```
-
-Some `<Compile>` elements have `<Link>` child elements -- these are cosmetic display
-names for Visual Studio. Ignore `<Link>` values; use the `Include` attribute path.
-
-2.3. Build the **File Reference Map** -- for each Code/ file, record which .vbproj(s)
-compile it:
-
-```
-FILE REFERENCE MAP
-------------------------------------------------------------
-Code/ File                                          Compiled By
-mod_Common_SKHab20260101.vb                         Home, Condo, Tenant, FEC, Farm, Seasonal
-CalcOption_SKHOME20260101.vb                        Home
-CalcOption_SKCONDO20260101.vb                       Condo
-Option_SewerBackup_SKHome20231001.vb                Home, Condo   (cross-LOB!)
-Liab_RentedDwelling_SKHome20260101.vb               Home, Condo   (cross-LOB!)
-Option_RentedCondo_SKCondo20220502.vb               Home, Condo   (cross-LOB!)
-modFloatersAndScheduledArticles_SKHAB20220502.vb    Home, Condo, Tenant, FEC, Farm, Seasonal
-```
-
-2.4. Classify each referenced file using the File Classification Rules (Step 3).
-
-2.5. Cross-reference with `shared_modules` from change_spec.yaml. Any file listed
-there should already be classified as `shared_module`. If there is a mismatch
-(e.g., change_spec says shared but .vbproj says only one LOB compiles it), flag
-for developer review.
-
-2.6. **Date consistency validation (multi-folder workflows only).** When there are
-2+ target folders (e.g., multi-LOB hab workflows), extract the date portions from
-all Code/ file references across all .vbproj files and compare:
-
-```python
-import re
-from collections import defaultdict
-
-# date_sets[lob] = set of dates found in that LOB's .vbproj Code/ references
-date_sets = defaultdict(set)
-for lob, vbproj_refs in file_reference_map_by_lob.items():
-    for ref in vbproj_refs:
-        # Extract YYYYMMDD date from filename (e.g., mod_Common_SKHab20260101.vb -> 20260101)
-        match = re.search(r'(\d{8})\.vb$', ref)
-        if match:
-            date_sets[lob].add(match.group(1))
-```
-
-If the sets of referenced dates vary significantly between LOBs, warn:
-
-```
-[Decomposer] WARNING: .vbproj files reference inconsistent Code/ file dates.
-             {LOB1} references dates {X, Y}, while {LOB2} references {X, Z}.
-             This may indicate IQWiz was run at different times or with different
-             settings. Verify the target folders are correctly configured.
-```
-
-Minor variation is expected (e.g., one LOB has an extra endorsement file with an
-older date). Only warn when the core shared file dates differ between LOBs.
-
-### Step 3: Classify Files
-
-**Action:** Assign a file_type to every Code/ file referenced by the target .vbproj
-files. Apply these rules in priority order (first match wins):
-
-#### File Classification Rules
-
-```
-RULE 1: Cross-Province Shared (NEVER MODIFY)
-  Match: file path resolves to the codebase-root Code/ directory
-         (e.g., Code/PORTCommonHeat.vb, Code/mod_VICCAuto.vb)
-         NOT the province-level Code/ directory
-  Result: file_type = "cross_province_shared"
-  Action: NEVER generate operations for these files. If an SRD seems to
-          target one, flag for developer review.
-
-RULE 2: Shared Hab Module
-  Match: filename matches one of:
-         - mod_Common_{Prov}Hab{Date}.vb
-         - modFloatersAndScheduledArticles_{PROV}HAB{Date}.vb
-         OR file is listed in change_spec.yaml shared_modules[]
-  Result: file_type = "shared_module"
-  Verify: Should appear in 2+ .vbproj File Reference Maps
-
-RULE 3: Shared Auto Module
-  Match: filename matches:
-         - mod_Algorithms_{Prov}Auto{Date}.vb
-         - mod_DisSur_{Prov}Auto{Date}.vb
-  Result: file_type = "shared_module" (if compiled by multiple projects)
-          OR file_type = "lob_specific" (if compiled by only Auto project)
-
-RULE 4: LOB-Specific CalcOption File
-  Match: filename matches CalcOption_{PROV}{LOB}{Date}.vb
-  Result: file_type = "lob_specific"
-  Note: Only one .vbproj compiles this file.
-
-RULE 5: Cross-LOB Option/Liab File
-  Match: filename matches:
-         - Option_{Name}_{Prov}{LOB}{Date}.vb
-         - Liab_{Name}_{Prov}{LOB}{Date}.vb
-         AND the File Reference Map shows 2+ LOB projects compile it
-  Result: file_type = "cross_lob"
-  Note: File is named for one LOB but compiled by another. E.g.,
-        Option_Bicycle_SKHome20220502.vb compiled by both Home and Condo.
-        The Decomposer records this; the Analyzer runs full reverse lookup.
-
-RULE 6: Single-LOB Option/Liab File
-  Match: same filename patterns as Rule 5 but only 1 .vbproj compiles it
-  Result: file_type = "lob_specific"
-
-RULE 7: Local File (in version folder)
-  Match: file is inside the version folder itself (not Code/ or SHARDCLASS/)
-         Examples: ResourceID.vb, CalcMain.vb, TbwApplicationTypeFactory.vb
-  Result: file_type = "local"
-
-RULE 8: SHARDCLASS File
-  Match: file is in SHARDCLASS/ (or SharedClass/ for Nova Scotia)
-  Result: file_type = "shardclass"
-  Note: Treat similarly to shared_module -- may be compiled by multiple LOBs.
-        Flag for developer review if an operation would modify these.
-```
-
-3.1. Store the classification for each file in the working context. This is used
-throughout the remaining steps to determine shared_operations vs lob_operations.
-
-### Step 4: Filter Out-of-Scope SRDs
-
-**Action:** Separate SRDs that cannot be processed from those that can.
-
-4.1. For each SRD, check `dat_file_warning`:
-   - If `dat_file_warning: true` --> mark as **OUT_OF_SCOPE**
-   - If `dat_file_warning: false` --> proceed to decomposition
-
-4.2. Record out-of-scope SRDs for the dependency graph:
-
-```yaml
-out_of_scope:
-  - srd: "srd-001"
-    title: "[DAT FILE] Increase hab dwelling base rates by 5%"
-    reason: "dat_file_warning: Hab dwelling base rates are in DAT files, not VB code"
-```
-
-4.3. Report to the developer:
-
-```
-[Decomposer] Filtered 1 out-of-scope SRD(s):
-             SRD-001: "[DAT FILE] Increase hab dwelling base rates by 5%"
-             Reason: Hab dwelling base rates are in external DAT files, not VB source code.
-             This SRD is tracked in the manifest but will have no executable operations.
-
-             Proceeding with {N} in-scope SRDs.
-```
-
-4.4. If ALL SRDs are out of scope, report and complete:
-
-```
-[Decomposer] All {N} SRDs are out of scope (DAT file changes).
-              No operations to generate. Workflow complete at Decomposer stage.
-```
-
-Write dependency_graph.yaml with total_operations: 0 and the out_of_scope list, then exit.
-
-### Step 5: Decompose Each In-Scope SRD into Operations
-
-**Action:** For each in-scope SRD, apply the SRD-type-specific decomposition rules
-to produce one or more atomic operations.
-
-Use **hierarchical operation IDs** in the format `op-{SRD_NUM}-{LOCAL_INDEX}`.
-The SRD number comes from the SRD ID (e.g., srd-002 --> `op-002-XX`), and the
-local index starts at 01 within each SRD. Examples:
-- SRD srd-001 produces: op-001-01, op-001-02, op-001-03
-- SRD srd-002 produces: op-002-01, op-002-02
-
-This makes ID generation locally scoped to each SRD -- no global counter to lose
-track of across long generation runs.
-
-#### 5.0 Load Discovery Output and Codebase Profile (Optional)
-
-Before decomposing SRDs, load the Discovery Agent's code map (if available) and
-relevant sections from the Codebase Knowledge Base.
-
-**5.0a Load Discovery (code_discovery.yaml):**
+2.1. Read `analysis/code_discovery.yaml`:
 
 ```python
 import os
@@ -570,12 +359,14 @@ if file_exists(discovery_path):
     try:
         discovery = load_yaml(discovery_path)
     except Exception:
-        discovery = {}  # Malformed YAML — treat as absent, fall through to heuristics
-    # Build lookup: SRD ID → resolved target (skip unresolved entries)
+        discovery = {}  # Malformed YAML -- treat as absent
+
+    # Build lookup: CR ID -> resolved target
     discovery_targets = {}
-    for srd_id, target in discovery.get("srd_targets", {}).items():
-        if target.get("resolved_function"):  # Only use entries that resolved
-            discovery_targets[srd_id] = target
+    for cr_id, target in discovery.get("request_targets", {}).items():
+        if target.get("resolved_function"):
+            discovery_targets[cr_id] = target
+
     discovery_dispatch = discovery.get("dispatch_map", {})
     discovery_peers = discovery.get("peer_functions", {})
 else:
@@ -584,1469 +375,1164 @@ else:
     discovery_peers = {}
 ```
 
-When `code_discovery.yaml` exists, use it to replace guesswork:
-- **USE `resolved_function`** instead of inferring function names from SRD titles
-- **USE `resolved_file`** instead of guessing files from naming patterns
-- **USE `related_functions`** to flag multi-function changes the SRD might imply
-- **USE `dispatch_map`** for endorsement category determination (instead of pattern matching)
-- **USE `contains.array6_count` / `select_case_count`** for complexity estimation
+### Step 3: Load Analyzer Output
 
-If `code_discovery.yaml` does not exist, all decomposition rules fall through to
-their existing heuristic behavior (graceful degradation — no discovery data needed).
+**Action:** Load the Analyzer's function-level analysis for every analyzed function.
 
-**5.0b Load Codebase Profile (codebase-profile.yaml):**
+3.1. Scan `analysis/analyzer_output/` for all `.yaml` files. Build an index:
 
 ```python
-profile_path = ".iq-workstreams/codebase-profile.yaml"
-dispatch_tables = {}
-vehicle_profiles = {}
+analyzer_index = {}  # function_name -> analyzer data dict
 
-if file_exists(profile_path):
-    prov = change_spec["province"]           # e.g., "SK"
-    lob_category = change_spec["lob_category"]  # "hab" | "auto" | "mixed"
-
-    # Load dispatch tables for target province+LOB combinations
-    for lob in change_spec["lobs"]:
-        key = f"{prov}_{lob.upper()}"        # e.g., "SK_HOME"
-        section = load_yaml_section(profile_path, f"dispatch_tables.{key}")
-        if section:
-            dispatch_tables[key] = section
-
-    # Load vehicle type profiles (Auto LOBs only)
-    if lob_category in ("auto", "mixed"):
-        for lob in change_spec["lobs"]:
-            if lob.upper() == "AUTO":
-                key = f"{prov}_AUTO"
-                section = load_yaml_section(profile_path, f"vehicle_type_profiles.{key}")
-                if section:
-                    vehicle_profiles[key] = section
+analyzer_dir = os.path.join(workstream_dir, "analysis/analyzer_output")
+if os.path.isdir(analyzer_dir):
+    for filename in os.listdir(analyzer_dir):
+        if filename.endswith(".yaml"):
+            try:
+                data = load_yaml(os.path.join(analyzer_dir, filename))
+                # Analyzer output is per-CR with functions_analyzed[] array
+                for func_entry in data.get("functions_analyzed", []):
+                    func_name = func_entry.get("function")
+                    if func_name:
+                        analyzer_index[func_name] = func_entry
+            except Exception:
+                pass  # Skip malformed files
 ```
 
-If `codebase-profile.yaml` does not exist or relevant sections are empty, all
-decomposition rules fall through to their existing behavior (no profile data needed).
-
-**Priority and merging:** Discovery output (code_discovery.yaml) takes precedence
-over Codebase Profile (codebase-profile.yaml) when both provide the same information.
-Discovery is per-run verified data; the profile is a persistent cache that may be stale.
-
-Merge `discovery_dispatch` into `dispatch_tables` so existing Step 5.1.4 code
-uses Discovery's freshly-traced dispatch data when available:
+3.2. Also build secondary indexes for efficient lookup:
 
 ```python
-# Discovery dispatch overrides profile dispatch (per province+LOB key)
-for key, dispatch_data in discovery_dispatch.items():
-    dispatch_tables[key] = dispatch_data  # Fresh data wins over stale profile
+# file -> [function_names] index (for matching CRs to files)
+file_to_functions = {}
+for func_name, data in analyzer_index.items():
+    src_file = data.get("source_file", data.get("file", ""))
+    file_to_functions.setdefault(src_file, []).append(func_name)
+
+# keyword -> [function_names] index (for matching CRs by domain hints)
+keyword_to_functions = {}
+for func_name, data in analyzer_index.items():
+    # Index by lowercase function name segments
+    parts = re.split(r'(?=[A-Z])|_', func_name)
+    for part in parts:
+        if part and len(part) > 2:
+            keyword_to_functions.setdefault(part.lower(), []).append(func_name)
 ```
 
-#### 5.0c Apply Discovery Overrides (Per-SRD)
+### Step 4: Parse .vbproj Files to Build the File Reference Map
 
-Before applying heuristic decomposition rules, check if Discovery resolved this
-SRD to an exact function. If so, use the verified data instead of guessing.
+**Action:** Read each target folder's .vbproj to know which Code/ files each project
+compiles. This logic is IDENTICAL to what the old decomposer did -- kept because
+it is essential for shared module deduplication and file classification.
+
+4.1. For each entry in `target_folders`, read the .vbproj as XML.
+
+**CRITICAL: Use an XML parser, NOT regex.** The .vbproj is MSBuild XML.
+
+4.2. Extract all `<Compile Include="...">` elements. Normalize paths:
 
 ```python
-def apply_discovery_override(srd, discovery_targets):
-    """Override SRD hints with Discovery-verified data when available.
+import os
+import xml.etree.ElementTree as ET
 
-    Mutates srd dict in place: sets target_function_hint and target_file_hint
-    to Discovery's resolved values. Downstream decomposition rules should
-    check these hints FIRST before falling back to keyword inference.
+def parse_vbproj(vbproj_path):
+    """Extract Compile Include paths from a .vbproj file."""
+    tree = ET.parse(vbproj_path)
+    root = tree.getroot()
+    ns = {"ms": "http://schemas.microsoft.com/developer/msbuild/2003"}
+    includes = []
+    for compile_elem in root.findall(".//ms:Compile", ns):
+        include = compile_elem.get("Include")
+        if include:
+            vbproj_dir = os.path.dirname(os.path.abspath(vbproj_path))
+            resolved = os.path.normpath(os.path.join(vbproj_dir, include))
+            includes.append(resolved)
+    return includes
+```
+
+4.3. Build the **File Reference Map** -- for each Code/ file, record which .vbproj(s)
+compile it.
+
+4.4. Classify each referenced file using the File Classification Rules (Step 5).
+
+4.5. Cross-reference with `shared_modules` from change_requests.yaml. Flag mismatches.
+
+### Step 5: Classify Files
+
+**Action:** Assign a file_type to every Code/ file referenced by target .vbproj files.
+
+#### File Classification Rules (priority order -- first match wins)
+
+```
+RULE 1: Cross-Province Shared (NEVER MODIFY)
+  Match: file path resolves to the codebase-root Code/ directory
+         (NOT the province-level Code/ directory)
+  Result: file_type = "cross_province_shared"
+  Action: NEVER generate intents for these files.
+
+RULE 2: Shared Hab Module
+  Match: filename matches mod_Common_{Prov}Hab{Date}.vb
+         OR modFloatersAndScheduledArticles_{PROV}HAB{Date}.vb
+         OR file is listed in change_requests.yaml shared_modules[]
+  Result: file_type = "shared_module"
+  Verify: Should appear in 2+ .vbproj File Reference Maps
+
+RULE 3: Shared Auto Module
+  Match: filename matches mod_Algorithms_{Prov}Auto{Date}.vb
+         OR mod_DisSur_{Prov}Auto{Date}.vb
+  Result: file_type = "shared_module" (if compiled by multiple projects)
+          OR file_type = "lob_specific" (if only one project compiles it)
+
+RULE 4: LOB-Specific CalcOption File
+  Match: filename matches CalcOption_{PROV}{LOB}{Date}.vb
+  Result: file_type = "lob_specific"
+
+RULE 5: Cross-LOB Option/Liab File
+  Match: Option_{Name}_{Prov}{LOB}{Date}.vb or Liab_{Name}_{Prov}{LOB}{Date}.vb
+         AND 2+ LOB projects compile it
+  Result: file_type = "cross_lob"
+
+RULE 6: Single-LOB Option/Liab File
+  Match: same patterns as Rule 5 but only 1 .vbproj compiles it
+  Result: file_type = "lob_specific"
+
+RULE 7: Local File (in version folder)
+  Match: file is inside the version folder itself (not Code/ or SHARDCLASS/)
+  Result: file_type = "local"
+
+RULE 8: SHARDCLASS File
+  Match: file is in SHARDCLASS/ (or SharedClass/ for Nova Scotia)
+  Result: file_type = "shardclass"
+```
+
+### Step 6: Filter Out-of-Scope CRs
+
+**Action:** Separate CRs that cannot be processed.
+
+6.1. For each CR, check `dat_file_warning`:
+   - If `dat_file_warning: true` --> mark as **OUT_OF_SCOPE**
+   - If `dat_file_warning: false` --> proceed
+
+6.2. Record out-of-scope CRs:
+
+```yaml
+out_of_scope:
+  - cr: "cr-003"
+    title: "[DAT FILE] Increase hab dwelling base rates by 5%"
+    reason: "dat_file_warning: Hab dwelling base rates are in DAT files, not VB code"
+```
+
+6.3. Report:
+```
+[Decomposer] Filtered {N} out-of-scope CR(s):
+             CR-003: "[DAT FILE] Increase hab dwelling base rates by 5%"
+             Reason: Hab dwelling base rates are in external DAT files.
+
+             Proceeding with {M} in-scope CRs.
+```
+
+6.4. If ALL CRs are out of scope, write minimal intent_graph.yaml and exit.
+
+### Step 7: Match Each CR to Analyzed Functions
+
+**Action:** For each in-scope CR, find the analyzed function(s) it targets. This is
+the core of the new Decomposer -- it matches ticket requirements to code understanding.
+
+The matching uses three data sources in priority order:
+
+1. **Discovery targets** (highest confidence -- Discovery traced CalcMain and resolved)
+2. **Analyzer index** (verified function analysis with exact lines and FUBs)
+3. **Domain hint matching** (keyword matching from Intake's glossary/domain hints)
+
+#### 7.1 Match Algorithm
+
+For each in-scope CR:
+
+```python
+def match_cr_to_functions(cr, discovery_targets, analyzer_index, keyword_to_functions):
+    """Find all analyzed functions that a change request targets.
+
+    Returns a list of (function_name, analyzer_data, match_source) tuples.
     """
-    srd_id = srd["id"]  # e.g., "srd-001"
-    if srd_id not in discovery_targets:
-        return  # No discovery data — heuristics will handle this SRD
+    matches = []
+    cr_id = cr["id"]
 
-    target = discovery_targets[srd_id]
-    srd["target_function_hint"] = target["resolved_function"]
-    srd["target_file_hint"] = target["resolved_file"]
-    srd["discovery_contains"] = target.get("contains", {})
+    # Priority 1: Discovery resolved this CR to a specific function
+    if cr_id in discovery_targets:
+        target = discovery_targets[cr_id]
+        func_name = target["resolved_function"]
+        if func_name in analyzer_index:
+            matches.append((func_name, analyzer_index[func_name], "discovery"))
 
-    # Flag related functions that may need the same change
-    related = target.get("related_functions", [])
-    if related:
-        srd["related_function_hints"] = [
-            {"name": r["name"], "note": r.get("note", "")} for r in related
-        ]
+        # Also check related functions from Discovery
+        for related in target.get("related_functions", []):
+            rname = related["name"]
+            if rname in analyzer_index:
+                matches.append((rname, analyzer_index[rname], "discovery_related"))
 
-# Apply to each SRD before decomposition
-for srd in srds:
-    apply_discovery_override(srd, discovery_targets)
+    # Priority 2: Developer provided a function hint in the CR
+    if not matches and cr.get("extracted", {}).get("target_function_hint"):
+        hint = cr["extracted"]["target_function_hint"]
+        # Exact match
+        if hint in analyzer_index:
+            matches.append((hint, analyzer_index[hint], "developer_hint"))
+        else:
+            # Wildcard match (e.g., "SetDisSur_*")
+            for func_name in analyzer_index:
+                if fnmatch.fnmatch(func_name, hint):
+                    matches.append((func_name, analyzer_index[func_name], "developer_hint_wildcard"))
+
+    # Priority 3: Glossary match from Intake domain hints
+    if not matches and cr.get("domain_hints", {}).get("glossary_match"):
+        gm = cr["domain_hints"]["glossary_match"]
+        if gm in analyzer_index:
+            matches.append((gm, analyzer_index[gm], "glossary"))
+
+    # Priority 4: Keyword matching against Analyzer function names
+    if not matches:
+        keywords = cr.get("domain_hints", {}).get("keyword_matches", [])
+        candidates = set()
+        for kw in keywords:
+            for func_name in keyword_to_functions.get(kw.lower(), []):
+                candidates.add(func_name)
+        # Score candidates by number of matching keywords
+        scored = []
+        for func_name in candidates:
+            func_lower = func_name.lower()
+            score = sum(1 for kw in keywords if kw.lower() in func_lower)
+            scored.append((score, func_name))
+        scored.sort(reverse=True)
+        for score, func_name in scored:
+            if score >= 1:
+                matches.append((func_name, analyzer_index[func_name], "keyword"))
+
+    return matches
 ```
 
-After this step, the SRD type decomposition rules in Step 5.1 should check
-`srd.get("target_function_hint")` FIRST. If set, use it as the primary target
-instead of keyword-based inference. If not set, fall through to existing heuristics.
+#### 7.2 Handle Unresolved CRs
 
-#### 5.1 SRD Type Decomposition Rules
-
-Apply the matching rule set based on the SRD `type` field.
-
----
-
-##### 5.1.1 base_rate_increase
-
-**Input:** SRD with `type: "base_rate_increase"`, `method: "multiply"`, `factor: N`
-
-**Decomposition logic:**
-
-1. **Check Discovery hint FIRST.** If `target_function_hint` is set on the SRD
-   (from Step 5.0c), use it as the primary search target. Also check
-   `related_function_hints` for additional functions that may need the same change.
-
-2. **If no hint, infer from SRD title and scope.** The SRD title gives clues:
-   - "liability premiums" --> target functions containing "Liability" in the name
-     (e.g., GetLiabilityBundlePremiums, GetLiabilityExtensionPremiums,
-     GetLiabilityExtensionWatercraftPremiums)
-   - "base rates" in auto --> target functions containing "BaseRate" or "BasePrem"
-     in mod_Algorithms (e.g., GetBaseRate_Auto)
-   - "sewer backup" --> GetSewerBackupPremium
-   - "base rates" or "base premiums" in hab --> likely DAT file (should have been
-     caught by dat_file_warning, but if it was not, flag now)
-
-3. **Create ONE operation per target function.** A single SRD like "increase all
-   liability premiums by 3%" may produce multiple operations if there are multiple
-   liability functions (e.g., GetLiabilityBundlePremiums AND
-   GetLiabilityExtensionPremiums AND GetLiabilityExtensionWatercraftPremiums).
-
-3b. **Vehicle type fan-out (Auto only).** If the SRD targets an Auto LOB with
-   scope "all" or "all_vehicles" (or no explicit vehicle type), AND `vehicle_profiles`
-   were loaded in Step 5.0, enumerate all vehicle types and create one operation per
-   vehicle type entry function:
-
-   ```python
-   prov = change_spec["province"]
-   key = f"{prov}_AUTO"
-   if key in vehicle_profiles and srd.get("scope") in ("all", "all_vehicles", None):
-       for vtype in vehicle_profiles[key]["types"]:
-           create_operation(
-               target_function=vtype["entry_function"],
-               title=f"Multiply {vtype['name']} base rate by {factor}",
-               # ... standard fields
-           )
-   else:
-       # No profile or specific vehicle type named → single operation (existing behavior)
-       create_operation(target_function=inferred_function, ...)
-   ```
-
-   Without vehicle profiles, the Decomposer creates a single operation targeting
-   `mod_Algorithms` broadly (the Analyzer resolves specific functions). With profiles,
-   each vehicle type gets its own operation, enabling parallel capsule execution.
-
-4. For each operation, determine the file:
-   - Look up the function name pattern in the File Reference Map
-   - If the function is in a `shared_module` file --> classify as shared_operation
-   - If the function is in a `lob_specific` file --> classify as lob_operation
-
-5. Set `agent: "rate-modifier"` for all base_rate_increase operations.
-
-6. Pass `rounding: "auto"` through unchanged -- the Analyzer resolves this after
-   reading actual values (integers get banker rounding, decimals get none).
-
-**Output per operation:**
-
-```yaml
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Multiply {function_name} Array6 values by {factor}"
-description: |
-  In function {function_name}, find all Array6() calls assigned to a variable
-  (LHS of =). Multiply each numeric argument by {factor}.
-  IMPORTANT: Do NOT modify Array6 calls inside IsItemInArray() or other
-  non-assignment contexts -- those are membership tests, not rate values.
-file: "{file_path}"
-file_type: "{shared_module|lob_specific}"
-function: "{function_name}"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "base_rate_increase"
-parameters:
-  factor: {factor}
-  scope: "{scope}"
-  rounding: "auto"
-  rounding_hint: "{rounding_hint}"      # Only if present on SRD; omit if not set
-```
-
-**When the Decomposer cannot determine the exact function name:**
-
-If the SRD title is broad (e.g., "increase all rates by 5%") and the Decomposer
-cannot determine which specific function(s) to target, it MUST ask the developer:
+If a CR matches ZERO analyzed functions:
 
 ```
-[Decomposer] SRD-{NNN} says "{title}". In this codebase, the shared module
-             {file} typically contains several rate functions. Based on the
-             naming patterns, candidates include:
+[Decomposer] CR-{NNN}: "{title}"
+             Could not find a matching analyzed function. Discovery and Analyzer
+             did not identify a target for this change.
 
-             1. GetLiabilityBundlePremiums -- liability premium Array6 tables
-             2. GetLiabilityExtensionPremiums -- extension premium Array6 tables
-             3. GetSewerBackupPremium -- sewer backup premium Array6 tables
-             4. SetDisSur_Deductible -- deductible factor tables
+             Possible reasons:
+             1. The function was not in the CalcMain call chain
+             2. The function name is non-standard
+             3. The change targets a file not yet analyzed
 
-             Which function(s) should this increase apply to?
-             (Enter numbers, e.g., "1, 2" or "all")
+             Which function should this CR target?
+             (Or type "skip" to mark as needs_review)
 ```
 
-The Decomposer lists candidate function names inferred from naming conventions
-and config.yaml patterns. It does NOT read file contents -- function existence
-verification is the Analyzer's job.
+If the developer names a function, check if it exists in the Analyzer output.
+If not, create the intent with `confidence: 0.3` and `open_questions` noting
+the function was not found by the Analyzer.
 
----
+#### 7.3 Handle Multi-Function CRs
 
-##### 5.1.2 factor_table_change
+If a CR matches MULTIPLE analyzed functions (e.g., "increase all liability premiums"
+matches GetLiabilityBundlePremiums AND GetLiabilityExtensionPremiums):
 
-**Input:** SRD with `type: "factor_table_change"`, `case_value`, `old_value`, `new_value`
+- Create ONE intent per matched function
+- All intents reference the same `cr` ID
+- The developer can reject individual intents at Gate 1
 
-**Decomposition logic:**
-
-1. Determine the target function:
-   - If `target_function_hint` is set --> use it
-   - If `case_value` suggests deductible amounts (200, 500, 750, 1000, 2500, 5000)
-     --> likely `SetDisSur_Deductible` or similar
-   - If the SRD title mentions "age discount" --> `SetDisc_Age`
-   - If the SRD title mentions "claims discount" --> `SetDisc_Claims`
-   - If the SRD title mentions "new home discount" --> `SetDisc_NewHome`
-   - If uncertain, flag for developer (see below)
-
-2. **Create ONE operation per SRD.** One case_value change = one operation.
-
-3. Determine the file:
-   - Factor functions are typically in mod_Common (shared_module for hab)
-   - Or in mod_Algorithms / mod_DisSur (for auto)
-
-4. Set `agent: "rate-modifier"`.
-
-5. **Flag nested conditionals:** Factor tables like SetDisSur_Deductible have
-   If/Else blocks inside each Case (e.g., farm vs non-farm paths with different
-   values). Add a note in the operation description:
-
-```yaml
-description: |
-  In function SetDisSur_Deductible, find Case {case_value} and change
-  the discount value from {old_value} to {new_value}.
-  NOTE: Factor tables in this codebase commonly have nested If/Else blocks
-  within each Case (e.g., farm vs non-farm). The Analyzer must show ALL
-  matching values within Case {case_value} to the developer for confirmation.
-```
-
-**When the function cannot be determined:**
+If the match source is "keyword" (lowest confidence) and there are many matches,
+present them to the developer:
 
 ```
-[Decomposer] SRD-{NNN} targets a factor table value (Case {case_value}: {old_value} -> {new_value})
-             but I cannot determine which function this belongs to.
+[Decomposer] CR-{NNN} "{title}" may target multiple functions:
 
-             Which function contains this factor table?
-             (Examples in this codebase: SetDisSur_Deductible, SetDisc_Age,
-              SetDisc_Claims, SetDisc_NewHome)
+  1. GetLiabilityBundlePremiums (mod_Common_SKHab, line 3850)
+     14 Array6 lines across 12 Case branches
+  2. GetLiabilityExtensionPremiums (mod_Common_SKHab, line 4110)
+     8 Array6 lines across 8 Case branches
+  3. GetLiabilityExtensionWatercraftPremiums (mod_Common_SKHab, line 4310)
+     6 Array6 lines across 6 Case branches
+
+  Which function(s) should this change apply to?
+  (Enter numbers, e.g., "1, 2" or "all")
 ```
 
-**Output per operation:**
+### Step 8: Form Intents
 
-```yaml
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Change {case_description} from {old_value} to {new_value}"
-description: "..."
-file: "{file_path}"
-file_type: "shared_module"
-function: "{function_name}"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "factor_table_change"
-parameters:
-  case_value: {case_value}
-  old_value: {old_value}
-  new_value: {new_value}
-```
+**Action:** For each CR-to-function match, create an intent with all the fields
+the Change Engine needs.
 
----
+#### 8.1 Determine Capability
 
-##### 5.1.3 included_limits
-
-**Input:** SRD with `type: "included_limits"`, `limit_name`, `old_limit`, `new_limit`
-
-**Decomposition logic:**
-
-1. Included limits are typically in CalcOption_{PROV}{LOB}{Date}.vb files
-   or in mod_Common shared modules.
-
-2. If the limit applies to all LOBs (lob_scope = "all"):
-   - Check if the limit logic is in a shared module --> 1 shared_operation
-   - If the limit logic is in per-LOB CalcOption files --> 1 lob_operation per LOB
-
-3. If the limit applies to specific LOBs (lob_scope = "specific"):
-   - Only generate operations for the target_lobs
-
-4. Set `agent: "rate-modifier"`.
-
-**Output per operation:**
-
-```yaml
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Change {limit_name} from {old_limit} to {new_limit}"
-description: |
-  Find the {limit_name} value and change from {old_limit} to {new_limit}.
-  The Analyzer will locate the exact variable or constant.
-file: "{file_path}"
-file_type: "{shared_module|lob_specific}"
-function: null                          # Analyzer determines
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "included_limits"
-parameters:
-  limit_name: "{limit_name}"
-  old_limit: {old_limit}
-  new_limit: {new_limit}
-```
-
----
-
-##### 5.1.4 new_endorsement_flat
-
-**Input:** SRD with `type: "new_endorsement_flat"`, `endorsement_name`, `option_code`,
-`premium`, `category`
-
-**Dispatch table pre-check (from Step 5.0):**
-
-Before decomposing, check the dispatch table to determine context:
+The `capability` field describes WHAT KIND of change this is, not a specific
+template. Determine it from the CR's extracted values and the Analyzer's findings:
 
 ```python
-for lob in change_spec["lobs"]:
-    key = f"{prov}_{lob.upper()}"
-    if key in dispatch_tables:
-        table = dispatch_tables[key]
-        # Check if this option code already exists
-        existing = None
-        for cat_name, entries in table.get("categories", {}).items():
-            for entry in entries:
-                if entry["code"] == srd["option_code"]:
-                    existing = {"category": cat_name, "function": entry["function"]}
+def determine_capability(cr, analyzer_data):
+    """Determine the capability tag for an intent.
+
+    Capabilities:
+    - value_editing: Changing existing values in existing code
+    - structure_insertion: Adding new code blocks to existing files
+    - file_creation: Creating new files
+    - flow_modification: Changing control flow (if/else, loops, case routing)
+    """
+    extracted = cr.get("extracted", {})
+    domain = cr.get("domain_hints", {})
+
+    # Value changes: has old->new values, or a multiplication factor
+    if extracted.get("factor") or extracted.get("old_value") is not None:
+        return "value_editing"
+
+    # New code: domain hints say new code needed, or keywords suggest it
+    if domain.get("involves_new_code"):
+        # Does the analyzer data show this function exists yet?
+        if analyzer_data is None:
+            return "file_creation"
+        else:
+            return "structure_insertion"
+
+    # Explicit method signals
+    if extracted.get("method") == "multiply":
+        return "value_editing"
+    if extracted.get("method") == "explicit":
+        return "value_editing"
+
+    # Default: if the function exists and we're changing it, it's value_editing
+    # If the function doesn't exist, it's structure_insertion
+    if analyzer_data:
+        return "value_editing"
+    else:
+        return "structure_insertion"
+```
+
+#### 8.2 Determine Strategy Hint (Optional)
+
+The `strategy_hint` is an optional reference to old pattern documentation. It tells
+the Change Engine "we've seen something like this before, here's how it was done."
+This is INFORMATIONAL, not prescriptive.
+
+```python
+def determine_strategy_hint(cr, capability, analyzer_data):
+    """Optional: suggest a strategy from the old pattern docs.
+
+    Returns a string (strategy name) or None.
+    """
+    extracted = cr.get("extracted", {})
+
+    if capability == "value_editing":
+        # Check if the target has Array6 lines
+        if analyzer_data and any("Array6" in str(t.get("content", ""))
+                                  for t in analyzer_data.get("target_lines", [])):
+            if extracted.get("factor"):
+                return "array6-multiply"
+            elif extracted.get("old_value") is not None:
+                return "factor-table"
+        # Const value changes
+        if analyzer_data and analyzer_data.get("fub", {}).get("hazards"):
+            if "const_rate_values" in analyzer_data["fub"]["hazards"]:
+                return "constant-value"
+        # Generic factor table
+        if extracted.get("case_value") is not None:
+            return "factor-table"
+        return None
+
+    if capability == "structure_insertion":
+        kw = cr.get("domain_hints", {}).get("keyword_matches", [])
+        if "endorsement" in kw:
+            return "new-endorsement"
+        if "coverage" in kw:
+            return "case-block-insertion"
+        if "eligibility" in kw or "validation" in kw:
+            return "validation-function"
+        return None
+
+    return None
+```
+
+#### 8.3 Build the Intent
+
+For each (cr, function_name, analyzer_data, match_source) tuple:
+
+```python
+def build_intent(intent_id, cr, func_name, analyzer_data, match_source,
+                 file_classification, effective_date):
+    """Build a single intent from a CR + analyzed function.
+
+    All Analyzer fields are passed through directly -- the Decomposer does NOT
+    recompute line numbers or FUBs.
+    """
+    extracted = cr.get("extracted", {})
+
+    capability = determine_capability(cr, analyzer_data)
+    strategy_hint = determine_strategy_hint(cr, capability, analyzer_data)
+
+    # Determine confidence based on match source and data completeness
+    confidence = compute_confidence(match_source, analyzer_data, cr)
+
+    # Build the intent
+    intent = {
+        "id": intent_id,
+        "cr": cr["id"],
+        "title": cr["title"],
+        "description": cr.get("description", cr["title"]),
+        "capability": capability,
+        "strategy_hint": strategy_hint,
+        "file": analyzer_data.get("target_file", analyzer_data.get("file", "")),
+        "file_type": file_classification.get(
+            analyzer_data.get("source_file", ""), "unknown"
+        ),
+        "function": func_name,
+        "depends_on": [],
+        "confidence": confidence,
+        "open_questions": [],
+
+        # Analyzer pass-through fields
+        "source_file": analyzer_data.get("source_file"),
+        "target_file": analyzer_data.get("target_file"),
+        "needs_copy": analyzer_data.get("needs_copy", False),
+        "file_hash": analyzer_data.get("file_hash"),
+        "function_line_start": analyzer_data.get("function_line_start"),
+        "function_line_end": analyzer_data.get("function_line_end"),
+        "target_lines": analyzer_data.get("target_lines", []),
+        "parameters": build_parameters(cr, capability),
+        "peer_examples": [],
+    }
+
+    # Add open questions from ambiguity
+    if cr.get("ambiguity_flag"):
+        intent["open_questions"].append(cr.get("ambiguity_note", "Ambiguous CR"))
+
+    # Add open questions from missing values
+    if capability == "structure_insertion" and not extracted.get("premium"):
+        if "premium" in cr.get("description", "").lower():
+            intent["open_questions"].append(
+                f"Premium amount not specified for {cr['title']}"
+            )
+
+    return intent
+
+
+def build_parameters(cr, capability):
+    """Extract the relevant parameters from the CR for this capability."""
+    extracted = cr.get("extracted", {})
+    params = {}
+
+    if capability == "value_editing":
+        if extracted.get("factor"):
+            params["factor"] = extracted["factor"]
+            params["scope"] = extracted.get("scope", "all_territories")
+            params["rounding"] = "auto"
+            rounding_hint = cr.get("domain_hints", {}).get("rounding_hint")
+            if rounding_hint:
+                params["rounding_hint"] = rounding_hint
+        if extracted.get("old_value") is not None:
+            params["old_value"] = extracted["old_value"]
+            params["new_value"] = extracted.get("new_value")
+        if extracted.get("case_value") is not None:
+            params["case_value"] = extracted["case_value"]
+
+    elif capability in ("structure_insertion", "file_creation"):
+        # Pass through all extracted values -- the Change Engine decides what to use
+        for key, val in extracted.items():
+            if val is not None and key not in ("method", "scope", "lob_scope"):
+                params[key] = val
+
+    elif capability == "flow_modification":
+        for key, val in extracted.items():
+            if val is not None:
+                params[key] = val
+
+    return params
+
+
+def compute_confidence(match_source, analyzer_data, cr):
+    """Compute confidence score based on how well the CR matches the code."""
+    base = {
+        "discovery": 0.95,
+        "discovery_related": 0.85,
+        "developer_hint": 0.90,
+        "developer_hint_wildcard": 0.80,
+        "glossary": 0.85,
+        "keyword": 0.60,
+    }.get(match_source, 0.50)
+
+    # Boost if Analyzer has target_lines (high precision)
+    if analyzer_data and analyzer_data.get("target_lines"):
+        base = min(base + 0.05, 0.99)
+
+    # Reduce if CR has ambiguity
+    if cr.get("ambiguity_flag"):
+        base = max(base - 0.15, 0.30)
+
+    # Reduce if Analyzer data is minimal
+    if analyzer_data and not analyzer_data.get("fub"):
+        base = max(base - 0.10, 0.30)
+
+    return round(base, 2)
+```
+
+#### 8.4 Intent ID Assignment
+
+Use sequential IDs: `intent-001`, `intent-002`, etc. Zero-padded to 3 digits.
+Intent IDs are flat and sequential because one CR can produce intents across
+different functions with no natural nesting.
+
+### Step 9: Handle Shared Module Deduplication
+
+**Action:** Ensure shared modules are edited ONCE, not per LOB.
+
+9.1. Group intents by `(file, function)` tuple.
+
+9.2. For each group where `file_type == "shared_module"`:
+   - Keep exactly ONE intent for the shared function
+   - Record which LOBs are affected: `shared_by: ["Home", "Condo", ...]`
+   - The Change Engine edits the file once; all LOBs that compile it get the change
+
+```python
+def deduplicate_shared_intents(intents, shared_modules):
+    """Remove duplicate intents for shared modules.
+
+    If the matching process created multiple intents for the same function
+    in a shared module (one per LOB), keep only the first and annotate it
+    with shared_by.
+    """
+    seen = {}  # (file, function) -> intent_id
+    to_remove = []
+
+    for intent in intents:
+        if intent["file_type"] != "shared_module":
+            continue
+        key = (intent["file"], intent["function"])
+        if key in seen:
+            to_remove.append(intent["id"])
+        else:
+            seen[key] = intent["id"]
+            # Annotate with shared_by from shared_modules list
+            for sm in shared_modules:
+                if sm["file"] in (intent.get("source_file", ""), intent.get("target_file", "")):
+                    intent["shared_by"] = sm["shared_by"]
                     break
 
-        if existing:
-            # Code already exists → this is a MODIFY, not CREATE
-            # Adjust operation type: modify existing handler, don't create new
-            log(f"[Decomposer] Option code {srd['option_code']} already exists in "
-                f"{key} as {existing['function']} (category: {existing['category']})")
-        else:
-            # New code → determine best category from SRD or infer from dispatch
-            # Find adjacent codes in the same category for template selection
-            if srd.get("category") and srd["category"] in table.get("categories", {}):
-                adjacent = table["categories"][srd["category"]][-3:]  # Last 3 entries
-                log(f"[Decomposer] Adjacent entries in {srd['category']}: "
-                    f"{[e['function'] for e in adjacent]}")
+    return [i for i in intents if i["id"] not in to_remove]
 ```
 
-If dispatch tables are not available, fall through to existing behavior (no pre-check).
+### Step 10: Handle Multi-LOB Expansion
 
-**Decomposition logic:**
+**Action:** For LOB-specific changes, expand intents to cover all target LOBs.
 
-This is a MEDIUM complexity pattern that requires both logic changes (new code
-structure) and rate values (premium amount). Decompose into 2 operations per
-target LOB:
+10.1. For CRs with `lob_scope: "all"` that target LOB-specific files:
+   - Create one intent per target LOB
+   - Each intent targets the LOB's specific file (e.g., ResourceID.vb in each version folder)
+   - Use the Analyzer output for the specific LOB if available, or the template from
+     any analyzed LOB
 
-1. **Operation A: Add endorsement logic** (logic-modifier)
-   - Add the endorsement handler to the appropriate Option_*.vb or CalcOption_*.vb
-   - This may mean creating a new Option_{Name}_{Prov}{LOB}{Date}.vb file
-     or adding a Case block to an existing CalcOption file
-   - file_type: "lob_specific" (one per target LOB)
+10.2. For CRs with `lob_scope: "specific"`:
+   - Only generate intents for `target_lobs`
 
-2. **Operation B: Add CalcOption routing** (logic-modifier)
-   - Add the Case block in CalcOption_{PROV}{LOB}{Date}.vb that routes to the
-     endorsement handler
-   - file_type: "lob_specific" (one per target LOB)
-
-3. Dependencies: Operation A does NOT depend on B or vice versa if they are in
-   different files. If both are in the same CalcOption file, B depends on A.
-
-4. If `lob_scope: "all"`, repeat Operations A and B for EACH target LOB.
-   If `lob_scope: "specific"`, only for target_lobs.
-
-**Output per LOB (2 operations):**
-
-```yaml
-# Operation A: Add endorsement handler
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Add {endorsement_name} endorsement handler for {LOB}"
-description: |
-  Add the {endorsement_name} endorsement handler with flat premium of {premium}.
-  This involves either creating a new Option file or adding to CalcOption.
-  Category: {category}. Option code: {option_code}.
-file: "{CalcOption or Option file path}"
-file_type: "lob_specific"
-function: null                          # New function or existing routing
-agent: "logic-modifier"
-depends_on: []
-blocked_by: []
-pattern: "new_endorsement_flat"
-parameters:
-  endorsement_name: "{endorsement_name}"
-  option_code: {option_code}
-  premium: {premium}
-  category: "{category}"
-
-# Operation B: Add CalcOption routing
-id: "op-{SRD_NUM}-{NN+1}"
-srd: "srd-{SRD_NUM}"
-title: "Add CalcOption routing for {endorsement_name} in {LOB}"
-description: |
-  Add a Case block in the CalcOption file that routes to the
-  {endorsement_name} handler.
-file: "{CalcOption file path}"
-file_type: "lob_specific"
-function: null
-agent: "logic-modifier"
-depends_on: ["op-{SRD_NUM}-{NN}"]      # A before B if same file
-blocked_by: []
-pattern: "new_endorsement_flat"
-parameters:
-  endorsement_name: "{endorsement_name}"
-  option_code: {option_code}
-```
-
----
-
-##### 5.1.5 new_liability_option
-
-**Input:** SRD with `type: "new_liability_option"`, `liability_name`, `premium_array`
-
-**Dispatch table pre-check:** Same pattern as 5.1.4 — check if the liability option
-code already exists in the dispatch table's LIABILITY category. If found, this is
-a modify operation (update existing premium array). If not found, this is a create
-operation. Use adjacent entries in the LIABILITY category as templates for the new
-handler structure.
-
-**Decomposition logic:**
-
-1. **Operation A: Add liability premium array** (rate-modifier)
-   - Add the Array6 premium row to the appropriate Liab_{Name}_{Prov}{LOB}{Date}.vb
-     file or to the liability section of mod_Common
-   - If in mod_Common --> shared_operation (done once)
-   - If in a new Liab_*.vb file --> lob_specific (may be cross-LOB)
-
-2. **Operation B: Add CalcOption routing** (logic-modifier)
-   - Add the routing case in CalcOption that directs to the new liability handler
-   - file_type: lob_specific, one per target LOB
-
-3. Dependencies: A before B (the premium array must exist before routing references it)
-
-**Output:**
-
-```yaml
-# Operation A: Add premium array (shared or per-LOB depending on location)
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Add {liability_name} liability premium array"
-description: |
-  Add Array6 premium array for {liability_name}: {premium_array}.
-  The Analyzer will determine whether this goes in mod_Common or a
-  new Liab_*.vb file based on existing codebase patterns.
-file: "{file_path}"
-file_type: "{shared_module|lob_specific|cross_lob}"
-function: null                          # New or existing function
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "new_liability_option"
-parameters:
-  liability_name: "{liability_name}"
-  premium_array: {premium_array}
-
-# Operation B: Add routing (per LOB)
-id: "op-{SRD_NUM}-{NN+1}"
-srd: "srd-{SRD_NUM}"
-title: "Add CalcOption routing for {liability_name} in {LOB}"
-description: |
-  Add a routing case for the {liability_name} liability option
-  in the CalcOption file.
-file: "{CalcOption file path}"
-file_type: "lob_specific"
-function: null
-agent: "logic-modifier"
-depends_on: ["op-{SRD_NUM}-{NN}"]
-blocked_by: []
-pattern: "new_liability_option"
-parameters:
-  liability_name: "{liability_name}"
-```
-
----
-
-##### 5.1.6 new_coverage_type
-
-**Input:** SRD with `type: "new_coverage_type"`, `coverage_type_name`, `constant_name`,
-`classifications`, `dat_ids`
-
-**Decomposition logic:**
-
-This is the most complex decomposition. A new coverage type requires 3-4+ operations
-with strict dependencies:
-
-1. **Operation A: Add Const to mod_Common** (logic-modifier, shared)
-   - Add `Public Const {constant_name} As String = "{coverage_type_name}"` to the
-     module-level constants section of mod_Common
-   - file_type: shared_module
-   - depends_on: [] (this is the root operation)
-
-2. **Operation B: Add rate table routing** (logic-modifier, shared)
-   - Add a Case block in the rate table selection function (e.g., GetRateTableID
-     or SetClassification) that routes on the new constant
-   - file_type: shared_module (same file as A)
-   - depends_on: [A] -- the constant must be defined before it can be referenced
-
-3. **Operation C: Add DAT IDs to ResourceID.vb** (logic-modifier, per LOB)
-   - Add DAT resource ID constants for each classification
-   - file_type: local (ResourceID.vb is in the version folder)
-   - depends_on: [] (independent of A and B -- DAT IDs are just integer constants)
-   - Repeat for EACH target LOB
-
-4. **Operation D: Add eligibility/validation** (logic-modifier, shared) -- OPTIONAL
-   - Only if the SRD includes `rules` or if a companion eligibility_rules SRD exists
-   - depends_on: [A] -- validation references the constant
-   - See eligibility_rules decomposition (5.1.7)
-
-**Output (4+ operations for a 6-LOB hab workflow):**
-
-```yaml
-# A: Add constant (shared, root)
-id: "op-{SRD_NUM}-01"
-srd: "srd-{SRD_NUM}"
-title: "Add {constant_name} constant to mod_Common"
-description: |
-  Add Public Const {constant_name} As String = "{coverage_type_name}"
-  to the module-level constants section of mod_Common.
-file: "{mod_Common file}"
-file_type: "shared_module"
-function: null                          # Module-level, not inside a function
-location: "module-level constants"      # When function is null, location provides a
-                                        # descriptive placement hint for the Analyzer
-                                        # (e.g., "module-level constants", "end of module")
-agent: "logic-modifier"
-depends_on: []
-blocked_by: []
-pattern: "new_coverage_type"
-parameters:
-  constant_name: "{constant_name}"
-  coverage_type_name: "{coverage_type_name}"
-
-# B: Add rate table routing (shared, depends on A)
-id: "op-{SRD_NUM}-02"
-srd: "srd-{SRD_NUM}"
-title: "Add {coverage_type_name} rate table selection"
-description: |
-  Add Case block for {constant_name} in the rate table selection function.
-  Route each classification to the appropriate DAT file ID.
-file: "{mod_Common file}"
-file_type: "shared_module"
-function: "GetRateTableID"              # Or similar -- Analyzer confirms
-agent: "logic-modifier"
-depends_on: ["op-{SRD_NUM}-01"]        # Must define constant first
-blocked_by: []
-pattern: "new_coverage_type"
-parameters:
-  constant_name: "{constant_name}"
-  classifications: {classifications}
-  dat_ids: {dat_ids}
-
-# C: Add DAT IDs (per LOB, independent)
-# Repeat for each target LOB, incrementing the local index:
-id: "op-{SRD_NUM}-03"
-srd: "srd-{SRD_NUM}"
-title: "Add {coverage_type_name} DAT IDs to {LOB} ResourceID.vb"
-description: |
-  Add DAT resource ID constants for {coverage_type_name}:
-  {classifications} with IDs {dat_ids}.
-file: "{Province}/{LOB}/{Date}/ResourceID.vb"
-file_type: "local"
-function: null
-agent: "logic-modifier"
-depends_on: []                          # Independent of A and B
-blocked_by: []
-pattern: "new_coverage_type"
-parameters:
-  coverage_type_name: "{coverage_type_name}"
-  classifications: {classifications}
-  dat_ids: {dat_ids}
-```
-
----
-
-##### 5.1.7 eligibility_rules
-
-**Input:** SRD with `type: "eligibility_rules"`, `rules: [...]`
-
-**Decomposition logic:**
-
-1. Eligibility rules typically go into validation functions in mod_Common or
-   CalcMain.vb. The exact function depends on the rule type.
-
-2. If the rule references a constant that is being added by another SRD in this
-   workflow (e.g., the ELITECOMP constant from a new_coverage_type SRD):
-   - Create an inter-SRD dependency (see Step 6)
-   - The eligibility operation depends on the constant-adding operation
-
-3. If the rule requires new alert constants:
-   - **Operation A: Add alert constant(s)** (logic-modifier)
-   - **Operation B: Add validation logic** (logic-modifier)
-   - depends_on: A before B
-
-4. If no new constants are needed:
-   - **Single operation** for adding the validation logic
-   - Agent: logic-modifier
-
-5. Determine file location:
-   - If validation logic is in mod_Common --> shared_operation (done once)
-   - If validation logic is in CalcMain.vb --> lob_operation (one per LOB)
-
-**Output:**
-
-```yaml
-id: "op-{SRD_NUM}-{NN}"
-srd: "srd-{SRD_NUM}"
-title: "Add eligibility rule: {rule_summary}"
-description: |
-  Add validation logic: {condition_description}.
-  Enforcement: {enforcement}.
-  Alert message: "{alert_message}".
-file: "{file_path}"
-file_type: "{shared_module|lob_specific}"
-function: null                          # Analyzer determines target function
-agent: "logic-modifier"
-depends_on: {inter_srd_dependencies}
-blocked_by: []
-pattern: "eligibility_rules"
-parameters:
-  rules: {rules_from_srd}
-```
-
----
-
-##### 5.1.8 UNKNOWN Type SRDs
-
-**Input:** SRD with `type: "UNKNOWN"`
-
-**Decomposition logic:**
-
-1. Create a single operation marked as `needs_review: true`.
-2. Set `agent: "logic-modifier"` (conservative default -- logic-modifier handles
-   complex cases).
-3. Include all available context from the SRD in the operation description.
-4. The Analyzer will need developer guidance to determine the target file and
-   function.
-
-**Output:**
-
-```yaml
-id: "op-{SRD_NUM}-01"
-srd: "srd-{SRD_NUM}"
-title: "[REVIEW NEEDED] {srd_title}"
-description: |
-  This SRD could not be classified into a known pattern type.
-  Original request: "{source_text}"
-
-  The developer must provide guidance on:
-  1. Which file(s) to modify
-  2. Which function(s) to modify
-  3. What specific changes to make
-file: null                              # Unknown -- developer must specify
-file_type: null
-function: null
-agent: "logic-modifier"
-depends_on: []
-blocked_by: []
-pattern: "UNKNOWN"
-needs_review: true
-parameters: {}
-```
-
-Report to the developer:
+10.3. If a shared module operation is needed only for specific LOBs but the module
+is compiled by all LOBs, flag:
 
 ```
-[Decomposer] SRD-{NNN} has type UNKNOWN and could not be decomposed automatically.
-             Original text: "{source_text}"
-
-             I have created a placeholder operation (op-{SRD_NUM}-01) that needs your input:
-             1. Which file should this change target?
-             2. Which function within that file?
-             3. Should this be handled by rate-modifier or logic-modifier?
-
-             Once you provide this information, I will update the operation.
+[Decomposer] CR-{NNN} targets only {target_lobs}, but the target file
+             ({file}) is shared by all {N} LOBs.
+             Changes to this file will affect ALL LOBs.
+             Proceed?
 ```
 
-#### Optional Field: access_needs (All Logic-Modifier Patterns)
+### Step 11: Build Dependency Graph
 
-When decomposing a logic-modifier operation whose SRD description implies runtime
-data access (collections, object properties, framework method calls), the Decomposer
-SHOULD add an `access_needs` field to the operation YAML. This is a classification
-signal that triggers the Analyzer's Code Pattern Discovery step (Step 5.9).
+**Action:** Detect dependencies between intents and compute topological order.
 
-**When to add access_needs:**
-- The SRD description mentions accessing claims, vehicles, coverage items, or alerts
-- The operation requires iterating over a collection (e.g., "count NAF claims per vehicle")
-- The operation calls framework methods not defined in the source code
-- The SRD uses terms like "check if", "validate that", "count", "for each"
+#### 11.1 Intra-CR Dependencies
 
-**When NOT to add access_needs:**
-- Pure constant insertion (e.g., `Public Const ELITECOMP = "Elite Comp."`)
-- Pure Case block insertion with hardcoded values
-- DAT ID additions to ResourceID.vb
-- Operations where the Decomposer is confident no runtime object access is needed
-
-**Schema:**
-
-```yaml
-access_needs:                         # Optional — triggers Analyzer Step 5.9
-  - id: "{short_identifier}"         # e.g., "claims_vehicle_count"
-    description: "{what needs to be accessed}"  # e.g., "Count NAF claims per vehicle"
-    data_object: "{category}"         # claims | coverage_item | alert | vehicle | premium | other
-    access_type: "{how it's accessed}" # iteration | property | method_call | field_access
-```
-
-This is a **classification signal**, not discovery. The Decomposer does NOT search
-the codebase for patterns — that is the Analyzer's job. The Decomposer merely flags
-"this operation will need runtime data access" so the Analyzer knows to run Step 5.9.
-
-**Example — eligibility_rules operation needing claims access:**
-
-```yaml
-id: "op-008-01"
-srd: "srd-008"
-title: "Add NAF claims count eligibility rule"
-# ... standard fields ...
-pattern: "eligibility_rules"
-parameters:
-  rules: [...]
-access_needs:
-  - id: "claims_vehicle_count"
-    description: "Count NAF claims per vehicle"
-    data_object: "claims"
-    access_type: "iteration"
-```
-
----
-
-### Step 5.5: Validate Decomposition Completeness
-
-**Action:** Before building the dependency graph, validate that all operations are
-well-formed. Catching malformed operations here prevents cascading failures in
-Steps 6-8.
-
-Run these checks across all generated operations:
-
-```
-CHECK 1: Every non-OUT_OF_SCOPE SRD produced at least one operation.
-  For each in-scope SRD:
-    Count operations with srd == this SRD's id
-    If count == 0:
-      ERROR: "SRD-{NNN} is in-scope but produced 0 operations.
-              This indicates a bug in the decomposition logic for type '{type}'."
-
-CHECK 2: Every operation has required fields.
-  For each operation:
-    Required fields: id, srd, pattern, agent, file OR (file: null AND needs_review: true)
-    If any required field is missing:
-      ERROR: "Operation {id} is missing required field '{field}'."
-
-CHECK 3: Agent values are valid.
-  For each operation:
-    If agent not in ["rate-modifier", "logic-modifier"]:
-      ERROR: "Operation {id} has invalid agent '{agent}'.
-              Must be 'rate-modifier' or 'logic-modifier'."
-
-CHECK 4: No duplicate operation IDs.
-  Collect all operation IDs into a list.
-  If any ID appears more than once:
-    ERROR: "Duplicate operation ID: {id}. IDs must be unique."
-
-CHECK 5: Hierarchical ID format is correct.
-  For each operation:
-    ID should match pattern: op-{SRD_NUM}-{NN}
-    The SRD_NUM portion should match the operation's srd field.
-    If mismatch:
-      ERROR: "Operation {id} has SRD mismatch: ID suggests SRD-{X}
-              but srd field says SRD-{Y}."
-```
-
-If ANY check fails, STOP and report the specific error(s) before proceeding to
-Step 6. Fix the decomposition output and re-validate.
-
-If all checks pass, report:
-```
-[Decomposer] Validation passed: {N} operations across {M} SRDs, all well-formed.
-```
-
----
-
-### Step 6: Build Inter-SRD Dependencies
-
-**Action:** After decomposing all SRDs into operations, scan for dependencies
-BETWEEN operations from different SRDs.
-
-6.1. **Constant-reference dependencies.** If one SRD adds a constant (e.g.,
-new_coverage_type adds ELITECOMP) and another SRD references that constant
-(e.g., eligibility_rules checks `CoverageType = ELITECOMP`):
-   - The eligibility operations depend on the constant-adding operation
-   - Add the constant-adding operation's ID to the eligibility operation's `depends_on`
-
-6.2. **Same-function operations from different SRDs.** If two operations from
-different SRDs target the same function in the same file:
-   - They are NOT dependent on each other (they can run in any order)
-   - BUT the Planner will sequence them bottom-to-top within the file
-   - The Decomposer notes the shared file/function in both operations so the
-     Planner can sequence them correctly
-
-6.3. **Same-file operations from different SRDs.** If operations from different SRDs
-target the same file but different functions:
-   - No dependency at the Decomposer level
-   - The Planner will enforce bottom-to-top ordering within the file
-
-6.4. **Scan algorithm:**
-
-```
-For each operation O in all_operations:
-  For each other operation P in all_operations (P != O):
-    IF O.pattern == "new_coverage_type" AND O adds a constant:
-      IF P references that constant (check P.parameters for the constant name):
-        Add O.id to P.depends_on   (in P's op-{SRD}-{NN}.yaml file)
-        Add P.id to O.blocked_by   (in O's op-{SRD}-{NN}.yaml file -- inverse tracking)
-
-    IF O creates a new function AND P calls that function:
-      Add O.id to P.depends_on
-
-    IF O creates a new file AND P modifies that file:
-      Add O.id to P.depends_on
-
-NOTE: depends_on and blocked_by are updated in the individual op-{SRD}-{NN}.yaml files.
-The dependency_graph.yaml summary only tracks depends_on (not blocked_by) since
-blocked_by can be derived from the depends_on graph.
-```
-
-6.5. **Systematic conflict detection.** Instead of relying on noticing conflicts
-while scanning, use an explicit group-and-compare algorithm:
-
-```
-ALGORITHM: Conflict Detection
---------------------------------------
-1. Build a conflict key for each operation:
-   - If the operation has a case_value:
-     key = (file, function, case_value)
-   - Else:
-     key = (file, function, pattern)
-
-2. Group operations by their conflict key.
-
-3. For each group with 2+ operations from DIFFERENT SRDs:
-   a. Compare the target values (new_value, factor, premium, etc.)
-   b. If values differ --> TRUE CONFLICT. Report:
-
-      [Decomposer] CONFLICT: Two SRDs target the same value:
-                   {op_A.id} (SRD-{X}): {description_A} -> {value_A}
-                   {op_B.id} (SRD-{Y}): {description_B} -> {value_B}
-
-                   Key: ({file}, {function}, {case_value_or_pattern})
-
-                   These cannot both be applied. Which value should be used?
-                     a) {value_A} (from SRD-{X})
-                     b) {value_B} (from SRD-{Y})
-                     c) A different value (please specify)
-
-      Wait for developer resolution before continuing.
-
-   c. If values are identical --> DUPLICATE. Flag as warning:
-
-      [Decomposer] WARNING: Duplicate operations from different SRDs:
-                   {op_A.id} and {op_B.id} both do the same thing.
-                   Keeping only {op_A.id} (from the earlier SRD).
-
-      Remove the duplicate operation.
-
-4. Operations from the SAME SRD targeting the same key are NOT conflicts
-   (the SRD decomposition intentionally created them).
-```
-
-6.6. **Circular dependency check.** After building all dependencies, verify
-there are no cycles:
-
-```
-Run topological sort on the dependency graph.
-If a cycle is detected:
-  STOP and report the cycle to the developer:
-
-  [Decomposer] ERROR: Circular dependency detected in operation graph:
-               op-{A} depends on op-{B} which depends on op-{A}
-
-               This should not happen with correctly structured SRDs.
-               Please review the change spec and clarify the dependency order.
-```
-
-### Step 7: Assign Operations to Shared vs LOB Buckets
-
-**Action:** Sort all operations into `shared_operations` and `lob_operations`
-based on their file_type.
-
-7.1. **Shared operations** (edited ONCE, affects all LOBs that compile the file):
-   - file_type = "shared_module"
-   - These go into `shared_operations` in dependency_graph.yaml
-
-7.2. **LOB operations** (one per target LOB):
-   - file_type = "lob_specific" or "local"
-   - These go into `lob_operations` in dependency_graph.yaml
-
-7.3. **Cross-LOB operations** (file is named for one LOB but compiled by others):
-   - file_type = "cross_lob"
-   - These go into `shared_operations` (treated like shared because modifying
-     the file affects multiple LOBs)
-   - Add a note: `cross_lob_warning: "File named for {LOB_A} but also compiled by {LOB_B}"`
-
-7.4. **SHARDCLASS operations:**
-   - file_type = "shardclass"
-   - Place in `shared_operations` if compiled by 2+ LOBs
-   - Add a note: `shardclass_warning: "Shared helper class -- verify all dependent LOBs"`
-
-7.5. **Unknown/null file_type:**
-   - Place in `lob_operations` as a conservative default
-   - Set `needs_review: true`
-
-### Step 8: Compute Topological Execution Order
-
-**Action:** Produce the `execution_order` list that respects all `depends_on`
-relationships. **Use a Python script** for deterministic correctness -- do NOT
-attempt to mentally execute a graph algorithm.
-
-8.1. Collect all operation IDs and their `depends_on` lists from the op-{SRD}-{NN}.yaml
-files written in Step 9.3 (or from the in-memory data structures if writing all at once).
-
-8.2. **Write and run a temporary Python script** to perform topological sort:
+When a single CR produces multiple intents (e.g., add a constant AND add routing
+that references it):
 
 ```python
-# File: analysis/_topo_sort.py (temporary -- delete after use)
-import os, glob
+def detect_intra_cr_deps(intents):
+    """Find dependencies between intents from the same CR.
 
-# ------- Load dependency data from op files -------
-# Read depends_on from each op-*.yaml file.
-# We parse just the 'id' and 'depends_on' fields with simple string matching
-# to avoid requiring PyYAML.
+    Rules:
+    - If intent A creates a constant and intent B references it: A before B
+    - If intent A creates a function and intent B calls it: A before B
+    - If intent A creates a file and intent B modifies it: A before B
+    """
+    cr_groups = {}
+    for intent in intents:
+        cr_groups.setdefault(intent["cr"], []).append(intent)
 
-ops = {}          # id -> {"depends_on": [...], "file_type": "...", "file": "...", "srd": "..."}
-op_dir = os.path.join(os.path.dirname(__file__), "operations")
-for path in sorted(glob.glob(os.path.join(op_dir, "op-*.yaml"))):
-    op_id = None
-    deps = []
-    file_type = ""
-    file_path = ""
-    srd = ""
-    with open(path) as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped.startswith("id:"):
-                op_id = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("depends_on:"):
-                rest = stripped.split(":", 1)[1].strip()
-                if rest.startswith("["):
-                    # Inline list: ["op-001-01", "op-001-02"]
-                    items = rest.strip("[]").split(",")
-                    deps = [i.strip().strip('"').strip("'") for i in items if i.strip()]
-                # else: empty or block form -- handled below
-            elif stripped.startswith("- ") and not deps and op_id:
-                # Block-form depends_on continuation
-                val = stripped[2:].strip().strip('"').strip("'")
-                if val.startswith("op-"):
-                    deps.append(val)
-            elif stripped.startswith("file_type:"):
-                file_type = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("file:"):
-                file_path = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("srd:"):
-                srd = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-    if op_id:
-        ops[op_id] = {"depends_on": deps, "file_type": file_type, "file": file_path, "srd": srd}
+    for cr_id, group in cr_groups.items():
+        for a in group:
+            for b in group:
+                if a["id"] == b["id"]:
+                    continue
+                # Constant creation before reference
+                if (a["capability"] == "structure_insertion" and
+                    a.get("parameters", {}).get("constant_name")):
+                    const_name = a["parameters"]["constant_name"]
+                    if const_name in str(b.get("parameters", {})):
+                        if a["id"] not in b["depends_on"]:
+                            b["depends_on"].append(a["id"])
 
-# ------- Kahn's Algorithm -------
-from collections import deque
-
-in_degree = {op: 0 for op in ops}
-dependents = {op: [] for op in ops}     # op -> list of ops that depend on it
-
-for op, data in ops.items():
-    for dep in data["depends_on"]:
-        if dep in ops:
-            in_degree[op] += 1
-            dependents[dep].append(op)
-
-# Tie-breaking: shared before lob, then alphabetical by file, then by SRD order
-def sort_key(op_id):
-    d = ops[op_id]
-    is_shared = 0 if d["file_type"] in ("shared_module", "cross_lob", "shardclass") else 1
-    return (is_shared, d["file"], d["srd"], op_id)
-
-queue = deque(sorted([op for op, deg in in_degree.items() if deg == 0], key=sort_key))
-order = []
-
-while queue:
-    op = queue.popleft()
-    order.append(op)
-    for dep_op in sorted(dependents[op], key=sort_key):
-        in_degree[dep_op] -= 1
-        if in_degree[dep_op] == 0:
-            queue.append(dep_op)
-    # Re-sort queue to maintain tie-breaking after new additions
-    queue = deque(sorted(queue, key=sort_key))
-
-if len(order) != len(ops):
-    processed = set(order)
-    cycle_ops = [op for op in ops if op not in processed]
-    print(f"ERROR: Circular dependency detected involving: {cycle_ops}")
-else:
-    print("execution_order:")
-    for op in order:
-        print(f'  - "{op}"')
+                # File creation before modification
+                if a["capability"] == "file_creation":
+                    if a["file"] == b["file"] and b["capability"] != "file_creation":
+                        if a["id"] not in b["depends_on"]:
+                            b["depends_on"].append(a["id"])
 ```
 
-Run the script:
-```bash
-python analysis/_topo_sort.py
+#### 11.2 Inter-CR Dependencies
+
+Same logic but across CRs:
+
+```python
+def detect_inter_cr_deps(intents):
+    """Find dependencies between intents from different CRs.
+
+    Same rules as intra-CR, but also builds partial_approval_constraints.
+    """
+    constraints = []
+    for a in intents:
+        for b in intents:
+            if a["id"] == b["id"] or a["cr"] == b["cr"]:
+                continue
+            # Constant creation before reference (cross-CR)
+            if (a["capability"] == "structure_insertion" and
+                a.get("parameters", {}).get("constant_name")):
+                const_name = a["parameters"]["constant_name"]
+                if const_name in str(b.get("parameters", {})):
+                    if a["id"] not in b["depends_on"]:
+                        b["depends_on"].append(a["id"])
+                    constraints.append({
+                        "cr": b["cr"],
+                        "requires_cr": a["cr"],
+                        "reason": f"{b['id']} depends on {a['id']}",
+                        "blocking_intents": [b["id"]],
+                        "required_intents": [a["id"]],
+                    })
+    return constraints
 ```
 
-8.3. Copy the printed `execution_order` list into dependency_graph.yaml.
+#### 11.3 Conflict Detection
 
-8.4. **Delete the temporary script** after use:
-```bash
-rm analysis/_topo_sort.py
+Detect when multiple intents from different CRs target the same code:
+
+```python
+def detect_conflicts(intents):
+    """Detect conflicting intents using group-and-compare.
+
+    Conflict key = (file, function, case_value or None).
+    Two intents from different CRs sharing a key with different target values
+    are a TRUE CONFLICT requiring developer resolution.
+    """
+    groups = {}
+    for intent in intents:
+        case_val = intent.get("parameters", {}).get("case_value")
+        key = (intent["file"], intent["function"], case_val)
+        groups.setdefault(key, []).append(intent)
+
+    conflicts = []
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        # Only flag cross-CR conflicts (same CR is intentional)
+        cr_ids = set(i["cr"] for i in group)
+        if len(cr_ids) < 2:
+            continue
+
+        # Compare target values
+        for i, a in enumerate(group):
+            for b in group[i+1:]:
+                if a["cr"] == b["cr"]:
+                    continue
+                a_vals = (a.get("parameters", {}).get("new_value"),
+                          a.get("parameters", {}).get("factor"))
+                b_vals = (b.get("parameters", {}).get("new_value"),
+                          b.get("parameters", {}).get("factor"))
+                if a_vals != b_vals:
+                    conflicts.append((a, b, key))
+                elif a_vals == b_vals:
+                    # Duplicate -- keep earlier intent
+                    conflicts.append((a, b, key, "duplicate"))
+
+    return conflicts
 ```
 
-8.5. If the script reports a circular dependency error, STOP and report to the
-developer (this should have been caught in Step 6, but the script serves as a
-safety net).
-
-8.6. **Build partial_approval_constraints.** Scan the dependency graph for inter-SRD
-dependencies and record which SRDs are coupled for Gate 1 partial approval:
+When conflicts are found, STOP and ask the developer:
 
 ```
-For each operation O where O.depends_on is non-empty:
-  For each dependency D in O.depends_on:
-    If O.srd != D.srd:
-      Add a constraint entry:
-        srd: O.srd
-        requires_srd: D.srd
-        reason: "{O.id} ({O.title}) depends on {D.id} ({D.title})"
-        blocking_operations: [O.id]
-        required_operations: [D.id]
+[Decomposer] CONFLICT: Two CRs target the same value:
+             {intent_A.id} (CR-{X}): {description_A} -> {value_A}
+             {intent_B.id} (CR-{Y}): {description_B} -> {value_B}
 
-Deduplicate: if multiple operations from the same SRD pair create constraints,
-merge them into a single entry with combined blocking_operations and
-required_operations lists.
+             Key: ({file}, {function}, {case_value})
+
+             These cannot both be applied. Which value should be used?
+               a) {value_A} (from CR-{X})
+               b) {value_B} (from CR-{Y})
+               c) A different value (please specify)
 ```
 
-Write the `partial_approval_constraints` list to dependency_graph.yaml. If there
-are no inter-SRD dependencies, write an empty list.
+#### 11.4 Circular Dependency Check
 
-### Step 9: Write Output Files
+```python
+def check_cycles(intents):
+    """Verify no circular dependencies exist using topological sort."""
+    # Kahn's algorithm
+    from collections import deque
 
-**Action:** Write all Decomposer output files to the `analysis/` directory.
+    in_degree = {i["id"]: 0 for i in intents}
+    dependents = {i["id"]: [] for i in intents}
 
-9.1. **Ensure directory structure exists:**
+    for intent in intents:
+        for dep in intent["depends_on"]:
+            if dep in in_degree:
+                in_degree[intent["id"]] += 1
+                dependents[dep].append(intent["id"])
+
+    queue = deque(sorted(k for k, v in in_degree.items() if v == 0))
+    order = []
+
+    while queue:
+        node = queue.popleft()
+        order.append(node)
+        for dep in sorted(dependents[node]):
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                queue.append(dep)
+
+    if len(order) != len(intents):
+        cycle_ids = [i["id"] for i in intents if i["id"] not in set(order)]
+        return None, cycle_ids  # Cycle detected
+
+    return order, None
+```
+
+### Step 12: Compute Topological Execution Order
+
+**Action:** Produce the `execution_order` list respecting all `depends_on` edges.
+
+12.1. Use Kahn's algorithm (Step 11.4) to compute the order.
+
+12.2. Tie-breaking rules (when multiple intents have no remaining dependencies):
+   - Shared modules before LOB-specific files
+   - Same file: sort by function_line_start descending (bottom-to-top)
+   - Different files: alphabetical by file path
+   - Same file and line: alphabetical by intent ID
+
+```python
+def sort_key(intent_id, intents_by_id):
+    """Tie-breaking key for topological sort."""
+    intent = intents_by_id[intent_id]
+    is_shared = 0 if intent["file_type"] in ("shared_module", "cross_lob") else 1
+    line = -(intent.get("function_line_start") or 0)  # Negative for descending
+    return (is_shared, intent.get("file", ""), line, intent_id)
+```
+
+12.3. If the topological sort detects a cycle, STOP:
+
+```
+[Decomposer] ERROR: Circular dependency detected:
+             {cycle_ids}
+
+             This should not happen. Please review the change requests.
+```
+
+### Step 13: Compute Confidence Scores and Collect Open Questions
+
+**Action:** Final pass to adjust confidence and collect all open questions.
+
+13.1. For each intent, collect open questions from:
+   - CR ambiguity flags (`ambiguity_note`)
+   - Missing parameter values (e.g., premium not specified)
+   - Low-confidence matches (keyword-only, no Discovery/Analyzer confirmation)
+   - Analyzer hazards that need developer attention
+
+13.2. Adjust confidence based on open questions:
+   - Each unanswered question reduces confidence by 0.10 (minimum 0.30)
+   - High-hazard functions (e.g., mixed_rounding, dual_use_array6) reduce by 0.05
+
+### Step 14: Write intent_graph.yaml
+
+**Action:** Write the complete intent graph to the analysis/ directory.
+
+14.1. Ensure directory exists:
 ```
 .iq-workstreams/changes/{workstream}/analysis/
-.iq-workstreams/changes/{workstream}/analysis/operations/
 ```
 
-9.2. **Write `analysis/dependency_graph.yaml`:**
+14.2. Assemble and write `analysis/intent_graph.yaml`:
 
-Assemble the complete dependency graph with:
-- Header (workflow_id, decomposer_version, decomposed_at, total_operations, total_out_of_scope)
-- out_of_scope list (SRDs with dat_file_warning)
-- shared_operations map
-- lob_operations map
-- partial_approval_constraints list (from Step 8.6)
-- execution_order list
+```yaml
+workflow_id: "{workflow_id}"
+decomposer_version: "2.0"
+decomposed_at: "{ISO timestamp}"
+total_intents: {count}
+total_out_of_scope: {count}
 
-9.3. **Write individual operation files** to `analysis/operations/op-{SRD}-{NN}.yaml`:
+out_of_scope:
+  # ... CRs with dat_file_warning
 
-One file per operation with the full schema as shown in the Output Schema section.
+intents:
+  # ... all intents with full schemas
 
-9.4. **Validate all written YAML files:**
+partial_approval_constraints:
+  # ... inter-CR couplings
 
-PyYAML is not in the Python standard library, so use a fallback if it is not installed:
+execution_order:
+  # ... topological order
+```
+
+14.3. Validate YAML:
 
 ```bash
-python -c "
-import sys, os, glob
-
-def validate_yaml(filepath):
-    try:
-        import yaml
-        with open(filepath) as f:
-            yaml.safe_load(f)
-        print(f'  {os.path.basename(filepath)}: YAML valid')
-    except ImportError:
-        # PyYAML not installed -- do basic structure check
-        with open(filepath) as f:
-            content = f.read()
-        if content.strip() and not content.strip().startswith('{'):
-            print(f'  {os.path.basename(filepath)}: YAML basic structure OK (install PyYAML for full validation)')
-        else:
-            print(f'  WARNING: {os.path.basename(filepath)} may not be valid YAML')
-    except yaml.YAMLError as e:
-        print(f'  YAML ERROR in {os.path.basename(filepath)}: {e}')
-        sys.exit(1)
-
-print('Validating dependency_graph.yaml...')
-validate_yaml('analysis/dependency_graph.yaml')
-
-print('Validating operation files...')
-for f in sorted(glob.glob('analysis/operations/op-*.yaml')):
-    validate_yaml(f)
-
-print('All files validated.')
-"
+{python_cmd} -c "import yaml; yaml.safe_load(open('analysis/intent_graph.yaml')); print('OK')"
 ```
 
-If validation fails, fix and re-write. Do NOT proceed with malformed YAML.
+If PyYAML is not installed, do a basic structure check (file is non-empty, starts
+with a key-value pair).
 
-9.5. **Do NOT update `manifest.yaml`** — the orchestrator handles manifest updates
-after each agent completes (see skills/iq-plan/SKILL.md Manifest Update Protocol). The summary
-counts (total_operations, shared_operations, lob_operations, out_of_scope) are
-derivable from the operation files and dependency_graph.yaml you already wrote.
-SRD status transitions (OUT_OF_SCOPE, ANALYZING) are set by the orchestrator.
+14.4. **Do NOT update `manifest.yaml`** -- the orchestrator handles that.
 
-### Step 10: Present Results to Developer
+### Step 15: Present Results to Developer
 
-**Action:** Show the developer a formatted summary of all operations for awareness
-(NOT approval -- approval happens at Gate 1 after the Planner builds the full plan).
+**Action:** Show a formatted summary.
 
-10.1. Present the summary:
+15.1. Present:
 
 ```
-[Decomposer] Decomposed {N} SRDs into {M} operations:
+[Decomposer] Formed {N} intents from {M} change requests:
 
-  OUT OF SCOPE (tracked, no operations):
-    SRD-001: [DAT FILE] Increase hab dwelling base rates by 5%
+  OUT OF SCOPE (tracked, no intents):
+    CR-003: [DAT FILE] Increase hab dwelling base rates by 5%
 
-  SHARED OPERATIONS (edit once, affects all hab LOBs):
-    op-002-01: rate-modifier -- Change $5000 deductible in SetDisSur_Deductible
-               File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
-    op-003-01: rate-modifier -- Change $2500 deductible in SetDisSur_Deductible
-               File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
-    op-004-01: rate-modifier -- Multiply GetLiabilityBundlePremiums by 1.03
-               File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
-    op-004-02: rate-modifier -- Multiply GetLiabilityExtensionPremiums by 1.03
-               File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
+  INTENTS:
+    intent-001: value_editing -- Multiply GetLiabilityBundlePremiums by 1.03
+                File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
+                Lines: 3850-4100, 14 target lines
+                Confidence: 0.95
+                Strategy hint: array6-multiply
 
-  LOB OPERATIONS (per target folder):
-    op-005-01: logic-modifier -- Add Elite Comp DAT IDs to Home/ResourceID.vb
-    op-005-02: logic-modifier -- Add Elite Comp DAT IDs to Condo/ResourceID.vb
+    intent-002: value_editing -- Change $5000 deductible in SetDisSur_Deductible
+                File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
+                Line: 2202, 1 target line
+                Confidence: 0.95
+                Strategy hint: factor-table
 
-  Dependencies:
-    (None)
+    intent-003: value_editing -- Multiply GetLiabilityExtensionPremiums by 1.03
+                File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
+                Lines: 4110-4300, 8 target lines
+                Confidence: 0.85 (discovered via related function)
+                Strategy hint: array6-multiply
 
-  Totals: {M} operations ({S} shared, {L} LOB-specific, {O} out-of-scope)
-          Agents: {R} rate-modifier, {L} logic-modifier
-          Review needed: {N}
+    intent-004: structure_insertion -- Add $50K sewer backup tier
+                File: mod_Common_SKHab20260101.vb (shared by 6 LOBs)
+                Line: ~5200
+                Confidence: 0.70
+                Open questions:
+                  - "Premium amount for $50K tier not specified"
+                  - "Insert before or after $25K case?"
 
-  Next: Analyzer will map each operation to exact file:line positions.
+  Dependencies: (none)
+
+  Totals: {N} intents ({V} value_editing, {S} structure_insertion,
+           {F} file_creation, {W} flow_modification)
+          {O} out-of-scope, {Q} open questions
+
+  Next: Planner will build the execution plan for Gate 1 approval.
 ```
 
-10.2. Report completion:
+15.2. Report completion:
 
 ```
-[Decomposer] COMPLETE. Wrote {M} operations to analysis/.
-             - analysis/dependency_graph.yaml (master graph)
-             - analysis/operations/op-{SRD}-{NN}.yaml (one per operation)
-             - {O} SRD(s) out of scope (DAT file)
-             - {N} operation(s) flagged for review
+[Decomposer] COMPLETE. Wrote {N} intents to analysis/intent_graph.yaml.
+             {O} CR(s) out of scope (DAT file)
+             {Q} open question(s) for developer at Gate 1
 
-             Next: Analyzer agent will locate exact line numbers and blast radius.
+             Next: Planner agent builds the execution plan.
 ```
 
 ---
 
 ## WORKED EXAMPLES
 
-These examples demonstrate the full Decomposer flow for common scenarios.
-
 ### Example A: Simple SK Hab Factor + Liability Changes
 
-**Input from Intake (change_spec.yaml):**
+**Input from Intake (change_requests.yaml):**
 
 ```yaml
 province: "SK"
 lobs: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
 effective_date: "20260101"
-srd_count: 4
+request_count: 4
 
 shared_modules:
   - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     shared_by: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
 
-srds:
-  - id: "srd-001"
-    type: "base_rate_increase"
-    dat_file_warning: true              # Hab dwelling base rates = DAT file
-  - id: "srd-002"
-    type: "factor_table_change"
-    case_value: 5000
-    old_value: -0.20
-    new_value: -0.22
-  - id: "srd-003"
-    type: "factor_table_change"
-    case_value: 2500
-    old_value: -0.15
-    new_value: -0.17
-  - id: "srd-004"
-    type: "base_rate_increase"
-    method: "multiply"
-    factor: 1.03
-    scope: "all_territories"
-    rounding: "auto"
-    dat_file_warning: false
-    # Title: "Increase hab liability premiums by 3%"
+requests:
+  - id: "cr-001"
+    title: "[DAT FILE] Increase dwelling base rates by 5%"
+    dat_file_warning: true
+  - id: "cr-002"
+    title: "Change $5000 deductible factor from -0.20 to -0.22"
+    extracted: {case_value: 5000, old_value: -0.20, new_value: -0.22, method: "explicit"}
+  - id: "cr-003"
+    title: "Change $2500 deductible factor from -0.15 to -0.17"
+    extracted: {case_value: 2500, old_value: -0.15, new_value: -0.17, method: "explicit"}
+  - id: "cr-004"
+    title: "Increase liability premiums by 3%"
+    extracted: {factor: 1.03, method: "multiply", scope: "all_territories"}
+    domain_hints: {glossary_match: "GetLiabilityBundlePremiums", involves_rates: true}
 ```
 
-**Step 4 -- Filter out-of-scope:**
-- SRD-001: dat_file_warning = true --> OUT_OF_SCOPE
+**Discovery output:** Resolved cr-004 to GetLiabilityBundlePremiums with related
+function GetLiabilityExtensionPremiums.
 
-**Step 5 -- Decompose SRD-002:**
-- Type: factor_table_change
-- case_value: 5000 (deductible amount) --> function pattern: SetDisSur_Deductible
-- File: mod_Common_SKHab20260101.vb --> file_type: shared_module
-- Agent: rate-modifier
-- --> op-002-01
+**Analyzer output:** Full function analysis for SetDisSur_Deductible (lines 2100-2250),
+GetLiabilityBundlePremiums (lines 3850-4100), GetLiabilityExtensionPremiums
+(lines 4110-4300).
 
-**Step 5 -- Decompose SRD-003:**
-- Type: factor_table_change
-- case_value: 2500 --> same function pattern: SetDisSur_Deductible
-- File: mod_Common_SKHab20260101.vb --> file_type: shared_module
-- Agent: rate-modifier
-- --> op-003-01
+**Step 6 -- Filter:** CR-001 is out-of-scope (DAT file).
 
-**Step 5 -- Decompose SRD-004:**
-- Type: base_rate_increase, title says "liability premiums"
-- Target functions: GetLiabilityBundlePremiums, GetLiabilityExtensionPremiums
-  (two functions = two operations)
-- File: mod_Common_SKHab20260101.vb --> file_type: shared_module for both
-- Agent: rate-modifier for both
-- --> op-004-01 (GetLiabilityBundlePremiums), op-004-02 (GetLiabilityExtensionPremiums)
+**Step 7 -- Match:**
+- CR-002 -> SetDisSur_Deductible (keyword match: "deductible")
+- CR-003 -> SetDisSur_Deductible (keyword match: "deductible")
+- CR-004 -> GetLiabilityBundlePremiums (discovery) + GetLiabilityExtensionPremiums (related)
 
-**Step 6 -- Inter-SRD dependencies:**
-- No cross-SRD dependencies. op-002-01 and op-003-01 target the same function
-  (SetDisSur_Deductible) but are independent operations on different Case values.
+**Step 8 -- Form intents:**
+- intent-001: value_editing, SetDisSur_Deductible, Case 5000 (from CR-002)
+- intent-002: value_editing, SetDisSur_Deductible, Case 2500 (from CR-003)
+- intent-003: value_editing, GetLiabilityBundlePremiums, multiply 1.03 (from CR-004)
+- intent-004: value_editing, GetLiabilityExtensionPremiums, multiply 1.03 (from CR-004)
 
-**Step 7 -- Bucket assignment:**
-- All 4 operations are shared_operations (all in mod_Common)
-- No lob_operations
+**Step 9 -- Dedup:** All in shared module -- one intent per function (correct, no dups).
 
-**Step 8 -- Topological order:**
-- All operations have depends_on: [] so order is: op-002-01, op-003-01, op-004-01, op-004-02
+**Step 11 -- Dependencies:** None between these intents.
 
-**Final output (dependency_graph.yaml):**
+**Final output:**
 
 ```yaml
 workflow_id: "20260101-SK-Hab-deductible-liability"
-decomposer_version: "1.0"
-decomposed_at: "2026-02-27T10:00:00"
-total_operations: 4
+decomposer_version: "2.0"
+total_intents: 4
 total_out_of_scope: 1
 
 out_of_scope:
-  - srd: "srd-001"
+  - cr: "cr-001"
     title: "[DAT FILE] Increase hab dwelling base rates by 5%"
-    reason: "dat_file_warning: Hab dwelling base rates are in DAT files"
+    reason: "dat_file_warning"
 
-shared_operations:
-  op-002-01:
-    srd: "srd-002"
-    description: "Change $5000 deductible factor from -0.20 to -0.22"
+intents:
+  - id: "intent-001"
+    cr: "cr-002"
+    title: "Change $5000 deductible factor from -0.20 to -0.22"
+    capability: "value_editing"
+    strategy_hint: "factor-table"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "SetDisSur_Deductible"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.95
+    open_questions: []
+    # Analyzer pass-through...
+    function_line_start: 2100
+    function_line_end: 2250
+    target_lines:
+      - line: 2202
+        content: "                Case 5000 : dblDedDiscount = -0.2"
+    parameters: {case_value: 5000, old_value: -0.20, new_value: -0.22}
 
-  op-003-01:
-    srd: "srd-003"
-    description: "Change $2500 deductible factor from -0.15 to -0.17"
+  - id: "intent-002"
+    cr: "cr-003"
+    title: "Change $2500 deductible factor from -0.15 to -0.17"
+    capability: "value_editing"
+    strategy_hint: "factor-table"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "SetDisSur_Deductible"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.95
+    open_questions: []
+    function_line_start: 2100
+    function_line_end: 2250
+    target_lines:
+      - line: 2180
+        content: "                Case 2500 : dblDedDiscount = -0.15"
+    parameters: {case_value: 2500, old_value: -0.15, new_value: -0.17}
 
-  op-004-01:
-    srd: "srd-004"
-    description: "Multiply liability bundle premiums by 1.03"
+  - id: "intent-003"
+    cr: "cr-004"
+    title: "Multiply liability bundle premiums by 1.03"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "GetLiabilityBundlePremiums"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.95
+    open_questions: []
+    function_line_start: 3850
+    function_line_end: 4100
+    target_lines: [...]  # 14 Array6 lines
+    parameters: {factor: 1.03, scope: "all_territories", rounding: "auto"}
 
-  op-004-02:
-    srd: "srd-004"
-    description: "Multiply liability extension premiums by 1.03"
+  - id: "intent-004"
+    cr: "cr-004"
+    title: "Multiply liability extension premiums by 1.03"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "GetLiabilityExtensionPremiums"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.85
+    open_questions: []
+    function_line_start: 4110
+    function_line_end: 4300
+    target_lines: [...]  # 8 Array6 lines
+    parameters: {factor: 1.03, scope: "all_territories", rounding: "auto"}
 
-lob_operations: {}
+partial_approval_constraints: []
 
 execution_order:
-  - "op-002-01"
-  - "op-003-01"
-  - "op-004-01"
-  - "op-004-02"
+  - "intent-001"
+  - "intent-002"
+  - "intent-003"
+  - "intent-004"
 ```
 
-### Example B: New Coverage Type (Complex, Multi-File)
+### Example B: Bug Fix Ticket (No Classification Needed)
 
-**Input from Intake:** 1 SRD of type "new_coverage_type"
+**Input from Intake:**
 
 ```yaml
-province: "SK"
-lobs: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-srd_count: 1
-
-srds:
-  - id: "srd-001"
-    type: "new_coverage_type"
-    complexity: "COMPLEX"
-    coverage_type_name: "Elite Comp."
-    constant_name: "ELITECOMP"
-    classifications: ["PREFERRED", "STANDARD"]
-    dat_ids:
-      Preferred: 9501
-      Standard: 9502
-    lob_scope: "all"                    # 6 hab LOBs
+requests:
+  - id: "cr-001"
+    title: "Fix missing $25K Seasonal case in GetSewerBackupPremium"
+    description: |
+      GetSewerBackupPremium is missing the $25K coverage branch for Seasonal
+      policy category. Falls through to Case Else (returns 0). Should return
+      same premium as Home ($89).
+    extracted:
+      target_function_hint: "GetSewerBackupPremium"
+      case_value: 25000
+      new_value: 89
+      lob_scope: "specific"
+      target_lobs: ["Seasonal"]
+    domain_hints:
+      glossary_match: "GetSewerBackupPremium"
+      involves_new_code: true
 ```
 
-**Step 5 -- Decompose SRD-001 using new_coverage_type rules:**
+**Analyzer output:** GetSewerBackupPremium analyzed at lines 5200-5400. Branch tree
+shows existing cases for 10000, 20000, 25000 (but 25000 missing Seasonal branch).
+FUB shows nested Select Case: outer = policyCategory, inner = sewerBackupCoverage.
 
-Operation A: Add ELITECOMP constant to mod_Common
-- file: mod_Common_SKHab20260101.vb, file_type: shared_module
-- agent: logic-modifier, depends_on: []
-- --> op-001-01
+**Step 7 -- Match:** CR-001 -> GetSewerBackupPremium (developer hint + glossary match).
 
-Operation B: Add rate table routing in mod_Common
-- file: mod_Common_SKHab20260101.vb, file_type: shared_module
-- agent: logic-modifier, depends_on: ["op-001-01"]
-- --> op-001-02
-
-Operations C1-C6: Add DAT IDs to ResourceID.vb (one per LOB)
-- file: {Province}/{LOB}/{Date}/ResourceID.vb, file_type: local
-- agent: logic-modifier, depends_on: []
-- --> op-001-03 (Home), op-001-04 (Condo), op-001-05 (Tenant),
-      op-001-06 (FEC), op-001-07 (Farm), op-001-08 (Seasonal)
-
-**Step 6 -- Dependencies:**
-- op-001-02 depends on op-001-01 (constant before reference)
-- op-001-03 through op-001-08 are independent of all other ops
-
-**Step 7 -- Buckets:**
-- shared_operations: op-001-01, op-001-02
-- lob_operations: op-001-03 through op-001-08
-
-**Step 8 -- Topological order:**
-```
-op-001-01  (no deps -- root)
-op-001-02  (depends on op-001-01)
-op-001-03  (no deps, parallel with op-001-04 through op-001-08)
-op-001-04  (no deps)
-op-001-05  (no deps)
-op-001-06  (no deps)
-op-001-07  (no deps)
-op-001-08  (no deps)
-```
-
-**Final output (8 operations):**
+**Step 8 -- Form intent:**
 
 ```yaml
-workflow_id: "20260101-SK-Hab-elite-comp"
-total_operations: 8
-total_out_of_scope: 0
+- id: "intent-001"
+  cr: "cr-001"
+  title: "Fix missing $25K Seasonal case in GetSewerBackupPremium"
+  capability: "structure_insertion"
+  strategy_hint: "case-block-insertion"
+  file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+  file_type: "shared_module"
+  function: "GetSewerBackupPremium"
+  depends_on: []
+  confidence: 0.90
+  open_questions: []
+  function_line_start: 5200
+  function_line_end: 5400
+  target_lines: []      # Insertion, not modification
+  parameters:
+    case_value: 25000
+    new_value: 89
+    target_lobs: ["Seasonal"]
+  peer_examples:
+    - "Case 25000 in Home branch -- structure to follow"
+```
 
-shared_operations:
-  op-001-01:
-    srd: "srd-001"
-    description: "Add ELITECOMP constant to mod_Common"
+This intent was formed WITHOUT any classification gate. The old pipeline would
+have been stuck trying to fit a bug fix into one of 7 template types. The new
+pipeline reads the code, sees what's missing, and forms an intent.
+
+### Example C: Complex Multi-File Change with Dependencies
+
+**Input from Intake:** 2 CRs -- one adds a constant, one adds routing that uses it.
+
+```yaml
+requests:
+  - id: "cr-001"
+    title: "Add Elite Comp coverage type"
+    extracted:
+      constant_name: "ELITECOMP"
+      coverage_type_name: "Elite Comp."
+      classifications: ["PREFERRED", "STANDARD"]
+      dat_ids: {Preferred: 9501, Standard: 9502}
+    domain_hints:
+      involves_new_code: true
+
+  - id: "cr-002"
+    title: "Add Elite Comp eligibility rule"
+    extracted:
+      rules: [{condition: "CoverageType = ELITECOMP", enforcement: "Min $500K dwelling"}]
+    domain_hints:
+      involves_new_code: true
+```
+
+**Step 8 -- Form intents:**
+
+```yaml
+intents:
+  - id: "intent-001"
+    cr: "cr-001"
+    title: "Add ELITECOMP constant to mod_Common"
+    capability: "structure_insertion"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
-    function: null
-    agent: "logic-modifier"
+    function: null        # Module-level
     depends_on: []
 
-  op-001-02:
-    srd: "srd-001"
-    description: "Add Elite Comp rate table routing"
+  - id: "intent-002"
+    cr: "cr-001"
+    title: "Add Elite Comp rate table routing"
+    capability: "flow_modification"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     file_type: "shared_module"
     function: "GetRateTableID"
-    agent: "logic-modifier"
-    depends_on: ["op-001-01"]
+    depends_on: ["intent-001"]    # Constant must exist first
 
-lob_operations:
-  op-001-03:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to Home ResourceID.vb"
+  - id: "intent-003"
+    cr: "cr-001"
+    title: "Add Elite Comp DAT IDs to Home ResourceID.vb"
+    capability: "structure_insertion"
     file: "Saskatchewan/Home/20260101/ResourceID.vb"
     file_type: "local"
-    agent: "logic-modifier"
     depends_on: []
 
-  op-001-04:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to Condo ResourceID.vb"
-    file: "Saskatchewan/Condo/20260101/ResourceID.vb"
-    file_type: "local"
-    agent: "logic-modifier"
-    depends_on: []
+  # intent-004 through intent-008: DAT IDs for remaining 5 LOBs
 
-  op-001-05:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to Tenant ResourceID.vb"
-    file: "Saskatchewan/Tenant/20260101/ResourceID.vb"
-    file_type: "local"
-    agent: "logic-modifier"
-    depends_on: []
+  - id: "intent-009"
+    cr: "cr-002"
+    title: "Add Elite Comp eligibility validation"
+    capability: "flow_modification"
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    file_type: "shared_module"
+    depends_on: ["intent-001"]    # References ELITECOMP constant
 
-  op-001-06:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to FEC ResourceID.vb"
-    file: "Saskatchewan/FEC/20260101/ResourceID.vb"
-    file_type: "local"
-    agent: "logic-modifier"
-    depends_on: []
-
-  op-001-07:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to Farm ResourceID.vb"
-    file: "Saskatchewan/Farm/20260101/ResourceID.vb"
-    file_type: "local"
-    agent: "logic-modifier"
-    depends_on: []
-
-  op-001-08:
-    srd: "srd-001"
-    description: "Add Elite Comp DAT IDs to Seasonal ResourceID.vb"
-    file: "Saskatchewan/Seasonal/20260101/ResourceID.vb"
-    file_type: "local"
-    agent: "logic-modifier"
-    depends_on: []
-
-execution_order:
-  - "op-001-01"
-  - "op-001-02"
-  - "op-001-03"
-  - "op-001-04"
-  - "op-001-05"
-  - "op-001-06"
-  - "op-001-07"
-  - "op-001-08"
+partial_approval_constraints:
+  - cr: "cr-002"
+    requires_cr: "cr-001"
+    reason: "intent-009 references ELITECOMP defined by intent-001"
+    blocking_intents: ["intent-009"]
+    required_intents: ["intent-001"]
 ```
 
-### Example C: AB Auto Base Rate Increase (Single LOB)
+### Example D: AB Auto Base Rate Increase (Single LOB)
 
 **Input from Intake:**
 
@@ -2054,446 +1540,242 @@ execution_order:
 province: "AB"
 lobs: ["Auto"]
 effective_date: "20260101"
-srd_count: 1
+request_count: 1
 
-target_folders:
-  - path: "Alberta/Auto/20260101"
-    vbproj: "Cssi.IntelliQuote.PORTABAUTO20260101.vbproj"
-
-shared_modules: []                      # Auto typically has no shared hab modules
-
-srds:
-  - id: "srd-001"
-    type: "base_rate_increase"
-    method: "multiply"
-    factor: 1.05
-    scope: "all_territories"
-    rounding: "auto"
-    dat_file_warning: false             # Auto base rates are in VB code
+requests:
+  - id: "cr-001"
+    title: "Increase AB Auto base rates by 5%"
+    extracted: {factor: 1.05, method: "multiply", scope: "all_territories"}
+    domain_hints: {involves_rates: true}
 ```
 
-**Step 2 -- Parse .vbproj:**
-- Read PORTABAUTO20260101.vbproj
-- Find Compile Include for mod_Algorithms_ABAuto20260101.vb
+**Analyzer output:** GetBaseRate_Auto at lines 200-450 in mod_Algorithms_ABAuto.
 
-**Step 5 -- Decompose SRD-001:**
-- Type: base_rate_increase, auto context
-- Target function: GetBaseRate_Auto (or similar) in mod_Algorithms
-- File: Alberta/Code/mod_Algorithms_ABAuto20260101.vb
-- file_type: lob_specific (only Auto compiles this)
-- Agent: rate-modifier
-- --> op-001-01
-
-**Final output (1 operation):**
+**Result:**
 
 ```yaml
-workflow_id: "20260101-AB-Auto-base-rate"
-total_operations: 1
-total_out_of_scope: 0
+total_intents: 1
 
-shared_operations: {}
-
-lob_operations:
-  op-001-01:
-    srd: "srd-001"
-    description: "Multiply AB Auto base rate Array6 values by 1.05"
+intents:
+  - id: "intent-001"
+    cr: "cr-001"
+    title: "Multiply AB Auto base rates by 1.05"
+    capability: "value_editing"
+    strategy_hint: "array6-multiply"
     file: "Alberta/Code/mod_Algorithms_ABAuto20260101.vb"
     file_type: "lob_specific"
     function: "GetBaseRate_Auto"
-    agent: "rate-modifier"
     depends_on: []
+    confidence: 0.95
+    function_line_start: 200
+    function_line_end: 450
+    parameters: {factor: 1.05, scope: "all_territories", rounding: "auto"}
 
-execution_order:
-  - "op-001-01"
-```
-
-### Example D: Mixed Complexity with Inter-SRD Dependencies
-
-**Input from Intake:** 3 SRDs where the third depends on the first
-
-```yaml
-province: "SK"
-lobs: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-srd_count: 3
-
-srds:
-  - id: "srd-001"
-    type: "new_coverage_type"
-    complexity: "COMPLEX"
-    coverage_type_name: "Elite Comp."
-    constant_name: "ELITECOMP"
-    classifications: ["PREFERRED", "STANDARD"]
-    dat_ids: {Preferred: 9501, Standard: 9502}
-
-  - id: "srd-002"
-    type: "factor_table_change"
-    case_value: 5000
-    old_value: -0.20
-    new_value: -0.22
-
-  - id: "srd-003"
-    type: "eligibility_rules"
-    complexity: "COMPLEX"
-    rules:
-      - condition: "CoverageType = ELITECOMP"
-        enforcement: "Minimum dwelling $500,000"
-        alert_message: "Elite Comp requires minimum $500K dwelling"
-```
-
-**Decomposition:**
-
-SRD-001 (new_coverage_type):
-- op-001-01: Add ELITECOMP constant (shared, logic-modifier)
-- op-001-02: Add rate table routing (shared, logic-modifier, depends: [op-001-01])
-- op-001-03 through op-001-08: Add DAT IDs per LOB (local, logic-modifier)
-
-SRD-002 (factor_table_change):
-- op-002-01: Change $5000 deductible (shared, rate-modifier)
-
-SRD-003 (eligibility_rules):
-- op-003-01: Add eligibility validation for ELITECOMP (shared, logic-modifier)
-
-**Step 6 -- Inter-SRD dependency detection:**
-- op-003-01 references ELITECOMP (from SRD-003 rules, condition field)
-- op-001-01 defines ELITECOMP (from SRD-001)
-- Therefore: op-003-01 depends_on: ["op-001-01"]
-
-**Dependency graph:**
-
-```
-op-001-01 (add constant)
-  |--- op-001-02 (rate table routing, depends on op-001-01)
-  |--- op-003-01 (eligibility rule, depends on op-001-01)
-op-001-03..op-001-08 (DAT IDs, independent)
-op-002-01 (deductible factor, independent)
-```
-
-**Step 8.6 -- Partial approval constraints:**
-
-```yaml
-partial_approval_constraints:
-  - srd: "srd-003"
-    requires_srd: "srd-001"
-    reason: "op-003-01 (eligibility rule) depends on op-001-01 (constant definition)"
-    blocking_operations: ["op-003-01"]
-    required_operations: ["op-001-01"]
-```
-
-**This matters for partial approval:** If the developer approves SRD-002 but rejects
-SRD-001, only op-002-01 can execute. If SRD-003 is approved but SRD-001 is rejected,
-op-003-01 CANNOT execute because it depends on op-001-01. The Planner reads the
-`partial_approval_constraints` list to enforce this at Gate 1.
-
-The Decomposer flags this:
-
-```
-[Decomposer] Dependency note: SRD-003 (eligibility rules) references the ELITECOMP
-             constant defined by SRD-001 (new coverage type). If SRD-001 is rejected
-             at Gate 1, SRD-003 cannot proceed either.
+execution_order: ["intent-001"]
 ```
 
 ---
 
 ## SPECIAL CASES
 
-### Case 1: Two SRDs Target the Same Function with Different Case Values
+### Case 1: Two CRs Target the Same Function with Different Case Values
 
-**Scenario:** SRD-002 changes Case 5000, SRD-003 changes Case 2500, both in
-SetDisSur_Deductible.
+**Scenario:** CR-002 changes Case 5000, CR-003 changes Case 2500, both resolved to
+SetDisSur_Deductible by the Analyzer.
 
-**Handling:** These produce separate operations (op-002-01 and op-003-01) targeting the
-same function. They are NOT dependent on each other because they modify different
-Case branches. The Planner will sequence them bottom-to-top within the file.
+**Handling:** Separate intents (intent-001 and intent-002) targeting the same function.
+NOT a conflict -- different Case values are independent edits. The Planner sequences
+them bottom-to-top within the file.
 
-The Decomposer does NOT flag this as a conflict. Two operations in the same
-function with different Case values are normal.
+### Case 2: Two CRs Target the Same Value (True Conflict)
 
-### Case 2: Two SRDs Target the Same Value (True Conflict)
+**Scenario:** CR-002 says change Case 5000 to -0.22, CR-005 says change Case 5000 to -0.25.
 
-**Scenario:** SRD-002 says change Case 5000 to -0.22, SRD-005 says change
-Case 5000 to -0.25.
-
-**Handling:** The Decomposer detects this conflict during the systematic conflict
-detection in Step 6.5 by grouping operations by their conflict key tuple
-(file, function, case_value). When two operations from different SRDs share the
-same key with different target values, STOP and ask:
-
-```
-[Decomposer] CONFLICT: Two SRDs target the same value:
-             SRD-002: Case 5000 in SetDisSur_Deductible -> -0.22
-             SRD-005: Case 5000 in SetDisSur_Deductible -> -0.25
-
-             These cannot both be applied. Which value should be used?
-               a) -0.22 (from SRD-002)
-               b) -0.25 (from SRD-005)
-               c) A different value (please specify)
-```
-
-Wait for developer resolution before continuing.
+**Handling:** Detected by conflict detection in Step 11.3. STOP and ask the developer.
+The Decomposer will not proceed until the conflict is resolved.
 
 ### Case 3: Cross-LOB File Compilation
 
-**Scenario:** An operation targets Liab_RentedDwelling_SKHome20260101.vb, which
-is compiled by both SK Home AND SK Condo .vbproj files.
+**Scenario:** An intent targets Liab_RentedDwelling_SKHome20260101.vb, which the
+.vbproj parsing shows is compiled by both Home AND Condo.
 
-**Handling:** The Decomposer classifies this as `file_type: "cross_lob"` and places
-it in shared_operations with a warning:
+**Handling:** Classify as `file_type: "cross_lob"`. Place with shared intents.
+Add `cross_lob_warning` to the intent.
 
-```yaml
-op-005-01:
-  file: "Saskatchewan/Code/Liab_RentedDwelling_SKHome20260101.vb"
-  file_type: "cross_lob"
-  cross_lob_warning: "File named for Home but also compiled by Condo"
-  agent: "rate-modifier"
-```
+### Case 4: CR Matches No Analyzed Function
 
-The Analyzer will run a full reverse lookup to identify all affected projects.
+**Scenario:** CR says "update the multi-vehicle discount logic" but no function
+matching "multi-vehicle" was found by the Analyzer.
 
-### Case 4: SRD Targets Function That Might Not Exist
+**Handling:** See Step 7.2. Ask the developer for the function name. If they provide
+one, create the intent with `confidence: 0.30` and flag `open_questions` noting
+the function was not analyzed.
 
-**Scenario:** SRD says "update SetDisSur_Deductible" but the function name varies
-by province (e.g., might be "SetDeductibleDiscount" in Alberta).
+### Case 5: One CR Produces Many Intents (10+)
 
-**Handling:** The Decomposer records the function name from the SRD and adds a note:
+**Scenario:** "Add Elite Comp coverage" for a 6-LOB hab workflow produces 9 intents
+(3 shared + 6 per-LOB DAT IDs).
 
-```yaml
-function: "SetDisSur_Deductible"        # From SRD hint; Analyzer verifies existence
-```
-
-The Analyzer is responsible for verifying function existence and showing alternatives
-if the exact name is not found. The Decomposer does NOT validate function names
-against actual code -- it uses naming patterns and config.yaml hints.
-
-### Case 5: One SRD Produces Many Operations (10+)
-
-**Scenario:** new_coverage_type SRD for a 6-LOB hab workflow produces 8 operations
-(2 shared + 6 per-LOB).
-
-**Handling:** This is normal. The Decomposer generates all operations without
-prompting the developer. The Planner will group them into readable phases.
-
-If the operation count exceeds 20 for a single SRD, flag for developer awareness:
+**Handling:** Normal. Report the count to the developer:
 
 ```
-[Decomposer] Note: SRD-{NNN} decomposed into {N} operations (complex change).
-             This is expected for new_coverage_type with {L} LOBs.
+[Decomposer] CR-001 decomposed into 9 intents (complex multi-file change).
 ```
 
 ### Case 6: LOB-Scope = Specific (Not All LOBs)
 
-**Scenario:** SRD has `lob_scope: "specific"`, `target_lobs: ["Home", "Condo"]`
-in a 6-LOB hab workflow.
+**Scenario:** CR has `lob_scope: "specific"`, `target_lobs: ["Home", "Condo"]`.
 
 **Handling:**
-- Shared module operations are STILL shared (affect all LOBs that compile the file).
-  Generate normally.
-- LOB-specific operations are generated ONLY for the target_lobs (Home, Condo).
-- If a shared module operation is needed only for the specific LOBs but the module
-  is compiled by all 6 LOBs, flag for developer:
+- Shared module intents: generated as normal (affect all LOBs that compile the file).
+  Flag the scope mismatch to the developer.
+- LOB-specific intents: only for target_lobs.
 
-```
-[Decomposer] SRD-{NNN} targets only Home and Condo, but the target file
-             (mod_Common_SKHab20260101.vb) is shared by all 6 hab LOBs.
-             Changes to this file will affect ALL LOBs, not just Home and Condo.
-             Proceed? (The change will be visible to Tenant, FEC, Farm, Seasonal too)
-```
+### Case 7: CR with ambiguity_flag = true
 
-### Case 7: Empty SRD List After Filtering
+**Scenario:** CR has `ambiguity_flag: true`, `ambiguity_note: "Premium amount not specified"`.
 
-**Scenario:** All SRDs are dat_file_warning = true.
+**Handling:** Pass the ambiguity through to the intent's `open_questions`. The
+ambiguity was noted by Intake; the Planner will present it to the developer at Gate 1.
+The Decomposer does NOT re-ask.
 
-**Handling:** See Step 4.4 -- report "all out of scope" and write a minimal
-dependency_graph.yaml with total_operations: 0.
+### Case 8: Broad CR ("Increase All Liability Premiums")
 
-### Case 8: SRD with ambiguity_flag = true
+**Scenario:** CR says "increase all liability premiums by 3%" and Discovery + Analyzer
+found 3 liability functions.
 
-**Scenario:** SRD-003 has `ambiguity_flag: true`, `ambiguity_note: "Source says
-'approximately 5%'. Using exactly 1.05."`.
+**Handling:** Create separate intents per function (Step 7.3). All link back to the
+same CR. If the match came from keyword matching (low confidence), present candidates
+to the developer for confirmation.
 
-**Handling:** The Decomposer passes the ambiguity through to the operation:
+### Case 9: Nested If/Else in Factor Tables
 
-```yaml
-op-003-01:
-  parameters:
-    factor: 1.05
-    ambiguity_note: "Source says 'approximately 5%'. Using exactly 1.05."
-```
+**Scenario:** CR says "change $5000 deductible factor" but the Analyzer found nested
+If/Else (farm vs non-farm) inside Case 5000.
 
-The ambiguity was already reviewed by the developer at Intake. The Decomposer
-does NOT re-ask about it. The Planner will show the before/after values at Gate 1,
-giving the developer another chance to review.
+**Handling:** The Analyzer already identified this -- the FUB's branch_tree shows
+the nesting, and target_lines includes all candidate values. The Decomposer passes
+this through. The intent includes ALL target lines from the Analyzer. The Change
+Engine or the developer decides which branch(es) to modify.
 
-### Case 9: Broad SRD ("Increase All Liability Premiums")
+### Case 10: Change Targets a Function Not in CalcMain Flow
 
-**Scenario:** SRD says "increase all liability premiums by 3%" and the codebase has
-multiple liability functions: GetLiabilityBundlePremiums,
-GetLiabilityExtensionPremiums, GetLiabilityExtensionWatercraftPremiums.
+**Scenario:** CR references a utility function that Discovery did not trace
+(not in CalcMain call chain) but the Analyzer found it via .vbproj scanning.
 
-**Handling:** The Decomposer creates SEPARATE operations for each function:
-- op-001-01: Multiply GetLiabilityBundlePremiums by 1.03
-- op-001-02: Multiply GetLiabilityExtensionPremiums by 1.03
-- op-001-03: Multiply GetLiabilityExtensionWatercraftPremiums by 1.03
-
-Each is an independent shared_operation in the same file. The Decomposer
-determines the list of target functions using naming patterns from config.yaml.
-Function verification is delegated to the Analyzer.
-
-**If uncertain which functions to target,** the Decomposer asks the developer
-(see Step 5.1.1 "When the Decomposer cannot determine the exact function name").
-
-### Case 10: Nested If/Else in Factor Tables
-
-**Scenario:** SRD says "change $5000 deductible factor from -0.20 to -0.22" but
-SetDisSur_Deductible has nested If/Else for farm vs non-farm:
-
-```vb
-Case 5000
-    If IsFarm Then
-        dblDedDiscount = -0.25        ' Farm value
-    Else
-        dblDedDiscount = -0.20        ' Non-farm value
-    End If
-```
-
-**Handling:** The Decomposer does NOT resolve this ambiguity -- it does not read
-actual code. Instead, it adds a note to the operation description:
-
-```yaml
-description: |
-  In SetDisSur_Deductible, change Case 5000 discount from -0.20 to -0.22.
-  NOTE: Factor tables in this codebase commonly have nested If/Else blocks
-  (e.g., farm vs non-farm paths). The Analyzer must show ALL matching
-  values within Case 5000 to the developer for confirmation.
-```
-
-The Analyzer is responsible for discovering the nested structure and presenting
-ALL candidate values to the developer (show-don't-guess principle).
+**Handling:** If the function is in the Analyzer output, match normally. If not,
+fall through to developer interaction (Step 7.2). The Decomposer does not restrict
+itself to Discovery's call chain -- any analyzed function is a valid target.
 
 ---
 
 ## KEY RESPONSIBILITIES (Summary)
 
-1. **Read Intake output:** Parse change_spec.yaml and individual SRD files
-2. **Parse .vbproj files as XML:** Build the File Reference Map showing which
-   Code/ files each project compiles (use Python for `..` path resolution)
-3. **Validate date consistency:** For multi-LOB workflows, check Code/ file dates
-   across .vbproj files for consistency (Step 2.6)
-4. **Classify files:** Apply the File Classification Rules to determine shared_module,
-   lob_specific, cross_lob, local, shardclass, or cross_province_shared
-5. **Filter out-of-scope SRDs:** dat_file_warning = true --> OUT_OF_SCOPE
-6. **Decompose each SRD:** Apply type-specific rules to produce atomic operations
-   (using hierarchical op-{SRD}-{NN} IDs scoped per SRD)
-7. **Validate decomposition:** Check completeness -- required fields, agent values,
-   no duplicates, every in-scope SRD produced operations (Step 5.5)
-8. **Build dependency graph:** Intra-SRD dependencies (constant before usage) and
-   inter-SRD dependencies (eligibility rule references new constant)
-9. **Detect conflicts systematically:** Group operations by key tuple, compare
-   values from different SRDs (Step 6.5)
-10. **Assign agents:** rate-modifier for numeric value changes, logic-modifier for
-    structural code changes
-11. **Compute execution order:** Topological sort via Python script (Step 8)
-12. **Build partial approval constraints:** Surface inter-SRD couplings for Gate 1
-    (Step 8.6)
-13. **Write output files:** dependency_graph.yaml + individual op-{SRD}-{NN}.yaml files
-14. **Pass rounding: "auto" through unchanged** -- Analyzer resolves later
-15. **Handle cross-LOB files:** Detect and flag files compiled by multiple LOBs
-16. **Handle UNKNOWN SRDs:** Create placeholder with needs_review = true
+1. **Load all upstream outputs:** Intake CRs, Discovery code map, Analyzer function analysis
+2. **Parse .vbproj files as XML:** Build the File Reference Map (same as before)
+3. **Classify files:** Apply File Classification Rules for shared/LOB/cross-LOB typing
+4. **Filter out-of-scope CRs:** dat_file_warning = true -> OUT_OF_SCOPE
+5. **Match CRs to analyzed functions:** Priority: Discovery > developer hint > glossary > keywords
+6. **Form intents:** One intent per function per CR, with capability tag and strategy hint
+7. **Pass through Analyzer data:** target_lines, FUBs, line numbers, hazards -- no recomputation
+8. **Deduplicate shared modules:** One intent per shared function, not per LOB
+9. **Expand LOB-specific intents:** One per target LOB for local files
+10. **Build dependency graph:** Constant-before-reference, file-creation-before-modification
+11. **Detect conflicts:** Group-and-compare across CRs
+12. **Compute execution order:** Topological sort with tie-breaking
+13. **Build partial approval constraints:** Surface inter-CR couplings for Gate 1
+14. **Write intent_graph.yaml:** Single output artifact
+15. **Handle unknown/unmatched CRs:** Create low-confidence intents with open_questions, ask developer
 
-## Agent Assignment Quick Reference
+## Capability Quick Reference
 
-| What the operation does | Agent |
-|------------------------|-------|
-| Multiply Array6 values by a factor | rate-modifier |
-| Change a Select Case value (old --> new) | rate-modifier |
-| Change a Const value | rate-modifier |
-| Change an included limit value | rate-modifier |
-| Add a new Array6 premium row | rate-modifier |
-| Add a new Const declaration | logic-modifier |
-| Add a new Select Case branch | logic-modifier |
-| Add a new function | logic-modifier |
-| Add CalcOption routing (new Case block) | logic-modifier |
-| Add DAT IDs to ResourceID.vb | logic-modifier |
-| Add validation/eligibility logic | logic-modifier |
-| Add alert message constants | logic-modifier |
+| What the intent does | Capability |
+|---------------------|-----------|
+| Multiply Array6 values by a factor | value_editing |
+| Change a Select Case value (old -> new) | value_editing |
+| Change a Const value | value_editing |
+| Change an included limit value | value_editing |
+| Add a new Array6 premium row | structure_insertion |
+| Add a new Const declaration | structure_insertion |
+| Add a new Select Case branch | structure_insertion |
+| Add DAT IDs to ResourceID.vb | structure_insertion |
+| Create a new Option_*.vb or Liab_*.vb file | file_creation |
+| Add CalcOption routing (new Case block) | flow_modification |
+| Add validation/eligibility logic | flow_modification |
+| Modify If/Else control flow | flow_modification |
 
-**Rule of thumb:** rate-modifier = changing existing numeric values.
-logic-modifier = adding new code structure.
+**Rule of thumb:** value_editing = changing existing values in existing code.
+structure_insertion = adding new blocks to existing files. file_creation = new files.
+flow_modification = changing how the code routes/decides.
 
-## Boundary with Analyzer
+## Boundary with Analyzer (New vs Old)
 
-The Decomposer and Analyzer have a clean boundary:
+| Responsibility | Old Decomposer | New Decomposer | Analyzer |
+|---------------|:--------------:|:--------------:|:--------:|
+| Identify target functions | Guess from patterns | Match from Analyzer output | Provides verified analysis |
+| Determine exact line numbers | NO | Pass through from Analyzer | YES |
+| Read actual VB.NET code | NO | NO (reads Analyzer output) | YES |
+| Classify operation types | YES (10 types) | NO (uses capabilities) | N/A |
+| Resolve rounding | Passes "auto" | Passes through Analyzer's resolution | Resolves to banker/none/mixed |
+| Build dependency graph | YES | YES (same) | N/A |
+| Detect cross-LOB refs | From .vbproj | From .vbproj (same) | Full reverse lookup |
+| Show candidates to developer | NO | YES (from Analyzer data) | Provides candidates |
 
-| Responsibility | Decomposer | Analyzer |
-|---------------|:----------:|:--------:|
-| Identify target files | YES | Verifies |
-| Classify file types (shared, LOB, etc.) | YES | Verifies |
-| Determine target function names | Best guess from patterns | Confirms by reading code |
-| Determine exact line numbers | NO | YES |
-| Resolve rounding: "auto" | Passes through | Resolves to banker/none |
-| Detect cross-LOB file refs | Flags from .vbproj parsing | Full reverse lookup |
-| Show candidates to developer | NO (does not read code) | YES (reads actual code) |
-| Build dependency graph | YES | Preserves |
-| Determine file copy needs | NO | YES |
-| Build blast radius report | NO | YES |
+The key difference: the OLD Decomposer guessed about code based on naming patterns.
+The NEW Decomposer reads verified Analyzer output. It knows exactly which functions
+exist, what they contain, and where the target lines are. No guessing.
 
 ## Error Handling
 
-### Missing Files
+### Missing Analyzer Output
 
 ```
-[Decomposer] ERROR: Cannot read .vbproj file:
-             {path}
+[Decomposer] ERROR: No Analyzer output found in analysis/analyzer_output/.
+             Was the Analyzer run? Check manifest.yaml for analyzer.status.
+```
 
-             This file is listed in change_spec.yaml target_folders but does not
-             exist on disk. Was IQWiz run to create this version folder?
+### Missing .vbproj Files
+
+```
+[Decomposer] ERROR: Cannot read .vbproj file: {path}
+             This file is listed in change_requests.yaml target_folders but
+             does not exist on disk. Was IQWiz run?
 ```
 
 ### Malformed .vbproj
 
 ```
-[Decomposer] ERROR: Cannot parse .vbproj as XML:
-             {path}
+[Decomposer] ERROR: Cannot parse .vbproj as XML: {path}
              Error: {xml_error}
-
-             This file may be corrupted. Check the file in a text editor.
 ```
 
-### Invalid SRD YAML
+### Invalid CR YAML
 
 ```
-[Decomposer] ERROR: Cannot read SRD file:
-             {path}
+[Decomposer] ERROR: Cannot read CR file: {path}
              Error: {yaml_error}
-
              The Intake agent may have written malformed YAML.
-             Run Intake again or fix the file manually.
 ```
 
 ### No Target Folders
 
 ```
-[Decomposer] ERROR: change_spec.yaml has empty target_folders list.
+[Decomposer] ERROR: change_requests.yaml has empty target_folders list.
              At least one target folder is required.
-             Was /iq-plan configured correctly?
 ```
-
-### Unsupported SRD Type
-
-If the SRD has a type value that is not one of the 7 known patterns and is not
-UNKNOWN, treat it as UNKNOWN and proceed with the UNKNOWN decomposition rules
-(Section 5.1.8).
 
 ---
 
-## NOT YET IMPLEMENTED (Future Enhancements)
+## GRACEFUL DEGRADATION
 
-- **Auto-discovery of function names from file contents:** Currently the Decomposer
-  uses naming patterns. Future versions could scan Code/ files for function
-  declarations to build a more accurate target list.
-- **Batch conflict detection:** IMPLEMENTED in Step 6.5 -- systematic group-and-compare
-  algorithm detects conflicts across the entire operation set after decomposition.
-- **Operation merge optimization:** Two operations targeting the same function could
-  be merged into a single operation with multiple parameter sets (currently kept
-  separate for simplicity and auditability).
+The Decomposer handles missing upstream data gracefully:
 
-<!-- IMPLEMENTATION: Phase 04 -->
+| Missing Data | Fallback |
+|-------------|----------|
+| code_discovery.yaml absent | Skip Discovery matching, rely on Analyzer index + domain hints |
+| analyzer_output/ empty | STOP -- cannot form intents without code understanding |
+| Specific function not in Analyzer | Ask developer for function name, create low-confidence intent |
+| config.yaml missing | STOP -- need carrier configuration |
+| codebase-profile.yaml absent | Skip glossary/dispatch enrichment, proceed with basic matching |
+
+<!-- IMPLEMENTATION: Vision Rewrite Phase 1 -->

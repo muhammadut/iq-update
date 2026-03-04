@@ -5,8 +5,7 @@ name: new_endorsement_flat
 description: "Add a new flat-rate endorsement option"
 complexity: MEDIUM
 agents:
-  - rate-modifier
-  - logic-modifier
+  - change-engine
 
 classification_hints:
   - "new endorsement"

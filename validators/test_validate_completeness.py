@@ -3,10 +3,10 @@ Tests for validate_completeness.py
 
 Uses tempfile to create mock workstreams with controlled
 manifest.yaml, operations_log.yaml, file_hashes.yaml, and
-analysis/operations/ op-*.yaml files.
+analysis/intent_graph.yaml.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_completeness.py -v
 """
 
@@ -43,7 +43,7 @@ def _build_workstream(
     ops_log_operations=None,
     planned_ops=None,
     manifest_extra=None,
-    change_spec=None,
+    change_requests=None,
     snapshot_files=None,
 ):
     """Build a minimal mock workstream for the completeness validator.
@@ -51,10 +51,10 @@ def _build_workstream(
     Args:
         tmpdir: Root temp directory (acts as carrier_root).
         ops_log_operations: list of operation dicts for operations_log.yaml.
-        planned_ops: list of dicts, each written as an op-*.yaml file in
-                     analysis/operations/. Each dict must have an "id" key.
+        planned_ops: list of intent dicts written into
+                     analysis/intent_graph.yaml. Each dict must have an "id" key.
         manifest_extra: extra keys to merge into manifest.yaml.
-        change_spec: dict for parsed/change_spec.yaml (optional).
+        change_requests: dict for parsed/change_requests.yaml (optional).
         snapshot_files: dict mapping filename -> file content for
                         execution/snapshots/ directory.
 
@@ -96,19 +96,18 @@ def _build_workstream(
         for filename, content in snapshot_files.items():
             _write_text(os.path.join(snapshots_dir, filename), content)
 
-    # --- Write planned operations (analysis/operations/op-*.yaml) ---
-    if planned_ops:
-        ops_dir = os.path.join(workstream_dir, "analysis", "operations")
-        os.makedirs(ops_dir, exist_ok=True)
-        for op_spec in planned_ops:
-            op_id = op_spec["id"]
-            _write_yaml(os.path.join(ops_dir, f"{op_id}.yaml"), op_spec)
+    # --- Write planned operations as intent_graph.yaml ---
+    if planned_ops is not None:
+        intent_graph = {"intents": planned_ops}
+        analysis_dir = os.path.join(workstream_dir, "analysis")
+        os.makedirs(analysis_dir, exist_ok=True)
+        _write_yaml(os.path.join(analysis_dir, "intent_graph.yaml"), intent_graph)
 
-    # --- Write change_spec.yaml if provided ---
-    if change_spec:
+    # --- Write change_requests.yaml if provided ---
+    if change_requests:
         _write_yaml(
-            os.path.join(workstream_dir, "parsed", "change_spec.yaml"),
-            change_spec,
+            os.path.join(workstream_dir, "parsed", "change_requests.yaml"),
+            change_requests,
         )
 
     return manifest_path
@@ -125,32 +124,32 @@ def test_clean_pass_all_completed():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "GetDeductibleDiscount"},
-                {"id": "op-001-02", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "GetLiabilityPremiums"},
-                {"id": "op-001-03", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "GetSurchargeFactor"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "GetDeductibleDiscount"},
+                {"id": "intent-002", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "GetLiabilityPremiums"},
+                {"id": "intent-003", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "GetSurchargeFactor"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 200, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-03",
-                    "agent": "rate-modifier",
+                    "operation": "intent-003",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 300, "before": "old", "after": "new"}],
                 },
@@ -169,32 +168,32 @@ def test_clean_pass_all_completed():
 # ---------------------------------------------------------------------------
 
 def test_missing_operation_not_in_log():
-    """ops_log has op-001-01 and op-001-02 but analysis has op-001-01,
-    op-001-02, op-001-03. The third operation is missing from the log.
+    """ops_log has intent-001 and intent-002 but intent_graph has intent-001,
+    intent-002, intent-003. The third intent is missing from the log.
     Should produce a 'not_in_log' finding."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
-                {"id": "op-001-02", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func2"},
-                {"id": "op-001-03", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func3"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
+                {"id": "intent-002", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func2"},
+                {"id": "intent-003", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func3"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 200, "before": "old", "after": "new"}],
                 },
@@ -207,7 +206,7 @@ def test_missing_operation_not_in_log():
 
         finding = result["findings"][0]
         assert finding["issue"] == "not_in_log"
-        assert finding["operation"] == "op-001-03"
+        assert finding["operation"] == "intent-003"
         assert "never executed" in finding["actual"]
 
 
@@ -221,14 +220,14 @@ def test_failed_operation():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "FAILED",
                     "changes": [],
                 },
@@ -240,7 +239,7 @@ def test_failed_operation():
 
         failed_findings = [f for f in result["findings"] if f["issue"] == "failed"]
         assert len(failed_findings) == 1
-        assert failed_findings[0]["operation"] == "op-001-01"
+        assert failed_findings[0]["operation"] == "intent-001"
         assert failed_findings[0]["expected"] == "COMPLETED or SKIPPED"
         assert "FAILED" in failed_findings[0]["actual"]
 
@@ -255,14 +254,14 @@ def test_stuck_operation_pending():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "PENDING",
                     "changes": [],
                 },
@@ -274,7 +273,7 @@ def test_stuck_operation_pending():
 
         pending_findings = [f for f in result["findings"] if f["issue"] == "pending"]
         assert len(pending_findings) == 1
-        assert pending_findings[0]["operation"] == "op-001-01"
+        assert pending_findings[0]["operation"] == "intent-001"
         assert "never started" in pending_findings[0]["actual"]
 
 
@@ -285,14 +284,14 @@ def test_stuck_operation_in_progress():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-002-01", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "base_rate_increase", "function": "GetBasePremium_Home"},
+                {"id": "intent-004", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "array6-multiply", "function": "GetBasePremium_Home"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-004",
+                    "change_type": "value_editing",
                     "status": "IN_PROGRESS",
                     "changes": [],
                 },
@@ -304,7 +303,7 @@ def test_stuck_operation_in_progress():
 
         ip_findings = [f for f in result["findings"] if f["issue"] == "in_progress"]
         assert len(ip_findings) == 1
-        assert ip_findings[0]["operation"] == "op-002-01"
+        assert ip_findings[0]["operation"] == "intent-004"
         assert "never finished" in ip_findings[0]["actual"]
 
 
@@ -319,23 +318,23 @@ def test_skipped_operation_ok():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
-                {"id": "op-001-02", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func2"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
+                {"id": "intent-002", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func2"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "SKIPPED",
                     "changes": [],
                 },
@@ -377,10 +376,10 @@ def test_empty_operations_log_with_planned_ops():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
-                {"id": "op-001-02", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func2"},
+                {"id": "intent-001", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
+                {"id": "intent-002", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func2"},
             ],
             ops_log_operations=[],
         )
@@ -418,9 +417,9 @@ def test_territory_count_mismatch_from_snapshot():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
-                    "pattern": "base_rate_increase",
+                    "strategy_hint": "array6-multiply",
                     "function": "GetBasePremium_Home",
                     "target_lines": [{"line": i} for i in range(1, 16)],
                 },
@@ -428,14 +427,14 @@ def test_territory_count_mismatch_from_snapshot():
             ops_log_operations=[
                 {
                     "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": changes,
                 },
             ],
             snapshot_files={
-                "mod_Common_SKHab20260101.vb.snapshot": snapshot_content,
+                "Saskatchewan__Code__mod_Common_SKHab20260101.vb.snapshot": snapshot_content,
             },
         )
 
@@ -447,7 +446,7 @@ def test_territory_count_mismatch_from_snapshot():
             if f["issue"] == "territory_count_mismatch"
         ]
         assert len(territory_findings) == 1
-        assert territory_findings[0]["operation"] == "op-001-01"
+        assert territory_findings[0]["operation"] == "intent-001"
         assert "15 territories" in territory_findings[0]["expected"]
         assert "14 changes" in territory_findings[0]["actual"]
 
@@ -464,9 +463,9 @@ def test_territory_completeness_fallback_to_target_lines():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-002-01",
+                    "id": "intent-004",
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "pattern": "base_rate_increase",
+                    "strategy_hint": "array6-multiply",
                     "function": "GetBasePremium_Condo",
                     "target_lines": target_lines,
                 },
@@ -474,8 +473,8 @@ def test_territory_completeness_fallback_to_target_lines():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-004",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": changes,
                 },
@@ -514,9 +513,9 @@ def test_territory_completeness_all_match():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "pattern": "base_rate_increase",
+                    "strategy_hint": "array6-multiply",
                     "function": "GetBasePremium_Home",
                     "target_lines": [{"line": i} for i in range(1, 6)],
                 },
@@ -524,14 +523,14 @@ def test_territory_completeness_all_match():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": changes,
                 },
             ],
             snapshot_files={
-                "mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
+                "Alberta__Code__mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
             },
         )
 
@@ -557,32 +556,32 @@ def test_lob_completeness_missing_lob():
                 "province": "AB",
             },
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Home/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
-                {"id": "op-001-02", "file": "Alberta/Condo/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "Func2"},
-                {"id": "op-001-03", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "SharedFunc"},
+                {"id": "intent-001", "file": "Alberta/Home/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
+                {"id": "intent-002", "file": "Alberta/Condo/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "Func2"},
+                {"id": "intent-003", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "SharedFunc"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Home/20260101/ResourceID.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 10, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Condo/20260101/ResourceID.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 20, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-03",
-                    "agent": "rate-modifier",
+                    "operation": "intent-003",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 30, "before": "old", "after": "new"}],
                 },
@@ -608,32 +607,32 @@ def test_lob_completeness_all_lobs_present():
                 "province": "AB",
             },
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Home/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "F1"},
-                {"id": "op-001-02", "file": "Alberta/Condo/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "F2"},
-                {"id": "op-001-03", "file": "Alberta/Tenant/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "F3"},
+                {"id": "intent-001", "file": "Alberta/Home/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "F1"},
+                {"id": "intent-002", "file": "Alberta/Condo/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "F2"},
+                {"id": "intent-003", "file": "Alberta/Tenant/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "F3"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Home/20260101/ResourceID.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 10, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Condo/20260101/ResourceID.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 20, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Tenant/20260101/ResourceID.vb",
-                    "operation": "op-001-03",
-                    "agent": "rate-modifier",
+                    "operation": "intent-003",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 30, "before": "old", "after": "new"}],
                 },
@@ -659,14 +658,14 @@ def test_lob_completeness_shared_only_no_lob_specific():
                 "province": "AB",
             },
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "SharedFunc"},
+                {"id": "intent-001", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "SharedFunc"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
@@ -708,30 +707,30 @@ def test_comprehensive_happy_path():
             },
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "pattern": "base_rate_increase",
+                    "strategy_hint": "array6-multiply",
                     "function": "GetBasePremium_Home",
                     "target_lines": [{"line": 3}, {"line": 4}, {"line": 5}],
                 },
                 {
-                    "id": "op-001-02",
+                    "id": "intent-002",
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "pattern": "factor_table_change",
+                    "strategy_hint": "factor-table",
                     "function": "GetDeductibleDiscount",
                     "target_lines": [{"line": 50, "context": "Case 500"}, {"line": 51, "context": "Case 1000"}],
                 },
                 {
-                    "id": "op-002-01",
+                    "id": "intent-004",
                     "file": "Alberta/Home/20260101/ResourceID.vb",
-                    "pattern": "factor_table_change",
+                    "strategy_hint": "factor-table",
                     "function": "Func3",
                     "target_lines": [],
                 },
                 {
-                    "id": "op-002-02",
+                    "id": "intent-005",
                     "file": "Alberta/Condo/20260101/ResourceID.vb",
-                    "pattern": "factor_table_change",
+                    "strategy_hint": "factor-table",
                     "function": "Func4",
                     "target_lines": [],
                 },
@@ -739,8 +738,8 @@ def test_comprehensive_happy_path():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 3, "before": "old1", "after": "new1"},
@@ -750,8 +749,8 @@ def test_comprehensive_happy_path():
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 50, "before": "old", "after": "new"},
@@ -760,21 +759,21 @@ def test_comprehensive_happy_path():
                 },
                 {
                     "file": "Alberta/Home/20260101/ResourceID.vb",
-                    "operation": "op-002-01",
-                    "agent": "logic-modifier",
+                    "operation": "intent-004",
+                    "change_type": "structure_insertion",
                     "status": "COMPLETED",
                     "changes": [{"line": 10, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Condo/20260101/ResourceID.vb",
-                    "operation": "op-002-02",
-                    "agent": "logic-modifier",
+                    "operation": "intent-005",
+                    "change_type": "structure_insertion",
                     "status": "COMPLETED",
                     "changes": [{"line": 20, "before": "old", "after": "new"}],
                 },
             ],
             snapshot_files={
-                "mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
+                "Alberta__Code__mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
             },
         )
 
@@ -788,33 +787,33 @@ def test_comprehensive_happy_path():
 
 
 # ---------------------------------------------------------------------------
-# Test 10: Mixed agents -- rate-modifier + logic-modifier both completed
+# Test 10: Mixed change types -- value_editing + structure_insertion both completed
 # ---------------------------------------------------------------------------
 
 def test_mixed_agents_both_completed():
-    """rate-modifier and logic-modifier ops both COMPLETED. Validator
+    """value_editing and structure_insertion ops both COMPLETED. Validator
     should pass regardless of agent type."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "Func1"},
-                {"id": "op-002-01", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                {"id": "intent-001", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "Func1"},
+                {"id": "intent-004", "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
                  "pattern": "logic_change", "function": "AddEligibilityCheck"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-002-01",
-                    "agent": "logic-modifier",
+                    "operation": "intent-004",
+                    "change_type": "structure_insertion",
                     "status": "COMPLETED",
                     "changes": [{"line": 200, "before": "old", "after": "new"}],
                 },
@@ -840,9 +839,9 @@ def test_factor_table_missing_case_value():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "pattern": "factor_table_change",
+                    "strategy_hint": "factor-table",
                     "function": "GetDeductibleDiscount",
                     "target_lines": [
                         {"line": 50, "context": "Case 500"},
@@ -854,8 +853,8 @@ def test_factor_table_missing_case_value():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 50, "before": "old", "after": "new"},
@@ -874,7 +873,7 @@ def test_factor_table_missing_case_value():
             if f["issue"] == "factor_case_not_updated"
         ]
         assert len(factor_findings) == 1
-        assert factor_findings[0]["operation"] == "op-001-01"
+        assert factor_findings[0]["operation"] == "intent-001"
         assert "line 52" in factor_findings[0]["expected"]
         assert "Case 2500" in factor_findings[0]["expected"]
 
@@ -887,9 +886,9 @@ def test_factor_table_all_cases_updated():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "pattern": "factor_table_change",
+                    "strategy_hint": "factor-table",
                     "function": "GetDeductibleDiscount",
                     "target_lines": [
                         {"line": 50, "context": "Case 500"},
@@ -901,8 +900,8 @@ def test_factor_table_all_cases_updated():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [
                         {"line": 50, "before": "old", "after": "new"},
@@ -929,26 +928,26 @@ def test_multiple_failures_combined():
         manifest_path = _build_workstream(
             tmpdir,
             planned_ops=[
-                {"id": "op-001-01", "file": "file1.vb", "pattern": "factor_table_change", "function": "F1"},
-                {"id": "op-001-02", "file": "file2.vb", "pattern": "factor_table_change", "function": "F2"},
-                {"id": "op-001-03", "file": "file3.vb", "pattern": "factor_table_change", "function": "F3"},
+                {"id": "intent-001", "file": "file1.vb", "strategy_hint": "factor-table", "function": "F1"},
+                {"id": "intent-002", "file": "file2.vb", "strategy_hint": "factor-table", "function": "F2"},
+                {"id": "intent-003", "file": "file3.vb", "strategy_hint": "factor-table", "function": "F3"},
             ],
             ops_log_operations=[
                 {
                     "file": "file1.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "FAILED",
                     "changes": [],
                 },
                 {
                     "file": "file2.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "IN_PROGRESS",
                     "changes": [],
                 },
-                # op-001-03 is missing from log entirely
+                # intent-003 is missing from log entirely
             ],
         )
 
@@ -966,39 +965,39 @@ def test_multiple_failures_combined():
 
 
 # ---------------------------------------------------------------------------
-# Test 13: LOB completeness from change_spec fallback
+# Test 13: LOB completeness from change_requests fallback
 # ---------------------------------------------------------------------------
 
-def test_lob_completeness_from_change_spec():
+def test_lob_completeness_from_change_requests():
     """When manifest does not have lobs/shared_modules, the validator falls
-    back to change_spec.yaml. Missing LOBs should still be detected."""
+    back to change_requests.yaml. Missing LOBs should still be detected."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
             # manifest does NOT have lobs or shared_modules
             manifest_extra={"province": "SK"},
-            change_spec={
+            change_requests={
                 "lobs": ["Home", "Condo", "Tenant"],
                 "shared_modules": ["mod_Common_SKHab20260101.vb"],
             },
             planned_ops=[
-                {"id": "op-001-01", "file": "Saskatchewan/Home/20260101/ResourceID.vb",
-                 "pattern": "factor_table_change", "function": "F1"},
-                {"id": "op-001-02", "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "F2"},
+                {"id": "intent-001", "file": "Saskatchewan/Home/20260101/ResourceID.vb",
+                 "strategy_hint": "factor-table", "function": "F1"},
+                {"id": "intent-002", "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "F2"},
             ],
             ops_log_operations=[
                 {
                     "file": "Saskatchewan/Home/20260101/ResourceID.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 10, "before": "old", "after": "new"}],
                 },
                 {
                     "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
-                    "operation": "op-001-02",
-                    "agent": "rate-modifier",
+                    "operation": "intent-002",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 20, "before": "old", "after": "new"}],
                 },
@@ -1031,14 +1030,14 @@ def test_single_lob_ticket_lob_check_skipped():
                 "province": "AB",
             },
             planned_ops=[
-                {"id": "op-001-01", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                 "pattern": "factor_table_change", "function": "F1"},
+                {"id": "intent-001", "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
+                 "strategy_hint": "factor-table", "function": "F1"},
             ],
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
@@ -1052,22 +1051,22 @@ def test_single_lob_ticket_lob_check_skipped():
 
 
 # ---------------------------------------------------------------------------
-# Test 15: No analysis/operations/ directory -- degrades gracefully
+# Test 15: No intent_graph.yaml -- reports missing file
 # ---------------------------------------------------------------------------
 
-def test_no_analysis_operations_dir():
-    """If analysis/operations/ does not exist, the validator should still
-    run the ops_log status checks (Check 2) but find 0 planned ops for
-    Check 1. A COMPLETED op in the log should not cause a crash."""
+def test_no_intent_graph_file():
+    """If intent_graph.yaml does not exist, the validator should report
+    an 'intent_graph_missing' finding. This is an error, not a graceful
+    degrade -- the intent graph is required."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            # planned_ops NOT provided -- no analysis/operations/ dir created
+            # planned_ops NOT provided -- no intent_graph.yaml created
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": [{"line": 100, "before": "old", "after": "new"}],
                 },
@@ -1075,10 +1074,11 @@ def test_no_analysis_operations_dir():
         )
 
         result = validate(manifest_path)
-        # No planned ops means Check 1 finds nothing missing,
-        # Check 2 finds no failures, so it should pass
-        assert result["passed"] is True
-        assert len(result["findings"]) == 0
+        # Missing intent_graph.yaml produces a finding
+        missing_findings = [f for f in result["findings"]
+                           if f["issue"] == "intent_graph_missing"]
+        assert len(missing_findings) == 1
+        assert "intent_graph.yaml" in missing_findings[0]["expected"]
 
 
 # ---------------------------------------------------------------------------
@@ -1116,9 +1116,9 @@ def test_territory_counting_multiline_case():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "pattern": "base_rate_increase",
+                    "strategy_hint": "array6-multiply",
                     "function": "GetBasePremium_Home",
                     "target_lines": [],
                 },
@@ -1126,14 +1126,14 @@ def test_territory_counting_multiline_case():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/mod_Common_ABHab20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "rate-modifier",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
                     "status": "COMPLETED",
                     "changes": changes,
                 },
             ],
             snapshot_files={
-                "mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
+                "Alberta__Code__mod_Common_ABHab20260101.vb.snapshot": snapshot_content,
             },
         )
 
@@ -1159,7 +1159,7 @@ def test_non_base_rate_pattern_skips_territory_check():
             tmpdir,
             planned_ops=[
                 {
-                    "id": "op-001-01",
+                    "id": "intent-001",
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
                     "pattern": "logic_change",
                     "function": "AddNewCheck",
@@ -1169,8 +1169,8 @@ def test_non_base_rate_pattern_skips_territory_check():
             ops_log_operations=[
                 {
                     "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                    "operation": "op-001-01",
-                    "agent": "logic-modifier",
+                    "operation": "intent-001",
+                    "change_type": "structure_insertion",
                     "status": "COMPLETED",
                     "changes": [{"line": 1, "before": "old", "after": "new"}],
                 },
@@ -1183,3 +1183,57 @@ def test_non_base_rate_pattern_skips_territory_check():
             if f["issue"] == "territory_count_mismatch"
         ]
         assert len(territory_findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Factor table wrong-line detection -- same count, different lines
+# ---------------------------------------------------------------------------
+
+def test_factor_table_wrong_lines_same_count():
+    """A factor_table_change op has 3 target_lines (50, 51, 52) but the
+    actual changes were applied to 3 DIFFERENT lines (50, 51, 99).
+    Counts match (3 == 3) but line 52 was never touched and line 99 was
+    edited instead. Should produce a 'factor_case_not_updated' finding
+    for the missing line 52."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = _build_workstream(
+            tmpdir,
+            planned_ops=[
+                {
+                    "id": "intent-001",
+                    "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                    "strategy_hint": "factor-table",
+                    "function": "GetDeductibleDiscount",
+                    "target_lines": [
+                        {"line": 50, "context": "Case 500"},
+                        {"line": 51, "context": "Case 1000"},
+                        {"line": 52, "context": "Case 2500"},
+                    ],
+                },
+            ],
+            ops_log_operations=[
+                {
+                    "file": "Alberta/Code/CalcOption_ABHome20260101.vb",
+                    "operation": "intent-001",
+                    "change_type": "value_editing",
+                    "status": "COMPLETED",
+                    "changes": [
+                        {"line": 50, "before": "old", "after": "new"},
+                        {"line": 51, "before": "old", "after": "new"},
+                        {"line": 99, "before": "wrong line", "after": "wrong edit"},
+                    ],
+                },
+            ],
+        )
+
+        result = validate(manifest_path)
+        assert result["passed"] is False
+
+        factor_findings = [
+            f for f in result["findings"]
+            if f["issue"] == "factor_case_not_updated"
+        ]
+        assert len(factor_findings) == 1
+        assert factor_findings[0]["operation"] == "intent-001"
+        assert "line 52" in factor_findings[0]["expected"]
+        assert "Case 2500" in factor_findings[0]["expected"]

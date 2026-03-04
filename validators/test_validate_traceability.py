@@ -2,10 +2,10 @@
 Integration tests for validate_traceability.py
 
 Uses tempfile and os.makedirs to create mock workstreams with controlled
-SRD files, change_spec.yaml, operations_log.yaml, and manifest.yaml.
+CR files, change_requests.yaml, operations_log.yaml, and manifest.yaml.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_traceability.py -v
 """
 
@@ -29,16 +29,16 @@ def _write_yaml(path, data):
         yaml.safe_dump(data, f, default_flow_style=False)
 
 
-def _build_workstream(tmpdir, *, srd_files=None, change_spec_srds=None,
+def _build_workstream(tmpdir, *, cr_files=None, change_requests_crs=None,
                       ops_log_operations=None, effective_date="20260101"):
     """Build a complete mock workstream in tmpdir.
 
     Args:
         tmpdir: Root temp directory (acts as carrier_root).
-        srd_files: List of dicts with keys: srd_id, description, type.
-            Each becomes a parsed/srds/srd-NNN.yaml file.
-        change_spec_srds: List of dicts for change_spec.yaml fallback.
-            Only used if srd_files is None.
+        cr_files: List of dicts with keys: cr_id, description, type.
+            Each becomes a parsed/requests/cr-NNN.yaml file.
+        change_requests_crs: List of dicts for change_requests.yaml fallback.
+            Only used if cr_files is None.
         ops_log_operations: List of operation dicts for operations_log.yaml.
         effective_date: The effective date string in the manifest.
 
@@ -50,22 +50,22 @@ def _build_workstream(tmpdir, *, srd_files=None, change_spec_srds=None,
     workstream_dir = os.path.join(workstreams_root, "changes", "test-ticket")
     execution_dir = os.path.join(workstream_dir, "execution")
 
-    # --- Write SRD files ---
-    if srd_files is not None:
-        srds_dir = os.path.join(workstream_dir, "parsed", "srds")
-        os.makedirs(srds_dir, exist_ok=True)
-        for srd in srd_files:
-            srd_id = srd["srd_id"]
-            srd_path = os.path.join(srds_dir, f"{srd_id}.yaml")
-            _write_yaml(srd_path, srd)
+    # --- Write CR files ---
+    if cr_files is not None:
+        requests_dir = os.path.join(workstream_dir, "parsed", "requests")
+        os.makedirs(requests_dir, exist_ok=True)
+        for cr in cr_files:
+            cr_id = cr["cr_id"]
+            cr_path = os.path.join(requests_dir, f"{cr_id}.yaml")
+            _write_yaml(cr_path, cr)
 
-    # --- Write change_spec.yaml (fallback) ---
-    if change_spec_srds is not None and srd_files is None:
+    # --- Write change_requests.yaml (fallback) ---
+    if change_requests_crs is not None and cr_files is None:
         parsed_dir = os.path.join(workstream_dir, "parsed")
         os.makedirs(parsed_dir, exist_ok=True)
         _write_yaml(
-            os.path.join(parsed_dir, "change_spec.yaml"),
-            {"srds": change_spec_srds},
+            os.path.join(parsed_dir, "change_requests.yaml"),
+            {"change_requests": change_requests_crs},
         )
 
     # --- Write operations_log.yaml ---
@@ -94,26 +94,26 @@ def _build_workstream(tmpdir, *, srd_files=None, change_spec_srds=None,
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Clean pass -- 3 SRDs, each with 1+ operations
+# Test 1: Clean pass -- 3 CRs, each with 1+ intents
 # ---------------------------------------------------------------------------
 
 def test_clean_pass():
-    """3 SRDs, each with at least one operation. Should pass cleanly."""
+    """3 CRs, each with at least one intent. Should pass cleanly."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase home base rates by 5%", "type": "rate-modifier"},
-                {"srd_id": "srd-002", "description": "Update deductible factors", "type": "rate-modifier"},
-                {"srd_id": "srd-003", "description": "Add new eligibility rule", "type": "logic-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase home base rates by 5%", "type": "value_editing"},
+                {"cr_id": "cr-002", "description": "Update deductible factors", "type": "value_editing"},
+                {"cr_id": "cr-003", "description": "Add new eligibility rule", "type": "structure_insertion"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "file": "AB/Code/CalcOption_ABHome20260101.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED"},
-                {"operation": "op-002-01", "file": "AB/Code/mod_Common_ABHab20260101.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED"},
-                {"operation": "op-003-01", "file": "AB/Code/CalcOption_ABHome20260101.vb",
-                 "agent": "logic-modifier", "status": "COMPLETED"},
+                {"operation": "intent-001", "file": "AB/Code/CalcOption_ABHome20260101.vb",
+                 "change_type": "value_editing", "status": "COMPLETED"},
+                {"operation": "intent-002", "file": "AB/Code/mod_Common_ABHab20260101.vb",
+                 "change_type": "value_editing", "status": "COMPLETED"},
+                {"operation": "intent-003", "file": "AB/Code/CalcOption_ABHome20260101.vb",
+                 "change_type": "structure_insertion", "status": "COMPLETED"},
             ],
         )
 
@@ -122,31 +122,31 @@ def test_clean_pass():
         assert result["severity"] == "WARNING"
         assert len(result["findings"]) == 0
         assert "Full traceability" in result.get("message", "")
-        assert "3/3 SRDs traced" in result.get("message", "")
-        assert "3 operations mapped" in result.get("message", "")
+        assert "3/3 CRs traced" in result.get("message", "")
+        assert "3 intents mapped" in result.get("message", "")
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Untraced SRD -- srd-003 has no operations
+# Test 2: Untraced CR -- cr-003 has no intents
 # ---------------------------------------------------------------------------
 
-def test_untraced_srd():
-    """srd-003 has no operations in the log. Should produce an
-    'untraced_srd' finding."""
+def test_untraced_cr():
+    """cr-003 has no intents in the log. Should produce an
+    'untraced_cr' finding."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase rates", "type": "rate-modifier"},
-                {"srd_id": "srd-002", "description": "Update factors", "type": "rate-modifier"},
-                {"srd_id": "srd-003", "description": "New eligibility rule", "type": "logic-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase rates", "type": "value_editing"},
+                {"cr_id": "cr-002", "description": "Update factors", "type": "value_editing"},
+                {"cr_id": "cr-003", "description": "New eligibility rule", "type": "structure_insertion"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "op-002-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-002", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file2.vb"},
-                # No op-003-XX operations!
+                # No intent-003 intents!
             ],
         )
 
@@ -156,30 +156,30 @@ def test_untraced_srd():
         assert len(result["findings"]) == 1
 
         finding = result["findings"][0]
-        assert finding["issue"] == "untraced_srd"
-        assert finding["srd"] == "srd-003"
+        assert finding["issue"] == "untraced_cr"
+        assert finding["cr"] == "cr-003"
         assert finding["description"] == "New eligibility rule"
-        assert "srd-003" in finding["message"]
-        assert "1 untraced SRD(s)" in result.get("message", "")
+        assert "cr-003" in finding["message"]
+        assert "1 untraced CR(s)" in result.get("message", "")
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Orphan change -- op-099-01 maps to srd-099 which doesn't exist
+# Test 3: Orphan change -- intent-099 maps to cr-099 which doesn't exist
 # ---------------------------------------------------------------------------
 
 def test_orphan_change():
-    """op-099-01 maps to srd-099 which is not in the SRD list. Should
+    """intent-099 maps to cr-099 which is not in the CR list. Should
     produce an 'orphan_change' finding."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase rates", "type": "rate-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase rates", "type": "value_editing"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "op-099-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-099", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/unknown.vb"},
             ],
         )
@@ -190,9 +190,9 @@ def test_orphan_change():
 
         finding = result["findings"][0]
         assert finding["issue"] == "orphan_change"
-        assert finding["operation"] == "op-099-01"
-        assert finding["mapped_srd"] == "srd-099"
-        assert "srd-099" in finding["message"]
+        assert finding["operation"] == "intent-099"
+        assert finding["mapped_cr"] == "cr-099"
+        assert "cr-099" in finding["message"]
         assert "1 orphan change(s)" in result.get("message", "")
 
 
@@ -202,17 +202,17 @@ def test_orphan_change():
 
 def test_rework_entry_skipped():
     """rework-001 operation should be skipped in orphan check. Only real
-    SRD operations are checked."""
+    CR intents are checked."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase rates", "type": "rate-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase rates", "type": "value_editing"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "rework-001", "status": "COMPLETED", "agent": "orchestrator",
+                {"operation": "rework-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
             ],
         )
@@ -224,20 +224,20 @@ def test_rework_entry_skipped():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: No SRDs -- empty srds/ directory
+# Test 5: No CRs -- empty requests/ directory
 # ---------------------------------------------------------------------------
 
-def test_no_srds():
-    """No SRD files and no change_spec.yaml. Should pass with
-    'No SRDs found to trace' message."""
+def test_no_crs():
+    """No CR files and no change_requests.yaml. Should pass with
+    'No CRs found to trace' message."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Build workstream with no SRD files and no change_spec
+        # Build workstream with no CR files and no change_requests
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=None,
-            change_spec_srds=None,
+            cr_files=None,
+            change_requests_crs=None,
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
             ],
         )
@@ -245,27 +245,27 @@ def test_no_srds():
         result = validate(manifest_path)
         assert result["passed"] is True
         assert len(result["findings"]) == 0
-        assert "No SRDs found to trace" in result.get("message", "")
+        assert "No CRs found to trace" in result.get("message", "")
 
 
 # ---------------------------------------------------------------------------
-# Test 6: SKIPPED operation counts -- still traces to its SRD
+# Test 6: SKIPPED intent counts -- still traces to its CR
 # ---------------------------------------------------------------------------
 
-def test_skipped_operation_counts():
-    """An operation with status SKIPPED still counts as a traced log entry.
-    The SRD it belongs to should be considered traced."""
+def test_skipped_intent_counts():
+    """An intent with status SKIPPED still counts as a traced log entry.
+    The CR it belongs to should be considered traced."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase rates", "type": "rate-modifier"},
-                {"srd_id": "srd-002", "description": "Update factors", "type": "rate-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase rates", "type": "value_editing"},
+                {"cr_id": "cr-002", "description": "Update factors", "type": "value_editing"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "op-002-01", "status": "SKIPPED", "agent": "rate-modifier",
+                {"operation": "intent-002", "status": "SKIPPED", "change_type": "value_editing",
                  "file": "AB/Code/file2.vb"},
             ],
         )
@@ -273,26 +273,26 @@ def test_skipped_operation_counts():
         result = validate(manifest_path)
         assert result["passed"] is True
         assert len(result["findings"]) == 0
-        assert "2/2 SRDs traced" in result.get("message", "")
+        assert "2/2 CRs traced" in result.get("message", "")
 
 
 # ---------------------------------------------------------------------------
-# Test 7: Multiple ops per SRD -- srd-001 has op-001-01 and op-001-02
+# Test 7: Multiple operations for same CR -- cr-001 has intent-001 twice
 # ---------------------------------------------------------------------------
 
-def test_multiple_ops_per_srd():
-    """srd-001 has two operations. Should be fully traced with one SRD
-    mapping to multiple ops."""
+def test_multiple_ops_per_cr():
+    """cr-001 has two operation entries (same intent, different files).
+    Should be fully traced."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Multi-file rate change", "type": "rate-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Multi-file rate change", "type": "value_editing"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "op-001-02", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file2.vb"},
             ],
         )
@@ -300,31 +300,31 @@ def test_multiple_ops_per_srd():
         result = validate(manifest_path)
         assert result["passed"] is True
         assert len(result["findings"]) == 0
-        assert "1/1 SRDs traced" in result.get("message", "")
-        assert "2 operations mapped" in result.get("message", "")
+        assert "1/1 CRs traced" in result.get("message", "")
+        assert "1 intents mapped" in result.get("message", "")
 
 
 # ---------------------------------------------------------------------------
-# Test 8: Mixed issues -- 1 untraced SRD + 1 orphan change
+# Test 8: Mixed issues -- 1 untraced CR + 1 orphan change
 # ---------------------------------------------------------------------------
 
 def test_mixed_issues():
-    """One SRD has no operations, and one operation maps to a nonexistent
-    SRD. Should produce 2 findings."""
+    """One CR has no intents, and one intent maps to a nonexistent
+    CR. Should produce 2 findings."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Traced change", "type": "rate-modifier"},
-                {"srd_id": "srd-002", "description": "Untraced change", "type": "logic-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Traced change", "type": "value_editing"},
+                {"cr_id": "cr-002", "description": "Untraced change", "type": "structure_insertion"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                # No op-002-XX -- srd-002 is untraced
-                {"operation": "op-050-01", "status": "COMPLETED", "agent": "rate-modifier",
+                # No intent-002 -- cr-002 is untraced
+                {"operation": "intent-050", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/unknown.vb"},
-                # op-050-01 maps to srd-050 which doesn't exist -- orphan
+                # intent-050 maps to cr-050 which doesn't exist -- orphan
             ],
         )
 
@@ -333,36 +333,36 @@ def test_mixed_issues():
         assert len(result["findings"]) == 2
 
         issues = {f["issue"] for f in result["findings"]}
-        assert "untraced_srd" in issues
+        assert "untraced_cr" in issues
         assert "orphan_change" in issues
 
         # Verify message mentions both issue types
         msg = result.get("message", "")
-        assert "1 untraced SRD(s)" in msg
+        assert "1 untraced CR(s)" in msg
         assert "1 orphan change(s)" in msg
-        assert "1/2 SRDs traced" in msg
+        assert "1/2 CRs traced" in msg
 
 
 # ---------------------------------------------------------------------------
-# Test 9: DAT-file SRD untraced -- SRD about DAT files has no ops
+# Test 9: DAT-file CR untraced -- CR about DAT files has no intents
 # ---------------------------------------------------------------------------
 
-def test_dat_file_srd_untraced():
-    """A SRD describing a DAT file change (outside plugin scope) has no
-    operations. Should still be flagged as untraced -- the developer
+def test_dat_file_cr_untraced():
+    """A CR describing a DAT file change (outside plugin scope) has no
+    intents. Should still be flagged as untraced -- the developer
     decides at Gate 2 if this is acceptable."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase auto rates", "type": "rate-modifier"},
-                {"srd_id": "srd-002", "description": "Update hab dwelling base rates (DAT file)",
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase auto rates", "type": "value_editing"},
+                {"cr_id": "cr-002", "description": "Update hab dwelling base rates (DAT file)",
                  "type": "dat-file"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                # No op-002-XX -- DAT-file SRD has no plugin operations
+                # No intent-002 -- DAT-file CR has no plugin intents
             ],
         )
 
@@ -371,28 +371,28 @@ def test_dat_file_srd_untraced():
         assert len(result["findings"]) == 1
 
         finding = result["findings"][0]
-        assert finding["issue"] == "untraced_srd"
-        assert finding["srd"] == "srd-002"
+        assert finding["issue"] == "untraced_cr"
+        assert finding["cr"] == "cr-002"
         assert "DAT" in finding["description"]
 
 
 # ---------------------------------------------------------------------------
-# Test 10: Non-standard op ID -- "custom-fix-01" flagged as orphan
+# Test 10: Non-standard intent ID -- "custom-fix-01" flagged as orphan
 # ---------------------------------------------------------------------------
 
-def test_non_standard_op_id():
-    """An operation with a non-standard ID (not matching op-NNN-NN) should
+def test_non_standard_intent_id():
+    """An intent with a non-standard ID (not matching intent-NNN) should
     be flagged as an orphan change."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
-            srd_files=[
-                {"srd_id": "srd-001", "description": "Increase rates", "type": "rate-modifier"},
+            cr_files=[
+                {"cr_id": "cr-001", "description": "Increase rates", "type": "value_editing"},
             ],
             ops_log_operations=[
-                {"operation": "op-001-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "intent-001", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/file1.vb"},
-                {"operation": "custom-fix-01", "status": "COMPLETED", "agent": "rate-modifier",
+                {"operation": "custom-fix-01", "status": "COMPLETED", "change_type": "value_editing",
                  "file": "AB/Code/fixup.vb"},
             ],
         )
@@ -404,5 +404,5 @@ def test_non_standard_op_id():
         finding = result["findings"][0]
         assert finding["issue"] == "orphan_change"
         assert finding["operation"] == "custom-fix-01"
-        assert finding["mapped_srd"] is None
+        assert finding["mapped_cr"] is None
         assert "naming convention" in finding["message"]

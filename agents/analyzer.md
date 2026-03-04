@@ -2,11 +2,12 @@
 
 ## Purpose
 
-Map each operation from the Decomposer to exact file paths, function boundaries, and
+Map each change request from Intake to exact file paths, function boundaries, and
 target line numbers. Produce the blast radius report. Detect hidden blast radius from
 shared modules affecting LOBs outside the developer's target list. Determine which
 Code/ files need new dated copies. Resolve rounding mode from "auto" to "banker" or
-"none" by inspecting actual Array6 values.
+"none" by inspecting actual Array6 values. Produce per-CR analysis files consumed by
+the Decomposer and Planner (which now run after the Analyzer).
 
 **Core philosophy: SHOW, DON'T GUESS.** When multiple candidates are found (e.g.,
 4 deductible Select Case blocks, two functions matching `GetBasePrem*`), show ALL
@@ -16,188 +17,183 @@ actual VB.NET source code -- it is the detective of the pipeline.
 ## Pipeline Position
 
 ```
-[INPUT] --> Intake --> Discovery --> Decomposer --> ANALYZER --> Planner --> [GATE 1] --> Modifiers --> Reviewer --> [GATE 2]
-                                                    ^^^^^^^^
+[INPUT] --> Intake --> Discovery --> ANALYZER --> Decomposer --> Planner --> [GATE 1] --> Change Engine --> Reviewer --> [GATE 2]
+                                    ^^^^^^^^
 ```
 
-- **Upstream:** Decomposer agent (provides `analysis/dependency_graph.yaml` + `analysis/operations/op-{SRD}-{NN}.yaml`),
+- **Upstream:** Intake agent (provides `parsed/change_requests.yaml` + `parsed/requests/cr-NNN.yaml`),
   Discovery agent (provides `analysis/code_discovery.yaml` — optional hints for function search optimization)
-- **Downstream:** Planner agent (consumes updated `analysis/operations/op-{SRD}-{NN}.yaml` with line numbers + `analysis/blast_radius.md` + `analysis/files_to_copy.yaml`)
+- **Downstream:** Decomposer agent (consumes `analysis/analyzer_output/cr-NNN-analysis.yaml` files to break work into intents),
+  Planner agent (consumes `analysis/blast_radius.md` + `analysis/files_to_copy.yaml`)
 
 ## Input Schema
 
 ```yaml
-# Reads: analysis/dependency_graph.yaml (from Decomposer)
-# Reads: analysis/operations/op-{SRD}-{NN}.yaml (from Decomposer -- without line numbers)
+# Reads: parsed/change_requests.yaml (from Intake — list of change requests)
+# Reads: parsed/requests/cr-NNN.yaml (from Intake — individual CR details)
+# Reads: analysis/code_discovery.yaml (from Discovery — function/file mapping hints)
 # Reads: target folder .vbproj files (XML parsing, not regex)
 # Reads: actual Code/ source files referenced by .vbproj
 # Reads: config.yaml (for shardclass_folder name, cross_province_shared_files)
-# Reads: parsed/change_spec.yaml (for target_folders, shared_modules)
+# Reads: parsed/change_requests.yaml (for target_folders, shared_modules)
 ```
 
-### Decomposer Operation Fields Used by Analyzer
+### Change Request Fields Used by Analyzer
 
 ```yaml
-# File: analysis/operations/op-002-01.yaml (as received from Decomposer)
-id: "op-002-01"
-srd: "srd-002"
+# File: parsed/requests/cr-002.yaml (as received from Intake)
+id: "cr-002"
 title: "Change $5000 deductible factor from -0.20 to -0.22"
 description: |
   In function SetDisSur_Deductible, find the Case 5000 block and change
   the deductible discount value from -0.20 to -0.22. Note: this function
   has nested If/Else blocks for farm vs non-farm within each Case.
   The Analyzer must show ALL matching values to the developer.
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"       # TARGET filename (may not exist yet)
-file_type: "shared_module"                                    # shared_module|lob_specific|cross_lob|local
-function: "SetDisSur_Deductible"                             # Function hint (may be null)
-agent: "rate-modifier"                                       # rate-modifier|logic-modifier
-depends_on: []
-blocked_by: []
-pattern: "factor_table_change"                               # One of 7 pattern types + UNKNOWN
-parameters:                                                  # Pattern-specific params
+extracted:
   case_value: 5000
   old_value: -0.20
   new_value: -0.22
+  target_file_hint: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"   # TARGET filename (may not exist yet)
+  target_function_hint: "SetDisSur_Deductible"                         # Function hint (may be null)
+domain_hints:
+  rounding_hint: "auto"                                         # Rounding hint from Intake
 ```
 
 **CRITICAL FIELD SEMANTICS:**
 
-1. **`file` uses the NEW target date.** The file `mod_Common_SKHab20260101.vb` may not exist
+1. **`extracted.target_file_hint` uses the NEW target date.** The file `mod_Common_SKHab20260101.vb` may not exist
    yet on disk. The Analyzer must find the CURRENT source file (the one actually referenced
    by the .vbproj, e.g., `mod_Common_SKHab20250901.vb`) and read THAT to find line numbers.
-   The `file` field says what the file will be named AFTER copying.
+   The `target_file_hint` field says what the file will be named AFTER copying.
 
-2. **`function` is a HINT, not verified.** The Decomposer infers function names from SRD
-   context and naming patterns without reading actual code. The Analyzer MUST verify the
+2. **`extracted.target_function_hint` is a HINT, not verified.** Intake extracts function names from the ticket
+   text and naming patterns without reading actual code. The Analyzer MUST verify the
    function actually exists by reading the source file. If the function is not found, search
-   for similar names and present candidates.
+   for similar names and present candidates. Discovery hints (from code_discovery.yaml) take
+   precedence over Intake hints when both exist.
 
-3. **`rounding: "auto"` must be resolved** by the Analyzer to `banker` (integer Array6
+3. **`domain_hints.rounding_hint: "auto"` must be resolved** by the Analyzer to `banker` (integer Array6
    values) or `none` (decimal values) or `mixed` (some lines integer, some decimal). The
    Analyzer reads the actual code values to decide.
 
 ## Output Schema
 
-### Updated Operation Files (analysis/operations/op-{SRD}-{NN}.yaml)
+### Per-CR Analysis Files (analysis/analyzer_output/cr-NNN-analysis.yaml)
 
-The Analyzer adds fields to each operation file. All Decomposer fields are preserved
-unchanged; the Analyzer appends its findings below a `# -- Added by Analyzer --` comment.
+The Analyzer produces one analysis file per change request. These are self-contained
+files consumed by the Decomposer (to break work into intents) and the Planner.
 
 **`rounding_resolved` contract:** The `rounding_resolved` field replaces
-`parameters.rounding` for downstream consumers. The Rate Modifier should use
+`rounding` hints for downstream consumers. The Change Engine should use
 `target_lines[].rounding` for per-line decisions, falling back to `rounding_resolved`
-for operation-level logic.
+for function-level logic.
 
 **`rounding: null` semantics:** `rounding: null` means the value is explicit (not
-derived from multiplication) -- Rate Modifier should NOT apply rounding.
+derived from multiplication) -- Change Engine should NOT apply rounding.
 
 **Line numbers are REFERENCE ONLY:** The Analyzer's line numbers are for ordering and
-developer review. The Rate Modifier and Logic Modifier MUST re-locate targets by
+developer review. The Change Engine MUST re-locate targets by
 function name + content match at execution time. Line numbers are starting hints for
 efficient search, but `target_lines[].content` is the authoritative match key.
 
-#### For rate-modifier operations (base_rate_increase, factor_table_change, included_limits):
+#### For value-change CRs (deductible factors, rate replacements):
 
 ```yaml
-id: "op-002-01"
-srd: "srd-002"
+# File: analysis/analyzer_output/cr-002-analysis.yaml
+cr: "cr-002"
 title: "Change $5000 deductible factor from -0.20 to -0.22"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "SetDisSur_Deductible"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "factor_table_change"
-parameters:
-  case_value: 5000
-  old_value: -0.20
-  new_value: -0.22
-
-# -- Added by Analyzer --
-source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"  # Current file from .vbproj
-target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"  # New copy to be created
-needs_copy: true                                               # true if source date != target date
-file_hash: "sha256:a1b2c3d4..."                               # Hash of source_file for TOCTOU
-function_line_start: 2108                                      # First line of function declaration
-function_line_end: 2227                                        # Last line (End Sub / End Function)
-target_select_depth: 1                                         # Select Case nesting depth (1=outer, 2=nested)
-target_lines:
-  - line: 2202
-    content: "                    dblDedDiscount = -0.2"
-    context: "Case 5000 > If blnFarmLocation Then (farm path)"
-    rounding: null                                             # Not applicable for factor_table_change
-    context_above:                                             # For Edit tool disambiguation
-      - {line: 2201, content: "                If blnFarmLocation Then"}
-    context_below:
-      - {line: 2203, content: "                    dblMaxDedDiscount = -100"}
-  - line: 2205
-    content: "                    dblDedDiscount = -0.25"
-    context: "Case 5000 > Else (non-farm path)"
-    rounding: null
-    context_above:
-      - {line: 2204, content: "                Else"}
-    context_below:
-      - {line: 2206, content: "                    dblMaxDedDiscount = -150"}
-candidates_shown: 2                                            # How many target_lines shown
-developer_confirmed: true                                      # Developer confirmed which to modify
-analysis_notes: |
-  Case 5000 has two code paths:
-    Farm (blnFarmLocation=True): dblDedDiscount = -0.2 (line 2202)
-    Non-Farm (blnFarmLocation=False): dblDedDiscount = -0.25 (line 2205)
-  Developer chose to modify the farm path only (line 2202).
+analyzed_at: "2026-03-03T10:30:00Z"
+functions_analyzed:
+  - function: "SetDisSur_Deductible"
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"  # Current file from .vbproj
+    needs_copy: true                                               # true if source date != target date
+    file_hash: "sha256:a1b2c3d4..."                               # Hash of source_file for TOCTOU
+    function_line_start: 2108                                      # First line of function declaration
+    function_line_end: 2227                                        # Last line (End Sub / End Function)
+    returns: "Double"
+    fub:
+      branch_tree: [...]                                           # See Step 5.10 for schema
+      hazards: [...]
+      adjacent_context: [...]
+      nearby_functions: [...]
+    target_select_depth: 1                                         # Select Case nesting depth (1=outer, 2=nested)
+    target_lines:
+      - line: 2202
+        content: "                    dblDedDiscount = -0.2"
+        context: "Case 5000 > If blnFarmLocation Then (farm path)"
+        rounding: null                                             # Not applicable for factor changes
+        context_above:                                             # For Edit tool disambiguation
+          - {line: 2201, content: "                If blnFarmLocation Then"}
+        context_below:
+          - {line: 2203, content: "                    dblMaxDedDiscount = -100"}
+      - line: 2205
+        content: "                    dblDedDiscount = -0.25"
+        context: "Case 5000 > Else (non-farm path)"
+        rounding: null
+        context_above:
+          - {line: 2204, content: "                Else"}
+        context_below:
+          - {line: 2206, content: "                    dblMaxDedDiscount = -150"}
+    candidates_shown: 2                                            # How many target_lines shown
+    developer_confirmed: true                                      # Developer confirmed which to modify
+    analysis_notes: |
+      Case 5000 has two code paths:
+        Farm (blnFarmLocation=True): dblDedDiscount = -0.2 (line 2202)
+        Non-Farm (blnFarmLocation=False): dblDedDiscount = -0.25 (line 2205)
+      Developer chose to modify the farm path only (line 2202).
+    related_functions:
+      - name: "SetDisSur_Claims"
+        relationship: "same_category"
+        note: "Similar discount function — may need same change"
 ```
 
-#### For base_rate_increase with Array6 values:
+#### For Array6 rate increase CRs:
 
 ```yaml
-id: "op-004-01"
-srd: "srd-004"
+# File: analysis/analyzer_output/cr-004-analysis.yaml
+cr: "cr-004"
 title: "Multiply liability bundle premiums by 1.03"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "GetLiabilityBundlePremiums"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "base_rate_increase"
-parameters:
-  factor: 1.03
-  scope: "all_territories"
-  rounding: "auto"                                             # Decomposer passed through
-
-# -- Added by Analyzer --
-source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
-target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-needs_copy: true
-file_hash: "sha256:a1b2c3d4..."
-function_line_start: 4012
-function_line_end: 4104
-rounding_resolved: "mixed"                                     # Resolved from "auto"
-rounding_detail: |
-  Lines with integer Array6 values: banker rounding
-  Lines with decimal Array6 values: no rounding
-  Mixed rounding within this function -- per-line detail in target_lines.
-has_expressions: false                                       # true if ANY target_line has arithmetic in Array6 args
-target_lines:
-  - line: 4058
-    content: "                        liabilityPremiumArray = Array6(0, 78, 161, 189, 213, 291)"
-    context: "Farm > PRIMARYITEM > Enhanced Comp"
-    rounding: "banker"                                         # All integers
-    value_count: 6
-    context_above:                                             # For Edit tool disambiguation
-      - {line: 4057, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ENHANCEDCOMP"}
-    context_below:
-      - {line: 4059, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ESSENTIALS"}
-  - line: 4060
-    content: "                        liabilityPremiumArray = Array6(78, 106, 161, 189, 216, 291)"
-    context: "Farm > PRIMARYITEM > Essentials Comp/Broad"
-    rounding: "banker"
-    value_count: 6
-    context_above:
-      - {line: 4059, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ESSENTIALS"}
-    context_below:
-      - {line: 4061, content: "                    Case Else"}
+analyzed_at: "2026-03-03T10:30:00Z"
+functions_analyzed:
+  - function: "GetLiabilityBundlePremiums"
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 4012
+    function_line_end: 4104
+    returns: "Variant"
+    fub:
+      branch_tree: [...]
+      hazards: [...]
+      adjacent_context: [...]
+      nearby_functions: [...]
+    rounding_resolved: "mixed"                                     # Resolved from "auto"
+    rounding_detail: |
+      Lines with integer Array6 values: banker rounding
+      Lines with decimal Array6 values: no rounding
+      Mixed rounding within this function -- per-line detail in target_lines.
+    has_expressions: false                                       # true if ANY target_line has arithmetic in Array6 args
+    target_lines:
+      - line: 4058
+        content: "                        liabilityPremiumArray = Array6(0, 78, 161, 189, 213, 291)"
+        context: "Farm > PRIMARYITEM > Enhanced Comp"
+        rounding: "banker"                                         # All integers
+        value_count: 6
+        context_above:                                             # For Edit tool disambiguation
+          - {line: 4057, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ENHANCEDCOMP"}
+        context_below:
+          - {line: 4059, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ESSENTIALS"}
+      - line: 4060
+        content: "                        liabilityPremiumArray = Array6(78, 106, 161, 189, 216, 291)"
+        context: "Farm > PRIMARYITEM > Essentials Comp/Broad"
+        rounding: "banker"
+        value_count: 6
+        context_above:
+          - {line: 4059, content: "                    Case Cssi.ResourcesConstants.CoverageItemCodes.COVITEM_ESSENTIALS"}
+        context_below:
+          - {line: 4061, content: "                    Case Else"}
   - line: 4062
     content: "                        liabilityPremiumArray = Array6(0, 0, 0, 0, 324.29, 462.32)"
     context: "Farm > PRIMARYITEM > ELITECOMP"
@@ -216,48 +212,41 @@ candidates_shown: 1                                            # 1 function matc
 developer_confirmed: true
 ```
 
-#### For logic-modifier operations (new_coverage_type, new_endorsement_flat, etc.):
+#### For insertion/logic CRs (new constants, new coverage types, etc.):
 
 ```yaml
-id: "op-005-01"
-srd: "srd-005"
+# File: analysis/analyzer_output/cr-005-analysis.yaml
+cr: "cr-005"
 title: "Add ELITECOMP constant to mod_Common"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: null                                                 # Module-level, not inside a function
-location: "module-level constants"
-agent: "logic-modifier"
-depends_on: []
-blocked_by: []
-pattern: "new_coverage_type"
-parameters:
-  constant_name: "ELITECOMP"
-  coverage_type_name: "Elite Comp."
+analyzed_at: "2026-03-03T10:30:00Z"
+functions_analyzed:
+  - function: null                                                 # Module-level, not inside a function
+    location: "module-level constants"
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    insertion_point:
+      line: 23                                                     # Line after which to insert
+      position: "after"                                            # Insert after this line
+      context: "After: Public Const STANDARD As String = \"Standard\""
+      section: "module-level constants (lines 1-50)"
+    existing_constants:                                            # For duplicate detection
+      - name: "PREFERRED"
+        line: 21
+        value: "\"Preferred\""
+      - name: "STANDARD"
+        line: 22
+        value: "\"Standard\""
+    duplicate_check: "ELITECOMP not found -- safe to add"
+    needs_new_file: false                                          # true if Change Engine must CREATE this file
+    template_reference: null                                       # Path to similar file for structural reference (if needs_new_file)
+    candidates_shown: 1
+    developer_confirmed: true
+    analysis_notes: "Module-level constant insertion after existing STANDARD constant."
+    related_functions: []
 
-# -- Added by Analyzer --
-source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
-target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-needs_copy: true
-file_hash: "sha256:a1b2c3d4..."
-insertion_point:
-  line: 23                                                     # Line after which to insert
-  position: "after"                                            # Insert after this line
-  context: "After: Public Const STANDARD As String = \"Standard\""
-  section: "module-level constants (lines 1-50)"
-existing_constants:                                            # For duplicate detection
-  - name: "PREFERRED"
-    line: 21
-    value: "\"Preferred\""
-  - name: "STANDARD"
-    line: 22
-    value: "\"Standard\""
-duplicate_check: "ELITECOMP not found -- safe to add"
-needs_new_file: false                                          # true if Logic Modifier must CREATE this file
-template_reference: null                                       # Path to similar file for structural reference (if needs_new_file)
-candidates_shown: 1
-developer_confirmed: true
-
-# -- Added by Analyzer Step 5.9 (only for qualifying logic-modifier operations) --
+# -- Added by Analyzer Step 5.9 (only for qualifying CRs that need code pattern discovery) --
 # code_patterns:                                               # Present when Step 5.9 trigger matched
 #   peer_functions: [...]                                      # Active/dead peer functions with snippets
 #   canonical_access: [...]                                    # Recommended access patterns with confidence
@@ -282,7 +271,7 @@ files:
     source_hash: "sha256:a1b2c3d4..."
     target_exists: false                                       # Target file not yet on disk
     shared_by: ["Home", "Condo", "Tenant", "FEC", "Farm", "Seasonal"]
-    operations_in_file: ["op-002-01", "op-003-01", "op-004-01", "op-004-02"]
+    change_requests_in_file: ["cr-002", "cr-003", "cr-004"]
     vbproj_updates:
     # Example from Portage Mutual -- your carrier's prefix and province codes will differ
       - vbproj: "Saskatchewan/Home/20260101/Cssi.IntelliQuote.PORTSKHOME20260101.vbproj"
@@ -298,7 +287,7 @@ files:
     source_hash: "sha256:e5f6g7h8..."
     target_exists: false
     shared_by: []                                              # Only Home compiles this
-    operations_in_file: ["op-006-01"]
+    change_requests_in_file: ["cr-006"]
     vbproj_updates:
       - vbproj: "Saskatchewan/Home/20260101/Cssi.IntelliQuote.PORTSKHOME20260101.vbproj"
         old_include: "..\\Code\\CalcOption_SKHOME20250901.vb"
@@ -320,33 +309,33 @@ Risk: MEDIUM
 
   Saskatchewan/Code/mod_Common_SKHab20250901.vb -> mod_Common_SKHab20260101.vb
     Shared by: Home, Condo, Tenant, FEC, Farm, Seasonal (6 LOBs)
-    Operations: op-002-01, op-003-01, op-004-01, op-004-02
+    Change requests: cr-002, cr-003, cr-004
     .vbproj updates: 6 files
 
   Saskatchewan/Code/CalcOption_SKHOME20250901.vb -> CalcOption_SKHOME20260101.vb
     Used by: Home only
-    Operations: op-006-01
+    Change requests: cr-006
     .vbproj updates: 1 file
 
 ## SHARED MODULE CHANGES (affects all 6 hab LOBs)
 
   Saskatchewan/Code/mod_Common_SKHab20260101.vb (4,587 lines)
-    op-002-01: SetDisSur_Deductible() lines 2108-2227
-               Case 5000: change -0.20 to -0.22 (2 code paths: farm/non-farm)
-    op-003-01: SetDisSur_Deductible() lines 2108-2227
-               Case 2500: change -0.15 to -0.17 (3 code paths)
-    op-004-01: GetLiabilityBundlePremiums() lines 4012-4104
-               Multiply 48 Array6 values by 1.03 (mixed rounding: 42 banker, 6 none)
-    op-004-02: GetLiabilityExtensionPremiums() lines 4106-4156
-               Multiply 12 Array6 values by 1.03 (all integers, banker rounding)
+    cr-002: SetDisSur_Deductible() lines 2108-2227
+            Case 5000: change -0.20 to -0.22 (2 code paths: farm/non-farm)
+    cr-003: SetDisSur_Deductible() lines 2108-2227
+            Case 2500: change -0.15 to -0.17 (3 code paths)
+    cr-004: GetLiabilityBundlePremiums() lines 4012-4104
+            Multiply 48 Array6 values by 1.03 (mixed rounding: 42 banker, 6 none)
+            GetLiabilityExtensionPremiums() lines 4106-4156
+            Multiply 12 Array6 values by 1.03 (all integers, banker rounding)
 
 ## PER-LOB CHANGES
 
   Saskatchewan/Home/20260101/ResourceID.vb
-    op-005-01: lines 145-146 -- Add DAT_Home_EliteComp_Preferred/Standard
+    cr-005: lines 145-146 -- Add DAT_Home_EliteComp_Preferred/Standard
 
   Saskatchewan/Condo/20260101/ResourceID.vb
-    op-005-02: lines 145-146 -- Add DAT_Condo_EliteComp_Preferred/Standard
+    cr-005: lines 145-146 -- Add DAT_Condo_EliteComp_Preferred/Standard
 
   ... (one per LOB)
 
@@ -372,7 +361,7 @@ Risk: MEDIUM
 ## RISK ASSESSMENT
 
   Level: MEDIUM
-  Reason: 4 operations in a shared module (6 LOBs) + 2 per-LOB operations.
+  Reason: 4 CRs in a shared module (6 LOBs) + 2 per-LOB CRs.
           Mixed rounding in GetLiabilityBundlePremiums (requires per-line handling).
           No cross-province files affected. All referencing projects in target list.
 ```
@@ -381,7 +370,7 @@ Risk: MEDIUM
 
 ## EXECUTION STEPS
 
-These are the step-by-step instructions for analyzing operations and producing the
+These are the step-by-step instructions for analyzing change requests and producing the
 blast radius report. Follow them in order. Each step has clear inputs, actions, and
 outputs.
 
@@ -390,44 +379,43 @@ outputs.
 Before starting, confirm the following exist and are readable:
 
 1. The workflow directory at `.iq-workstreams/changes/{workstream-name}/`
-2. The `analysis/dependency_graph.yaml` inside that directory (from Decomposer)
-3. The `analysis/operations/` directory with individual op files (from Decomposer)
-4. The `parsed/change_spec.yaml` (for target_folders, shared_modules)
-5. The `.iq-workstreams/config.yaml` (for shardclass_folder, cross_province_shared_files)
-6. The target folder .vbproj files listed in change_spec.yaml
+2. The `parsed/change_requests.yaml` (from Intake — list of change requests with metadata)
+3. The `parsed/requests/` directory with individual CR files (from Intake)
+4. The `.iq-workstreams/config.yaml` (for shardclass_folder, cross_province_shared_files)
+5. The target folder .vbproj files listed in change_requests.yaml
+6. Optionally: `analysis/code_discovery.yaml` (from Discovery — function/file mapping hints)
 
-If any of these are missing, STOP and report:
+If required files are missing, STOP and report:
 ```
 [Analyzer] Cannot proceed -- missing required file: {path}
-            Was the Decomposer completed? Check manifest.yaml for decomposer.status = "completed".
+            Was Intake completed? Check manifest.yaml for intake.status = "completed".
 ```
 
 ### Step 1: Load Context
 
-**Action:** Read all Decomposer output and build the working context.
+**Action:** Read Intake output, Discovery hints, and build the working context.
 
-1.1. Read `analysis/dependency_graph.yaml`. Extract:
-   - `execution_order` (list of operation IDs -- the Analyzer processes in this order)
-   - `shared_operations` and `lob_operations` (for quick lookup of operation metadata)
-   - `out_of_scope` (skip these SRDs entirely)
-
-1.2. Read `parsed/change_spec.yaml`. Extract:
+1.1. Read `parsed/change_requests.yaml`. Extract:
    - `province` (e.g., "SK")
    - `province_name` (e.g., "Saskatchewan")
    - `effective_date` (e.g., "20260101")
    - `target_folders[]` (path + vbproj for each LOB)
    - `shared_modules[]` (files shared across LOBs)
+   - `change_requests[]` (list of CR IDs)
 
-1.3. Read `.iq-workstreams/config.yaml`. Extract:
+1.2. Read `.iq-workstreams/config.yaml`. Extract:
    - `provinces.{province_code}.shardclass_folder` (e.g., "SHARDCLASS" or "SharedClass")
    - `cross_province_shared_files` (list of files that must NEVER be auto-modified)
 
-1.4. Read each operation file from `analysis/operations/op-*.yaml`. Store in memory
-indexed by operation ID. Verify each file has the required Decomposer fields:
-`id`, `srd`, `file`, `pattern`, `agent`.
+1.3. Read each change request file from `parsed/requests/cr-*.yaml`. Store in memory
+indexed by CR ID. Verify each file has the required Intake fields:
+`id`, `title`, `description`.
 
-1.5. If any operation has `needs_review: true` and `file: null`, set it aside for
+1.4. If any CR has `ambiguity_flag: true` and no `extracted.target_file_hint`, set it aside for
 developer guidance in Step 10.
+
+1.5. Read `analysis/code_discovery.yaml` (from Discovery) if present. Extract function
+hints per CR — see Step 4.0 for details.
 
 ### Step 2: Parse .vbproj Files and Build the File Reference Map
 
@@ -505,7 +493,7 @@ RULE 1: Cross-Province Shared (NEVER MODIFY)
   Pattern: Include contains "..\..\..\Code\" (3+ levels up)
   Examples: Code/PORTCommonHeat.vb, Code/mod_VICCAuto.vb
   Result: classification = "cross_province_shared"
-  Action: NEVER generate line numbers for these. If an operation targets one, flag.
+  Action: NEVER generate line numbers for these. If a CR targets one, flag.
 
 RULE 2: Shared Engine File (NEVER MODIFY)
   Match: resolved path contains "Shared Files for Nodes/"
@@ -523,13 +511,13 @@ RULE 4: SHARDCLASS File
   Match: resolved path contains "/SHARDCLASS/" or "/SharedClass/"
   Pattern: Include contains "..\..\SHARDCLASS\" or "..\..\SharedClass\"
   Result: classification = "shardclass"
-  Action: Include in blast radius. Flag if operations would modify.
+  Action: Include in blast radius. Flag if CRs would modify.
 
 RULE 5: Province Code/ File
   Match: resolved path is in "{Province}/Code/"
   Pattern: Include contains "..\..\Code\" (2 levels up from version folder)
   Result: classification = depends on further analysis (shared_module, lob_specific, cross_lob)
-  Action: This is where most operations target. See Step 2.5 for sub-classification.
+  Action: This is where most CRs target. See Step 2.5 for sub-classification.
 
 RULE 6: Local File
   Match: resolved path is inside the version folder itself
@@ -554,7 +542,7 @@ for entry in all_compile_includes:
 
 Apply sub-classification:
 ```
-- File in shared_modules list from change_spec.yaml --> "shared_module"
+- File in shared_modules list from change_requests.yaml --> "shared_module"
 - File compiled by 2+ LOBs AND matches mod_Common_*Hab* or modFloaters* --> "shared_module"
 - File compiled by 2+ LOBs AND matches Option_* or Liab_* --> "cross_lob"
 - File compiled by 1 LOB only --> "lob_specific"
@@ -595,13 +583,13 @@ def extract_date(filename):
     return match.group(1) if match else None
 ```
 
-### Step 3: Resolve Source Files for Each Operation
+### Step 3: Resolve Source Files for Each Change Request
 
-**Action:** For each operation, find the ACTUAL source file currently referenced by the
-.vbproj. The Decomposer's `file` field uses the target date, but the real file on disk
+**Action:** For each change request, find the ACTUAL source file currently referenced by the
+.vbproj. Intake's `extracted.target_file_hint` field uses the target date, but the real file on disk
 may have an older date.
 
-3.1. For each operation, extract the base name pattern from the `file` field:
+3.1. For each change request, extract the base name pattern from the `target_file_hint` field:
 
 ```python
 def get_file_pattern(target_filename, effective_date):
@@ -634,8 +622,8 @@ def find_source_file(file_pattern, file_reference_map):
 ```
 
 If 0 matches: The file is not in any .vbproj. This means either:
-- The Decomposer has a wrong file name --> STOP, report error
-- The file is a new file to be created (for logic-modifier operations)
+- The Intake/Discovery has a wrong file hint --> STOP, report error
+- The file is a new file to be created (for insertion CRs)
 
 If 1 match: This is the source file. Record it.
 
@@ -651,7 +639,7 @@ target_date = effective_date             # e.g., "20260101"
 needs_copy = (source_date != target_date)
 ```
 
-3.4. Update the operation with source file information:
+3.4. Update the CR analysis with source file information:
 
 ```yaml
 source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
@@ -670,9 +658,9 @@ def hash_file(filepath):
         return "sha256:" + hashlib.sha256(f.read()).hexdigest()
 ```
 
-Record `file_hash` in the operation. This hash will be checked again before the
-Rate Modifier or Logic Modifier writes changes. If the hash differs, the file was
-modified between analysis and execution -- ABORT that operation.
+Record `file_hash` in the CR analysis. This hash will be checked again before the
+Change Engine writes changes. If the hash differs, the file was
+modified between analysis and execution -- ABORT that change.
 
 3.6. **Check if target file already exists on disk:**
 
@@ -696,7 +684,7 @@ modified between analysis and execution -- ABORT that operation.
 
 ### Step 4: Read Source Files and Find Functions
 
-**Action:** Read each source file and locate the functions referenced by operations.
+**Action:** Read each source file and locate the functions referenced by change requests.
 
 **4.0 Load Discovery Hints (Optional)**
 
@@ -714,9 +702,9 @@ if file_exists(discovery_path):
         discovery = load_yaml(discovery_path)
     except Exception:
         discovery = {}  # Malformed YAML — treat as absent, fall through to full search
-    for srd_id, target in discovery.get("srd_targets", {}).items():
+    for cr_id, target in discovery.get("request_targets", {}).items():
         if target.get("resolved_function"):
-            discovery_hints[srd_id] = {
+            discovery_hints[cr_id] = {
                 "source_file_hint": target["resolved_file"],
                 "function_name_hint": target["resolved_function"],
                 "function_line_hint": target.get("function_line_start"),
@@ -739,7 +727,7 @@ else:
 # so they integrate with the existing FUB schema.
 ```
 
-When Discovery hints exist for an operation's SRD:
+When Discovery hints exist for a CR:
 - **Start** the function search at `function_line_hint` (skip full-file scan)
 - **Verify** by reading actual code (trust but verify — Discovery may be stale)
 - **Use** `peer_functions` as additional input for Step 5.10.5 (FUB nearby_functions)
@@ -752,14 +740,14 @@ build the function index from function/sub declarations (scan for `Function|Sub`
 then read only the target function's line range. Avoid loading entire 4,500-line files
 into context at once.
 
-4.1. Group operations by source file to avoid reading the same file multiple times.
+4.1. Group change requests by source file to avoid reading the same file multiple times.
 
 ```python
 from collections import defaultdict
 
-ops_by_file = defaultdict(list)
-for op in operations:
-    ops_by_file[op["source_file"]].append(op)
+crs_by_file = defaultdict(list)
+for cr in change_requests:
+    crs_by_file[cr["source_file"]].append(cr)
 ```
 
 4.2. For each source file, read the entire file into memory.
@@ -875,33 +863,32 @@ def build_function_index(lines):
     return functions
 ```
 
-4.4. **Find the target function** for each operation:
+4.4. **Find the target function** for each CR:
 
 **Discovery hint fast path:** Before searching the full function index, check if
-Discovery provided a line hint for this operation's SRD:
+Discovery provided a line hint for this CR:
 
 ```python
-def try_discovery_hint(op, function_index, discovery_hints):
+def try_discovery_hint(cr, function_index, discovery_hints):
     """Try to resolve function via Discovery hint before full search.
 
     Returns: matching function dict, or None (fall through to full search).
     """
-    srd_id = op.get("srd")
-    if not srd_id or srd_id not in discovery_hints:
+    cr_id = cr.get("id")
+    if not cr_id or cr_id not in discovery_hints:
         return None
 
-    hint = discovery_hints[srd_id]
+    hint = discovery_hints[cr_id]
     hint_name = hint.get("function_name_hint")
     hint_line = hint.get("function_line_hint")
 
     if not hint_name:
         return None
 
-    # Verify the hint matches the operation's expected function name
-    op_function = op.get("function", "")
-    if op_function and op_function.lower() != hint_name.lower():
-        # Operation targets a different function than Discovery resolved
-        # (e.g., Decomposer split into sub-operations) — skip hint
+    # Verify the hint matches the CR's expected function name
+    cr_function = cr.get("extracted", {}).get("target_function_hint", "")
+    if cr_function and cr_function.lower() != hint_name.lower():
+        # CR targets a different function than Discovery resolved — skip hint
         return None
 
     # Check if the function index has this function at the expected line
@@ -916,10 +903,10 @@ def try_discovery_hint(op, function_index, discovery_hints):
     return None  # Hint stale or moved — fall through to full search
 ```
 
-For each operation, call `try_discovery_hint()` first. If it returns a match,
+For each change request, call `try_discovery_hint()` first. If it returns a match,
 skip the full `find_function()` search. If it returns None, proceed normally.
 
-For operations where `function` is not null, search the function index:
+For CRs where `extracted.target_function_hint` is not null, search the function index:
 
 ```python
 def find_function(function_index, function_hint):
@@ -961,7 +948,7 @@ Show similar function names and ask the developer:
               3. SetDisc_Age (line 1694)
               4. SetDisc_NewHome (line 1780)
 
-            Which function should operation {op_id} target?
+            Which function should CR {cr_id} target?
             (Enter a number, or type the function name)
 ```
 
@@ -982,12 +969,12 @@ Show all matches and ask the developer:
             4. GetBasePremium_Home (lines 3387-3543)         -- uses DAT files, no Array6
             5. GetBasePremiumTenantHab (lines 4291-4369)     -- uses DAT files, no Array6
 
-            Which function(s) should operation {op_id} target?
+            Which function(s) should CR {cr_id} target?
             (Enter numbers, e.g., "1, 2" or "all")
 
             NOTE: Functions 4 and 5 use GetPremFromResourceFile() for base rates
             (DAT file lookups, not Array6 in code). They likely cannot be modified
-            by rate-modifier.
+            by the Change Engine.
 ```
 
 4.5.1. **Partial Module fallback: project-wide function search.**
@@ -1004,7 +991,7 @@ prompting the developer, perform a project-wide search:
 def search_project_for_function(function_hint, source_file, file_reference_map):
     """
     Fallback search: scan ALL .vb files in the same .vbproj for the function.
-    Triggered when function not found in the Decomposer's suggested file.
+    Triggered when function not found in the suggested file.
 
     file_reference_map: dict of {relative_path: absolute_path} from the .vbproj
     """
@@ -1030,11 +1017,11 @@ If the project-wide search finds the function in a DIFFERENT file:
 ```
 [Analyzer] Function "{function_hint}" not found in {source_file}.
            Found in {alt_file} (Partial Module -- same project).
-           Redirecting operation {op_id} to {alt_file}.
-           (source_file updated in operation YAML)
+           Redirecting CR {cr_id} to {alt_file}.
+           (source_file updated in CR analysis)
 ```
 
-Update the operation's `source_file` field and proceed. Log the redirect in
+Update the CR analysis's `source_file` field and proceed. Log the redirect in
 `analysis_notes`. If the function is found in MULTIPLE files (unlikely but
 possible with overloaded names), present all candidates to the developer.
 
@@ -1045,7 +1032,7 @@ in Step 4.5 "0 matches" case.
 bodies). For a typical .vbproj with 15-25 Compile Include entries, this adds
 ~2-3 seconds and ~5,000-10,000 tokens. Only triggered for 0-match cases.
 
-4.6. For operations where `function` IS null (module-level operations like adding
+4.6. For CRs where `extracted.target_function_hint` IS null (module-level changes like adding
 constants), skip function search. Instead, find the appropriate insertion area:
 
 - For `location: "module-level constants"`: find the last `Public Const` or
@@ -1054,12 +1041,15 @@ constants), skip function search. Instead, find the appropriate insertion area:
 
 ### Step 5: Search Within Functions for Target Lines
 
-**Action:** For each operation, apply the pattern-specific search strategy within the
-confirmed function boundaries to find the exact lines to modify.
+**Action:** For each change request, apply the appropriate search strategy within the
+confirmed function boundaries to find the exact lines to modify. The search strategy
+is determined by the CR's content (what kind of change is being requested), not by a
+pre-assigned pattern classification.
 
-#### 5.1 Pattern: base_rate_increase
+#### 5.1 Search Strategy: Array6 Rate Values (base rate increases, premium multiplications)
 
 **Goal:** Find all Array6 assignments (rate values) within the function.
+**When to use:** CR describes multiplying or changing Array6-based rate values.
 
 **IMPORTANT: Auto base rates are scalar, not Array6.** In Auto LOBs (mod_Algorithms),
 base rates use simple scalar assignments (`baseRate = 66.48`), NOT Array6. If the
@@ -1070,12 +1060,12 @@ inside Select Case blocks, inform the developer:
 [Analyzer] Function "{function_name}" has 0 Array6 assignments.
            Found {N} scalar base rate assignments (baseRate = {value}).
            Auto LOB base rates use scalar assignments, not Array6 tables.
-           To modify these, the operation should use pattern "factor_table_change"
-           targeting individual Case values (e.g., baseRate = 66.48 -> 69.80).
+           To modify these, the CR's change should target individual Case values
+           (e.g., baseRate = 66.48 -> 69.80) using factor table search strategy.
 ```
 
-This is not a failure — it's a pattern mismatch. The developer should re-classify
-the operation or the Intake should have set the pattern differently. Do NOT
+This is not a failure — it's a search strategy mismatch. The developer should
+clarify the CR or Intake should have provided different domain hints. Do NOT
 attempt to modify scalar assignments with the Array6 multiplication logic.
 
 **WARNING: Multi-line Array6 calls.** VB.NET allows line continuation with ` _`
@@ -1330,7 +1320,7 @@ def find_array6_assignments(function_body):
                     for a in args:
                         clean = a.strip()
                         if re.match(r'^[\d+\-*/.()\s]+$', clean):
-                            # Use AST-based safe eval (same as rate-modifier's
+                            # Use AST-based safe eval (same as Change Engine's
                             # safe_eval_arithmetic) instead of raw eval() for
                             # defense-in-depth. Whitelists only numeric nodes
                             # and arithmetic operators.
@@ -1408,11 +1398,12 @@ def determine_context(all_lines, target_line_num, func_start):
 
 5.1.5. **Determine rounding per line** (see Step 6 for the full algorithm).
 
-5.1.6. Record all findings in the operation's `target_lines` and `skipped_lines` arrays.
+5.1.6. Record all findings in the CR's `target_lines` and `skipped_lines` arrays.
 
-#### 5.2 Pattern: factor_table_change
+#### 5.2 Search Strategy: Select Case Factor Tables (deductible factors, discount factors)
 
 **Goal:** Find the specific `Case {value}` block and all values within it.
+**When to use:** CR describes changing a specific Case value in a Select Case block.
 
 5.2.1. Within the function body, find the target Case block:
 
@@ -1455,12 +1446,12 @@ def find_case_block(function_body, case_value, target_select_depth=1):
             The Analyzer auto-detects this from the function structure.
 
     DEPTH DETECTION RULE (for Analyzer):
-    When the Decomposer specifies a case_value AND the function has nested
+    When the CR specifies a case_value AND the function has nested
     Select Case blocks, the Analyzer MUST determine the correct depth:
     1. Search ALL depths for the case_value
     2. If found at exactly ONE depth -> use that depth
     3. If found at MULTIPLE depths -> present ALL to developer, record
-       the confirmed depth as `target_select_depth` in the operation YAML
+       the confirmed depth as `target_select_depth` in the CR analysis YAML
     4. If NOT found at any depth -> report FUNCTION_MATCH_FAILED
     """
     import re
@@ -1615,7 +1606,7 @@ def find_values_in_case_block(case_lines):
 5.2.3. **Show ALL values to the developer** (show-don't-guess):
 
 ```
-[Analyzer] Operation {op_id}: Case {case_value} in {function_name} has {N} value assignments:
+[Analyzer] CR {cr_id}: Case {case_value} in {function_name} has {N} value assignments:
 
             1. Line {L1}: {variable} = {value1}
                Context: Case 5000 > If blnFarmLocation Then (farm path)
@@ -1623,7 +1614,7 @@ def find_values_in_case_block(case_lines):
             2. Line {L2}: {variable} = {value2}
                Context: Case 5000 > Else (non-farm path)
 
-            The SRD says change from {old_value} to {new_value}.
+            The change request says change from {old_value} to {new_value}.
             Value 1 ({value1}) matches old_value.
             Value 2 ({value2}) does NOT match old_value.
 
@@ -1631,35 +1622,36 @@ def find_values_in_case_block(case_lines):
               a) Only line {L1} (farm path, matches old_value)
               b) Only line {L2} (non-farm path)
               c) Both lines
-              d) None (skip this operation)
+              d) None (skip this CR)
 ```
 
 5.2.4. **Special case: old_value not found.** If none of the values in the Case block
-match the operation's `old_value`, report:
+match the CR's `old_value`, report:
 
 ```
-[Analyzer] WARNING: Operation {op_id} expects old_value={old_value} in Case {case_value}
+[Analyzer] WARNING: CR {cr_id} expects old_value={old_value} in Case {case_value}
             of {function_name}, but the actual values found are:
               Line {L1}: {variable} = {actual_value_1} (context: farm path)
               Line {L2}: {variable} = {actual_value_2} (context: non-farm path)
 
             None match {old_value}. Possible reasons:
               - The value was already changed in a previous update
-              - The SRD references a different Case value
+              - The change request references a different Case value
               - The function has been restructured
 
             How to proceed?
               a) Update the old_value to {actual_value_1} and continue
               b) Update the old_value to {actual_value_2} and continue
-              c) Skip this operation
+              c) Skip this CR
               d) I'll investigate manually
 ```
 
-#### 5.3 Pattern: included_limits
+#### 5.3 Search Strategy: Limit Values (included limits, coverage limits)
 
 **Goal:** Find the variable or constant containing the limit value.
+**When to use:** CR describes changing an included limit or coverage limit value.
 
-5.3.1. If the operation has a `function` hint, search within that function.
+5.3.1. If the CR has a `target_function_hint`, search within that function.
 Otherwise, search the entire file for the limit variable/constant.
 
 5.3.2. Search for both patterns:
@@ -1669,10 +1661,11 @@ Otherwise, search the entire file for the limit variable/constant.
 
 5.3.3. Present findings with context to the developer.
 
-#### 5.4 Pattern: new_endorsement_flat
+#### 5.4 Search Strategy: Endorsement Routing (new endorsements, option code routing)
 
 **Goal:** Find the CalcOption routing function and determine insertion point for a
 new Case block.
+**When to use:** CR describes adding a new endorsement or option code routing entry.
 
 5.4.1. Read the CalcOption file for the target LOB. The CalcOption file is a giant
 Select Case router:
@@ -1712,9 +1705,10 @@ or:
             Proceed with adding a duplicate, or modify the existing handler?
 ```
 
-#### 5.5 Pattern: new_liability_option
+#### 5.5 Search Strategy: Liability Options (new liability tiers, premium arrays)
 
 **Goal:** Find where to add the liability premium array and the routing Case.
+**When to use:** CR describes adding or modifying liability option premiums.
 
 5.5.1. Search for existing Liab_*.vb files in the File Reference Map that match the
 pattern for this LOB. Determine if the new liability should go in an existing file
@@ -1746,9 +1740,10 @@ a template reference from an existing Liab_*.vb in the same LOB.
 5.5.4. For CalcOption routing, follow the same insertion logic as new_endorsement_flat
 (Step 5.4).
 
-#### 5.6 Pattern: new_coverage_type
+#### 5.6 Search Strategy: Coverage Types (new coverage type constants, rate table routing, DAT IDs)
 
-**Goal:** Multiple sub-operations -- handle each per its location field.
+**Goal:** Multiple sub-changes -- handle each per its location.
+**When to use:** CR describes adding a new coverage type across constants, routing, and ResourceID.
 
 5.6.1. **Add constant:** Find the module-level constants area (Step 4.6). Check for
 duplicate constants. Record insertion point after the last existing constant.
@@ -1774,12 +1769,13 @@ Public Const DAT_Home_EliteComp_Preferred = 28
 Public Const DAT_Home_EliteComp_Standard = 29
 ```
 
-5.6.4. For each sub-operation, check for existing duplicates before recommending
+5.6.4. For each sub-item, check for existing duplicates before recommending
 insertion.
 
-#### 5.7 Pattern: eligibility_rules
+#### 5.7 Search Strategy: Eligibility Rules (validation functions, business rules)
 
 **Goal:** Find the validation function and determine insertion point.
+**When to use:** CR describes adding or changing eligibility/validation rules.
 
 5.7.1. Search for validation functions matching the rule context:
 - If the rule references a coverage type, search for validation functions in mod_Common
@@ -1790,13 +1786,14 @@ insertion.
 
 5.7.3. Check if similar validation logic already exists (duplicate detection).
 
-#### 5.8 Pattern: UNKNOWN
+#### 5.8 Search Strategy: General (any change type not covered above)
 
-**Goal:** Present the operation details and ask the developer for guidance.
+**Goal:** Present the CR details and ask the developer for guidance.
+**When to use:** CR does not clearly match any of the above search strategies.
 
 ```
-[Analyzer] Operation {op_id} has pattern UNKNOWN. Cannot auto-analyze.
-            SRD: {srd_id} -- "{srd_title}"
+[Analyzer] CR {cr_id} does not match a known search strategy. Need guidance.
+            Title: "{cr_title}"
             Description: {description}
 
             I need your guidance:
@@ -1808,65 +1805,63 @@ insertion.
             Type a search term and I'll show matches.
 ```
 
-#### Deferred Confirmation Handling (All Patterns)
+#### Deferred Confirmation Handling (All Search Strategies)
 
 When the developer defers a confirmation prompt (responds with "I'll come back to
 this", "skip for now", "defer", or similar), do NOT block the entire analysis. Instead:
 
-- Mark the operation as `developer_confirmed: false, status: "pending_confirmation"`
-- Continue processing remaining operations
-- At Step 14 (final summary), list ALL pending operations under a dedicated section:
+- Mark the CR analysis as `developer_confirmed: false, status: "pending_confirmation"`
+- Continue processing remaining CRs
+- At Step 14 (final summary), list ALL pending CRs under a dedicated section:
 
 ```
-PENDING CONFIRMATION ({N} operations):
-  {op_id}: {title} -- awaiting developer selection
-  {op_id}: {title} -- awaiting developer selection
+PENDING CONFIRMATION ({N} CRs):
+  {cr_id}: {title} -- awaiting developer selection
+  {cr_id}: {title} -- awaiting developer selection
 ```
 
-The Planner CANNOT proceed until all operations are either:
+The Decomposer CANNOT proceed until all CRs are either:
 - `developer_confirmed: true` (developer made a selection)
 - `developer_confirmed: false, status: "deferred"` (developer explicitly deferred
-  this operation -- it will be excluded from the execution plan)
+  this CR -- it will be excluded from the intent graph)
 
 ### Step 5.9: Code Pattern Discovery
 
-**Action:** For qualifying logic-modifier operations, discover established code
-patterns in the codebase so the Logic Modifier uses proven, active approaches
-instead of inventing new ones or mimicking dead code.
+**Action:** For qualifying CRs that involve code insertion or logic changes, discover
+established code patterns in the codebase so the Change Engine uses proven, active
+approaches instead of inventing new ones or mimicking dead code.
 
-**Why this step exists:** Without pattern discovery, the Logic Modifier sees dead
+**Why this step exists:** Without pattern discovery, the Change Engine sees dead
 functions and active functions as equally valid — leading to bugs like ticket 25545
 where `CountNAFClaims_Vehicle` (0 callers, dead code) was used instead of the
 established `allIQCovItem.GetClaimsVehicles` (12+ callers). This step uses the
 Pattern Library (from /iq-init) for instant call-count lookups and reads code
-snippets from active functions to build a "Pattern Brief" for the operation YAML.
+snippets from active functions to build a "Pattern Brief" for the CR analysis YAML.
 
-**Pattern guard — Trigger Table:**
+**Trigger guard — when to run pattern discovery:**
 
 ```
 TRIGGER TABLE
 ─────────────────────────────────────────────────────────
-Pattern                    Trigger?   Reason
+CR Type                        Trigger?   Reason
 ─────────────────────────────────────────────────────────
-base_rate_increase         NO         Value substitution (rate-modifier)
-factor_table_change        NO         Value substitution (rate-modifier)
-included_limits            NO         Value substitution (rate-modifier)
-new_coverage_type          MAYBE      Only if it involves function calls
-eligibility_rules          YES        Accesses runtime objects
-alert_message              YES        Calls alert functions
-new_endorsement_flat       YES        Must follow existing file structure
-new_liability_option       YES        Accesses liability collections
-UNKNOWN                    YES        Always discover when uncertain
+Value changes (Array6, factors) NO        Pure value substitution
+Limit value changes             NO        Pure value substitution
+New coverage type               MAYBE     Only if it involves function calls
+Eligibility/validation rules    YES       Accesses runtime objects
+Alert messages                  YES       Calls alert functions
+New endorsement/option          YES       Must follow existing file structure
+New liability option            YES       Accesses liability collections
+Unknown/general                 YES       Always discover when uncertain
 ─────────────────────────────────────────────────────────
 ```
 
 **Additional triggers:** Step 5.9 also triggers when:
-- The Decomposer set `access_needs[]` on the operation (any pattern)
-- The operation description contains keywords: "claims", "vehicle", "alert",
+- The CR description contains keywords: "claims", "vehicle", "alert",
   "coverage item", "premium calculation", "collection", "accessor"
 
-If the operation does NOT match any trigger, skip Step 5.9 entirely (no performance
-cost for simple rate-modifier operations).
+If the CR does NOT match any trigger, skip Step 5.9 entirely (no performance
+cost for simple value-change CRs).
 
 #### 5.9.7 CHECK INVESTIGATION FINDINGS (runs FIRST despite numbering)
 
@@ -1876,7 +1871,7 @@ Before any searching, check for saved `/iq-investigate` findings:
 .iq-workstreams/changes/{workstream}/investigation/finding-*.yaml
 ```
 
-If a finding matches the operation's access need (by keyword or data_object match),
+If a finding matches the CR's access need (by keyword or data_object match),
 use it directly — the developer already validated this pattern. Record:
 ```yaml
 code_patterns:
@@ -1889,25 +1884,17 @@ If no investigation findings match, proceed to Steps 5.9.1-5.9.6.
 
 #### 5.9.1 IDENTIFY ACCESS NEEDS
 
-Determine what runtime data access patterns this operation requires. Sources in
+Determine what runtime data access patterns this CR requires. Sources in
 priority order:
 
-a) **`access_needs[]` from Decomposer** (if present on the operation YAML):
-   ```yaml
-   access_needs:
-     - id: "claims_vehicle_count"
-       description: "Count NAF claims per vehicle"
-       data_object: "claims"
-       access_type: "iteration"
-   ```
+a) **Inferred from CR content:** Analyze the CR `description` and `title` fields
+   to determine what data access is needed:
+   - Eligibility/validation → coverage items, field access
+   - Alert messages → alert functions (AlertHab/AlertAuto)
+   - New endorsement → premium calculation, option routing
+   - New liability → liability collections, Array6 premium tables
 
-b) **Inferred from pattern type:**
-   - `eligibility_rules` → coverage items, field access
-   - `alert_message` → alert functions (AlertHab/AlertAuto)
-   - `new_endorsement_flat` → premium calculation, option routing
-   - `new_liability_option` → liability collections, Array6 premium tables
-
-c) **Keywords from operation description:** Scan the operation `description` and
+b) **Keywords from CR description:** Scan the CR `description` and
    `title` fields for keywords: "claims", "vehicle", "alert", "coverage",
    "premium", "liability", "deductible", "discount", "surcharge", "endorsement".
 
@@ -1922,7 +1909,7 @@ For each identified access need, query `.iq-workstreams/pattern-library.yaml`:
    `allIQCovItem.GetClaimsVehicles (12 callers)` and `p_objVehicle.Claims (0 callers)`.
 
 2. **Function name lookup:** `functions[name]` → call_sites + status + file + line.
-   Used to check if a function referenced in the operation description is DEAD or ACTIVE.
+   Used to check if a function referenced in the CR description is DEAD or ACTIVE.
 
 3. **Status filter:** Separate results into ACTIVE/HIGH_USE (safe to use) and
    DEAD (0 call sites — warn, never recommend).
@@ -1940,7 +1927,7 @@ re-run /iq-init), fall back to direct file scanning:
 #### 5.9.3 FIND PEER FUNCTIONS
 
 In the target file's function index (already built in Step 4.3), find functions that
-are "peers" of the operation's target:
+are "peers" of the CR's target:
 
 1. **Similar name prefix:** If target function is `CountNAFClaims`, search for
    functions matching `Count*Claims*`, `*NAF*`, or `*Claims*Vehicle*`
@@ -1948,7 +1935,7 @@ are "peers" of the operation's target:
 2. **Same parameter types:** Functions with the same first parameter type (e.g.,
    `ICoverageItem`, `IVehicle`) — these likely access the same runtime objects
 
-3. **Keywords from operation description:** Functions whose name or body contains
+3. **Keywords from CR description:** Functions whose name or body contains
    the access need keywords
 
 Cross-reference each peer function with the Pattern Library for call counts.
@@ -1962,11 +1949,11 @@ For each peer function with `call_sites > 0` (ACTIVE or HIGH_USE):
   a note: `"(truncated at 30 lines — full function is {N} lines)"`
 - Include: function signature, key access patterns (the lines that match the
   access need), return statement style
-- Record as a `peer_functions` entry in the operation YAML
+- Record as a `peer_functions` entry in the CR analysis YAML
 
 For dead-code functions (`call_sites == 0`):
 - Include ONLY the signature + a 1-line "DEAD CODE" warning
-- Do NOT include the full body — this prevents the Logic Modifier from copying
+- Do NOT include the full body — this prevents the Change Engine from copying
   dead code patterns
 - Record with `dead_code: true`
 
@@ -1995,11 +1982,11 @@ Evaluate the discovered patterns and assign a confidence level:
   Options:
   1. Provide the pattern manually (paste code or describe)
   2. Run /iq-investigate to explore the codebase
-  3. Defer this operation (exclude from plan)
+  3. Defer this CR (exclude from plan)
   ```
 
 **Dead code warning** (always emitted):
-- If any function near the operation target has `call_sites == 0`, emit:
+- If any function near the CR target has `call_sites == 0`, emit:
   ```
   WARNING: {FunctionName} (line {N}) has 0 call sites — flagged as DEAD CODE.
   Do NOT use patterns from this function.
@@ -2011,7 +1998,7 @@ Only triggered for MEDIUM or LOW confidence. Presents patterns for selection:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ [Analyzer] Pattern Discovery for {op_id}        │
+│ [Analyzer] Pattern Discovery for {cr_id}        │
 │                                                  │
 │ Need: "{access_need_description}"                │
 │                                                  │
@@ -2029,14 +2016,13 @@ Only triggered for MEDIUM or LOW confidence. Presents patterns for selection:
 └─────────────────────────────────────────────────┘
 ```
 
-**Batching:** If multiple operations in the same workstream need the same access
-pattern (e.g., two operations both need claims access), confirm ONCE and apply the
-developer's choice to all matching operations.
+**Batching:** If multiple CRs in the same workstream need the same access
+pattern (e.g., two CRs both need claims access), confirm ONCE and apply the
+developer's choice to all matching CRs.
 
-#### 5.9.8 WRITE TO OPERATION YAML
+#### 5.9.8 WRITE TO CR ANALYSIS YAML
 
-Add the `code_patterns` section to the operation YAML file. All Decomposer and
-prior Analyzer fields are preserved; `code_patterns` is appended below.
+Add the `code_patterns` section to the CR analysis YAML file.
 
 ```yaml
 # -- Added by Analyzer Step 5.9 --
@@ -2050,7 +2036,7 @@ code_patterns:
       dead_code: false
       snippet: |
         {Full function body or truncated excerpt}
-      relevance: "{Why this function is relevant to the operation}"
+      relevance: "{Why this function is relevant to the CR}"
 
     - name: "{DeadFunctionName}"
       file: "{relative file path}"
@@ -2076,10 +2062,9 @@ code_patterns:
   confidence_summary: "{N} canonical pattern(s) found, {HIGH|MEDIUM|LOW} confidence"
 ```
 
-**If Step 5.9 was skipped** (operation did not match trigger table), the
-`code_patterns` section is simply absent from the operation YAML. Downstream
-consumers (Logic Modifier) handle this gracefully — see Logic Modifier core.md
-ESTABLISHED PATTERN PREFERENCE rule.
+**If Step 5.9 was skipped** (CR did not match trigger table), the
+`code_patterns` section is simply absent from the CR analysis YAML. Downstream
+consumers (Change Engine) handle this gracefully.
 
 #### Context Cost of Step 5.9
 
@@ -2091,20 +2076,20 @@ ESTABLISHED PATTERN PREFERENCE rule.
 | Developer confirmation (only if MEDIUM/LOW) | 0-1 | ~30 sec |
 | **Total incremental cost** | **2-5** | **~1-2 min** |
 
-Step 5.9 is applied ONLY to qualifying operations (~1-3 per workstream, not all
-10-20). Rate-modifier operations (base_rate_increase, factor_table_change) are
+Step 5.9 is applied ONLY to qualifying CRs (~1-3 per workstream, not all
+10-20). Value-change CRs (rate increases, factor changes) are
 never triggered, so there is zero performance regression for typical tickets.
 
 ### Step 5.10: Generate Function Understanding Blocks (FUBs)
 
-**Action:** For every operation that targets a function (`function is not null AND
+**Action:** For every CR that targets a function (`function is not null AND
 function_line_start is not null`), generate a Function Understanding Block (FUB).
 FUBs transform the Analyzer's "phone book" output (function name + line numbers)
 into a "how-to guide" (branch tree + hazards + adjacent context) that workers can
 use to understand function structure before modifying it.
 
-**Trigger:** Broader than Step 5.9 — fires for BOTH rate-modifier and logic-modifier
-operations. Any operation with a known target function gets a FUB.
+**Trigger:** Broader than Step 5.9 — fires for ALL CRs regardless of change type.
+Any CR with a known target function gets a FUB.
 
 **Cost guard:** Only generates FUBs for functions that workers will actually modify.
 Typical workstream: 3-8 unique functions. At ~600-800 tokens per FUB, total cost is
@@ -2398,7 +2383,7 @@ Workers receiving a FUB with `branch_tree_warnings` should rely more heavily on
 #### 5.10.3 DETECT HAZARDS
 
 Scan the function body for known hazards that affect how workers should handle the
-operation. Each hazard is a string tag; the FUB carries a list of active hazards.
+CR. Each hazard is a string tag; the FUB carries a list of active hazards.
 
 ```python
 def detect_hazards(func_body, function_name, pattern_library):
@@ -2510,21 +2495,21 @@ def detect_hazards(func_body, function_name, pattern_library):
 
 #### 5.10.4 EXTRACT ADJACENT CONTEXT
 
-Capture lines immediately surrounding the operation's target location. This helps
+Capture lines immediately surrounding the CR's target location. This helps
 workers validate that the insertion/modification point hasn't drifted.
 
 ```python
-def extract_adjacent_context(lines, target_line, agent_type):
+def extract_adjacent_context(lines, target_line, needs_insertion=False):
     """Extract lines above and below the target line.
 
-    - Logic-modifier ops: 5 lines above + 5 lines below insertion_point
-    - Rate-modifier ops: 3 lines above + 3 lines below first target_line
+    - Insertion CRs (new code): 5 lines above + 5 lines below insertion_point
+    - Value change CRs: 3 lines above + 3 lines below first target_line
 
     Token cost: ~100-200 tokens.
 
     Returns: {above: [{line, content}], below: [{line, content}]}
     """
-    if agent_type == "logic-modifier":
+    if needs_insertion:
         radius = 5
     else:
         radius = 3
@@ -2544,7 +2529,7 @@ def extract_adjacent_context(lines, target_line, agent_type):
 #### 5.10.5 COLLECT NEARBY FUNCTION STATUS
 
 Provide lightweight alive/dead signals for functions near the target. If Step 5.9
-already ran for this operation, reference its output instead of duplicating data.
+already ran for this CR, reference its output instead of duplicating data.
 
 ```python
 def collect_nearby_functions(function_name, func_line_start, function_index,
@@ -2553,7 +2538,7 @@ def collect_nearby_functions(function_name, func_line_start, function_index,
 
     If Step 5.9 ran: set canonical_patterns_ref = "code_patterns" (pointer,
     no duplication — the FUB references the code_patterns section in the same
-    operation YAML).
+    CR analysis YAML).
 
     If Step 5.9 did NOT run: lightweight Pattern Library lookup for target
     function + 2 nearest by line proximity. Record call_sites + status only
@@ -2591,10 +2576,10 @@ def collect_nearby_functions(function_name, func_line_start, function_index,
 #### 5.10.6 ASSEMBLE FUB
 
 Combine all sub-step outputs into a single Function Understanding Block and write
-it into the operation YAML alongside existing Analyzer fields.
+it into the CR analysis YAML alongside existing Analyzer fields.
 
 ```yaml
-# Appended to each operation YAML (analysis/operations/op-{SRD}-{NN}.yaml):
+# Written to each CR analysis file (analysis/analyzer_output/cr-NNN-analysis.yaml):
 fub:
   function: "GetLiabilityBundlePremiums"
   file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
@@ -2637,65 +2622,64 @@ fub:
 
 #### 5.10.7 DEDUPLICATION
 
-Multiple operations targeting the SAME function in the SAME file share a single FUB.
-The FIRST operation processed gets the full FUB block. Subsequent operations targeting
+Multiple CRs targeting the SAME function in the SAME file share a single FUB.
+The FIRST CR processed gets the full FUB block. Subsequent CRs targeting
 the same function get a lightweight pointer:
 
 ```yaml
-# On the first operation (e.g., op-004-01):
+# On the first CR (e.g., cr-004):
 fub:
   function: "GetBasePremium_Home"
   # ... full FUB as above ...
 
-# On subsequent operations in the same function (e.g., op-004-02):
-fub_ref: "op-004-01"    # "FUB is in this op's YAML"
-adjacent_context_override:  # This op's OWN adjacent context (different target line)
+# On subsequent CRs in the same function (e.g., cr-005):
+fub_ref: "cr-004"    # "FUB is in this CR's analysis YAML"
+adjacent_context_override:  # This CR's OWN adjacent context (different target line)
   above: [{line: 4085, content: "..."}]
   below: [{line: 4089, content: "..."}]
 ```
 
 When the capsule builder resolves `fub_ref`, it should use `adjacent_context_override`
 (if present) instead of the shared FUB's `adjacent_context`. The override ensures
-each operation gets adjacent context around ITS target line, not the first operation's.
+each CR gets adjacent context around ITS target line, not the first CR's.
 
 ```python
-def generate_fubs_for_operations(operations, lines_by_file, function_indices,
-                                 pattern_library):
-    """Generate FUBs for all operations, with deduplication.
+def generate_fubs_for_change_requests(change_requests, lines_by_file, function_indices,
+                                      pattern_library):
+    """Generate FUBs for all change requests, with deduplication.
 
     Args:
-        operations: list of operation dicts (already enriched by Steps 4-5.9)
+        change_requests: list of CR dicts (already enriched by Steps 4-5.9)
         lines_by_file: dict of file -> [(line_num, content)] (already in memory)
         function_indices: dict of file -> build_function_index() result
         pattern_library: loaded pattern-library.yaml
 
-    Returns: dict of op_id -> fub_data (or fub_ref string)
+    Returns: dict of cr_id -> fub_data (or fub_ref string)
     """
-    fub_cache = {}   # key = (file, function_name) -> op_id that owns the FUB
+    fub_cache = {}   # key = (file, function_name) -> cr_id that owns the FUB
 
-    for op in operations:
-        func_name = op.get("function")
-        func_start = op.get("function_line_start")
-        func_end = op.get("function_line_end")
-        target_file = op.get("source_file") or op.get("target_file")
+    for cr in change_requests:
+        func_name = cr.get("function")
+        func_start = cr.get("function_line_start")
+        func_end = cr.get("function_line_end")
+        target_file = cr.get("source_file") or cr.get("target_file")
 
-        # Skip operations without function targets
+        # Skip CRs without function targets
         if not func_name or not func_start:
             continue
 
         cache_key = (target_file, func_name)
 
         # DEDUPLICATION: if FUB already generated for this function, use reference
-        # BUT: adjacent_context is per-operation (different target lines within
+        # BUT: adjacent_context is per-CR (different target lines within
         # the same function), so compute and store it as an override.
         if cache_key in fub_cache:
-            op["fub_ref"] = fub_cache[cache_key]
-            # Compute this op's own adjacent_context (different target line)
-            op_target_line = op.get("insertion_point", {}).get("line") or \
-                             (op.get("target_lines", [{}])[0].get("line") if op.get("target_lines") else func_start)
-            op_agent_type = op.get("agent", "rate-modifier")
-            op_adjacent = extract_adjacent_context(file_lines, op_target_line, op_agent_type)
-            op["adjacent_context_override"] = op_adjacent
+            cr["fub_ref"] = fub_cache[cache_key]
+            # Compute this CR's own adjacent_context (different target line)
+            cr_target_line = cr.get("insertion_point", {}).get("line") or \
+                             (cr.get("target_lines", [{}])[0].get("line") if cr.get("target_lines") else func_start)
+            cr_adjacent = extract_adjacent_context(file_lines, cr_target_line)
+            cr["adjacent_context_override"] = cr_adjacent
             continue
 
         # Generate full FUB
@@ -2712,13 +2696,12 @@ def generate_fubs_for_operations(operations, lines_by_file, function_indices,
         hazards = detect_hazards(func_body, func_name, pattern_library)
 
         # 5.10.4: Extract adjacent context
-        target_line = op.get("insertion_point", {}).get("line") or \
-                      (op.get("target_lines", [{}])[0].get("line") if op.get("target_lines") else func_start)
-        agent_type = op.get("agent", "rate-modifier")
-        adjacent = extract_adjacent_context(file_lines, target_line, agent_type)
+        target_line = cr.get("insertion_point", {}).get("line") or \
+                      (cr.get("target_lines", [{}])[0].get("line") if cr.get("target_lines") else func_start)
+        adjacent = extract_adjacent_context(file_lines, target_line)
 
         # 5.10.5: Collect nearby function status
-        step_5_9_ran = bool(op.get("code_patterns"))
+        step_5_9_ran = bool(cr.get("code_patterns"))
         canonical_ref, nearby = collect_nearby_functions(
             func_name, func_start, func_index, pattern_library, step_5_9_ran
         )
@@ -2730,7 +2713,7 @@ def generate_fubs_for_operations(operations, lines_by_file, function_indices,
         return_type = func_entry.get("return_type")
 
         # 5.10.6: Assemble FUB
-        op["fub"] = {
+        cr["fub"] = {
             "function": func_name,
             "file": target_file,
             "line_start": func_start,
@@ -2746,9 +2729,9 @@ def generate_fubs_for_operations(operations, lines_by_file, function_indices,
         }
 
         # 5.10.7: Register in dedup cache
-        fub_cache[cache_key] = op["id"]
+        fub_cache[cache_key] = cr["id"]
 
-    return  # operations are modified in-place
+    return  # change_requests are modified in-place
 ```
 
 #### Context Cost of Step 5.10
@@ -2764,11 +2747,11 @@ def generate_fubs_for_operations(operations, lines_by_file, function_indices,
 | **Total per workstream (3-8 functions)** | **3-16** | **~10-30 sec** |
 
 Zero developer interaction. Fully automated. FUB deduplication ensures the cost
-scales with unique functions, not total operations.
+scales with unique functions, not total CRs.
 
 **If Step 5.10 encounters an error** (e.g., function body cannot be extracted,
 Pattern Library is missing), it degrades gracefully: the FUB is omitted and the
-operation proceeds without it. The capsule builder defaults to Tier 2 behavior
+CR proceeds without it. The capsule builder defaults to Tier 2 behavior
 (current system) when no FUB is present.
 
 ### Step 5.11: Enrich Codebase Profile
@@ -2778,13 +2761,13 @@ reusable knowledge and persist it to `codebase-profile.yaml`. This step is free
 in terms of tool calls (data already loaded) and makes the profile richer with
 every /iq-plan run.
 
-**Trigger:** Runs for every operation that has a resolved target function. Skipped
+**Trigger:** Runs for every CR that has a resolved target function. Skipped
 entirely if `codebase-profile.yaml` does not exist (profile must be initialized by
 /iq-init first).
 
 #### 5.11.1 FACTOR CARDINALITY
 
-For each operation that targets a function containing Select Case blocks (already
+For each CR that targets a function containing Select Case blocks (already
 parsed for FUBs in Step 5.10.2), extract and persist cardinality metadata:
 
 ```python
@@ -2929,23 +2912,23 @@ discovered. If codebase-profile.yaml does not exist, the entire step is skipped.
 
 ### Step 6: Resolve Rounding Mode
 
-**Action:** For operations with `rounding: "auto"` (base_rate_increase pattern),
+**Action:** For CRs with `rounding: "auto"` (rate multiplication changes),
 inspect the actual Array6 values to determine the correct rounding mode.
 
-**Pattern guard:** Step 6 applies ONLY to operations with `pattern: "base_rate_increase"`
-and `parameters.rounding: "auto"`. Skip all other patterns -- they do not use Array6
+**Guard:** Step 6 applies ONLY to CRs whose `extracted` include a `factor`
+and `domain_hints.rounding_hint: "auto"`. Skip all other CRs -- they do not use Array6
 multiplication and rounding resolution is not applicable.
 
-6.0. **Check for `rounding_hint` from the Decomposer.** The Intake agent may have
-attached a `rounding_hint` field (e.g., `rounding_hint: "banker"`) to the operation
-parameters. If present, use it as a cross-check AFTER the value-based analysis in
+6.0. **Check for `rounding_hint` from Intake.** The Intake agent may have
+attached a `rounding_hint` field (e.g., `rounding_hint: "banker"`) to the CR's
+`domain_hints`. If present, use it as a cross-check AFTER the value-based analysis in
 Steps 6.1-6.3:
 
 - If `rounding_hint` matches `rounding_resolved`: confirmed, proceed silently.
 - If `rounding_hint` disagrees with `rounding_resolved`: flag for developer review:
 
 ```
-[Analyzer] Rounding cross-check MISMATCH for {op_id}:
+[Analyzer] Rounding cross-check MISMATCH for {cr_id}:
             Intake hint: {rounding_hint}
             Value-based analysis: {rounding_resolved}
 
@@ -2999,37 +2982,37 @@ being assigned. `Integer`/`Short` typed variables confirm banker rounding.
 types (like `varRates`), so value inspection (primary method above) takes precedence.
 The variable type check is only used to cross-validate ambiguous cases.
 
-6.2. Aggregate per-operation rounding:
+6.2. Aggregate per-CR rounding:
 
 ```
 ROUNDING AGGREGATION
 ------------------------------------------------------------
 
 If ALL target_lines have rounding = "banker":
-    operation.rounding_resolved = "banker"
+    cr.rounding_resolved = "banker"
 
 If ALL target_lines have rounding = "none":
-    operation.rounding_resolved = "none"
+    cr.rounding_resolved = "none"
 
 If target_lines have a MIX of "banker" and "none":
-    operation.rounding_resolved = "mixed"
+    cr.rounding_resolved = "mixed"
     Include per-line rounding in target_lines[].rounding
 
 If any target_line has rounding = "review":
-    operation.rounding_resolved = "review"
+    cr.rounding_resolved = "review"
     Flag for developer
 ```
 
 6.3. Report rounding resolution to the developer:
 
 ```
-[Analyzer] Rounding resolution for {op_id} ({function_name}):
+[Analyzer] Rounding resolution for {cr_id} ({function_name}):
             {N} Array6 lines found:
               {M} lines with integer values -> banker rounding
               {K} lines with decimal values -> no rounding
               {J} lines all zeros -> skip (multiply has no effect)
 
-            Operation-level rounding: {rounding_resolved}
+            CR-level rounding: {rounding_resolved}
 ```
 
 6.4. **Real-world mixed rounding example** (from GetLiabilityBundlePremiums):
@@ -3048,20 +3031,20 @@ Resolved rounding: "mixed" (per-line detail attached to each target_line)
 
 ### Step 7: Run Reverse Lookup for Hidden Blast Radius
 
-**Action:** For each shared module targeted by operations, scan ALL .vbproj files in
+**Action:** For each shared module targeted by CRs, scan ALL .vbproj files in
 the province to find references that are NOT in the developer's target list.
 
 **NOTE:** This step MUST run BEFORE building files_to_copy.yaml (Step 8), because the
 reverse lookup discovers additional .vbproj files that need reference updates. Those
 additional .vbproj files must be included in the files_to_copy vbproj_updates list.
 
-7.1. Identify all shared modules that have operations:
+7.1. Identify all shared modules that have CRs:
 
 ```python
 shared_targets = set()
-for op in operations:
-    if op["file_type"] in ("shared_module", "cross_lob"):
-        shared_targets.add(op["source_file"])
+for cr in change_requests:
+    if cr["file_type"] in ("shared_module", "cross_lob"):
+        shared_targets.add(cr["source_file"])
 ```
 
 7.2. Glob for ALL .vbproj files in the province:
@@ -3148,25 +3131,25 @@ If ALL referencing projects are in the target list, report:
 so that additional .vbproj files discovered by the reverse lookup are included in the
 vbproj_updates list.
 
-8.1. Collect all unique source -> target file mappings from operations:
+8.1. Collect all unique source -> target file mappings from CRs:
 
 ```python
-files_to_copy = {}  # key = source_file, value = {target, operations, shared_by, vbproj_updates}
+files_to_copy = {}  # key = source_file, value = {target, change_requests, shared_by, vbproj_updates}
 
-for op in operations:
-    if op.get("needs_copy"):
-        source = op["source_file"]
+for cr in change_requests:
+    if cr.get("needs_copy"):
+        source = cr["source_file"]
         if source not in files_to_copy:
             files_to_copy[source] = {
                 "source": source,
-                "target": op["target_file"],
-                "source_hash": op["file_hash"],
-                "target_exists": os.path.exists(os.path.join(codebase_root, op["target_file"])),
+                "target": cr["target_file"],
+                "source_hash": cr["file_hash"],
+                "target_exists": os.path.exists(os.path.join(codebase_root, cr["target_file"])),
                 "shared_by": list(file_refs.get(source, set())),
-                "operations_in_file": [],
+                "change_requests_in_file": [],
                 "vbproj_updates": []
             }
-        files_to_copy[source]["operations_in_file"].append(op["id"])
+        files_to_copy[source]["change_requests_in_file"].append(cr["id"])
 ```
 
 8.2. For each file to copy, find ALL .vbproj files that reference the source file
@@ -3198,22 +3181,22 @@ for source_file, entry in files_to_copy.items():
 
 ### Step 9: Check for Cross-Province Shared Files
 
-**Action:** Verify that no operation targets a cross-province shared file.
+**Action:** Verify that no CR targets a cross-province shared file.
 
-9.1. For each operation, check if the resolved source file is a cross-province shared
+9.1. For each CR, check if the resolved source file is a cross-province shared
 file (classification = "cross_province_shared" from Step 2.4):
 
 ```python
 cross_province_files = config.get("cross_province_shared_files", [])  # Discovered by /iq-init
 
-for op in operations:
+for cr in change_requests:
     for cpf in cross_province_files:
-        if cpf in op["source_file"]:
+        if cpf in cr["source_file"]:
             errors.append({
                 "type": "cross_province_violation",
-                "operation": op["id"],
-                "file": op["source_file"],
-                "message": f"Operation {op['id']} targets cross-province shared file "
+                "change_request": cr["id"],
+                "file": cr["source_file"],
+                "message": f"CR {cr['id']} targets cross-province shared file "
                            f"{cpf}. These files must NEVER be auto-modified."
             })
 ```
@@ -3221,36 +3204,35 @@ for op in operations:
 9.2. If any violations found, report and REFUSE to assign line numbers:
 
 ```
-[Analyzer] ERROR: Operation {op_id} targets a cross-province shared file:
+[Analyzer] ERROR: CR {cr_id} targets a cross-province shared file:
             {source_file}
 
             Cross-province shared files (listed in config.yaml cross_province_shared_files,
             e.g., Code/PORTCommonHeat.vb for Portage Mutual) are used by ALL provinces
             and must NEVER be automatically modified.
 
-            This operation has been flagged as BLOCKED. The developer must either:
+            This CR has been flagged as BLOCKED. The developer must either:
               a) Modify this file manually outside the plugin
-              b) Remove this operation from the workflow
+              b) Remove this CR from the workflow
 ```
 
 ### Step 10: Handle Review-Needed Operations
 
-**Action:** For operations with `needs_review: true` or `file: null`, present the
-operation to the developer and request guidance.
+**Action:** For CRs with `needs_review: true` or where no file could be resolved,
+present the CR to the developer and request guidance.
 
-10.1. For each operation with `needs_review: true`:
+10.1. For each CR with `needs_review: true`:
 
 ```
-[Analyzer] Operation {op_id} needs your input before I can analyze it.
+[Analyzer] CR {cr_id} needs your input before I can analyze it.
 
-            SRD: {srd_id} -- "{title}"
-            Pattern: {pattern}
+            Title: "{title}"
             Description:
               {description}
 
             Currently missing:
-              - File: {file or "not specified"}
-              - Function: {function or "not specified"}
+              - File: {target_file_hint or "not specified"}
+              - Function: {target_function_hint or "not specified"}
 
             Please provide:
             1. Which file should this change target?
@@ -3259,7 +3241,7 @@ operation to the developer and request guidance.
 ```
 
 10.2. After receiving developer input, re-run the search steps (Steps 3-6) for the
-updated operation.
+updated CR.
 
 ### Step 11: Include SHARDCLASS Files in Blast Radius
 
@@ -3272,10 +3254,10 @@ shardclass_folder = config.get("shardclass_folder", "SHARDCLASS")
 # Nova Scotia uses "SharedClass" -- config.yaml should specify this
 ```
 
-11.2. Check if any operations reference SHARDCLASS files (classification = "shardclass"
+11.2. Check if any CRs reference SHARDCLASS files (classification = "shardclass"
 from Step 2.4).
 
-11.3. If operations touch SHARDCLASS files, include them in the blast radius with a
+11.3. If CRs touch SHARDCLASS files, include them in the blast radius with a
 warning:
 
 ```
@@ -3292,7 +3274,7 @@ warning:
 ```python
 profile_path = ".iq-workstreams/codebase-profile.yaml"
 deps = load_yaml_section(profile_path, "rule_dependencies")
-target_functions = set(op.get("function") for op in operations if op.get("function"))
+target_functions = set(cr.get("function") for cr in change_requests if cr.get("function"))
 
 blast_radius_notes = []
 if deps:
@@ -3330,17 +3312,17 @@ RISK LEVEL CALCULATION
 Start at LOW.
 
 Upgrade to MEDIUM if ANY of:
-  - 3+ operations in a shared module
+  - 3+ CRs in a shared module
   - Any cross_lob files affected
   - Any SHARDCLASS files affected
-  - Mixed rounding in any operation
-  - Any operation flagged for developer review
+  - Mixed rounding in any CR
+  - Any CR flagged for developer review
 
 Upgrade to HIGH if ANY of:
   - Cross-province shared file warnings
   - Hidden blast radius (reverse lookup found unaccounted projects)
-  - 10+ operations total
-  - Any operation targeting a file with 3,000+ lines
+  - 10+ CRs total
+  - Any CR targeting a file with 3,000+ lines
   - Rule dependency warnings from Step 11.5 (related functions not in target list)
 ```
 
@@ -3360,22 +3342,22 @@ Risk: {risk_level}
   {For each entry in files_to_copy.yaml:}
   {source_file} -> {target_basename}
     {If shared:} Shared by: {shared_by_list} ({count} LOBs)
-    Operations: {operation_list}
+    CRs: {cr_list}
     .vbproj updates: {count} files
 
 ## SHARED MODULE CHANGES (affects {N} LOBs)
 
-  {For each shared_module with operations:}
+  {For each shared_module with CRs:}
   {target_file} ({line_count} lines)
-    {For each operation:}
-    {op_id}: {function_name}() lines {start}-{end}
+    {For each CR:}
+    {cr_id}: {function_name}() lines {start}-{end}
              {description_of_changes}
 
 ## PER-LOB CHANGES
 
-  {For each LOB-specific file with operations:}
+  {For each LOB-specific file with CRs:}
   {file_path}
-    {op_id}: lines {start}-{end} -- {description}
+    {cr_id}: lines {start}-{end} -- {description}
 
 ## FLAGGED FOR DEVELOPER REVIEW
 
@@ -3419,16 +3401,15 @@ Risk: {risk_level}
 
 **Action:** Write all Analyzer output files.
 
-13.1. **Update each operation file** in `analysis/operations/op-{SRD}-{NN}.yaml`:
-Append the `# -- Added by Analyzer --` section with source_file, target_file,
-needs_copy, file_hash, function boundaries, target_lines, rounding, etc.
+13.1. **Write each CR analysis file** to `analysis/analyzer_output/cr-NNN-analysis.yaml`:
+Write the complete analysis including functions_analyzed, target_lines, FUBs, etc.
 
-**Bubble up `has_expressions` to operation level:** If ANY entry in `target_lines`
-has `has_expressions: true`, also set `has_expressions: true` at the operation level
-(alongside source_file, target_file, etc.). This allows the Planner to check for
-arithmetic expressions at the operation level without iterating target_lines.
+**Bubble up `has_expressions` to CR level:** If ANY entry in `target_lines`
+has `has_expressions: true`, also set `has_expressions: true` at the CR analysis level.
+This allows downstream agents to check for arithmetic expressions without iterating
+target_lines.
 ```yaml
-# Operation-level bubble-up (in addition to per-target_line):
+# CR-level bubble-up (in addition to per-target_line):
 has_expressions: true    # Set if any target_lines[].has_expressions is true
 ```
 
@@ -3436,15 +3417,15 @@ has_expressions: true    # Set if any target_lines[].has_expressions is true
 
 13.3. **Write `analysis/blast_radius.md`** (Step 12).
 
-13.4. **File hash handoff:** The Analyzer writes `file_hash` in each operation file.
+13.4. **File hash handoff:** The Analyzer writes `file_hash` in each CR analysis file.
 The Planner collects these hashes and writes `execution/file_hashes.yaml` at plan
 approval time. If a file's hash has changed between the Analyzer run and plan approval,
-the Planner forces re-analysis of affected operations before proceeding.
+the Planner forces re-analysis of affected CRs before proceeding.
 
 13.5. **Validate all written YAML files:**
 
 ```bash
-python -c "
+{python_cmd} -c "
 import sys, os, glob
 
 def validate_yaml(filepath):
@@ -3467,8 +3448,8 @@ def validate_yaml(filepath):
 print('Validating files_to_copy.yaml...')
 validate_yaml('analysis/files_to_copy.yaml')
 
-print('Validating updated operation files...')
-for f in sorted(glob.glob('analysis/operations/op-*.yaml')):
+print('Validating CR analysis files...')
+for f in sorted(glob.glob('analysis/analyzer_output/cr-*-analysis.yaml')):
     validate_yaml(f)
 
 print('All files validated.')
@@ -3477,9 +3458,9 @@ print('All files validated.')
 
 13.6. **Do NOT update `manifest.yaml`** — the orchestrator handles manifest updates
 after each agent completes (see skills/iq-plan/SKILL.md Manifest Update Protocol). The summary
-counts (operations_analyzed, files_to_copy, warnings) are derivable from the
-enriched op-*.yaml files and files_to_copy.yaml you already wrote. SRD status
-transitions are set by the orchestrator — agents do not set SRD statuses.
+counts (crs_analyzed, files_to_copy, warnings) are derivable from the
+CR analysis files and files_to_copy.yaml you already wrote. CR status
+transitions are set by the orchestrator — agents do not set CR statuses.
 
 ### Step 14: Present Results to Developer
 
@@ -3494,18 +3475,18 @@ transitions are set by the orchestrator — agents do not set SRD statuses.
     {For each file:}
     {source} -> {target_basename} ({shared_by_count} LOBs)
 
-  OPERATIONS MAPPED: {M} of {total}
-    {For each operation:}
-    {op_id}: {function_name}() in {file_basename}, lines {start}-{end}
+  CRs ANALYZED: {M} of {total}
+    {For each CR:}
+    {cr_id}: {function_name}() in {file_basename}, lines {start}-{end}
              {target_line_count} target line(s), rounding: {rounding_resolved}
 
   DEVELOPER CONFIRMATIONS NEEDED: {K}
     {Any pending confirmations}
 
   PENDING CONFIRMATION: {P}
-    {For each operation with developer_confirmed == false:}
-    {op_id}: {title} -- awaiting developer selection
-    NOTE: Planner cannot proceed until all pending operations are resolved or deferred.
+    {For each CR with developer_confirmed == false:}
+    {cr_id}: {title} -- awaiting developer selection
+    NOTE: Decomposer cannot proceed until all pending CRs are resolved or deferred.
 
   REVERSE LOOKUP: {status}
     {All accounted / N warnings}
@@ -3519,12 +3500,12 @@ transitions are set by the orchestrator — agents do not set SRD statuses.
 14.2. Report completion:
 
 ```
-[Analyzer] COMPLETE. Updated {M} operation files in analysis/operations/.
+[Analyzer] COMPLETE. Wrote {M} CR analysis files in analysis/analyzer_output/.
             - analysis/files_to_copy.yaml ({N} files)
             - analysis/blast_radius.md (risk: {risk_level})
             - {K} developer confirmations recorded
 
-            Next: Planner agent will build the execution plan for Gate 1 approval.
+            Next: Decomposer will break CRs into intents, then Planner builds the execution plan for Gate 1 approval.
 ```
 
 ---
@@ -3535,21 +3516,18 @@ These examples demonstrate the full Analyzer flow for common scenarios.
 
 ### Example A: Factor Table Change -- Nested If/Else Discovery
 
-**Input operation (from Decomposer):**
+**Input change request (from Intake):**
 
 ```yaml
-id: "op-002-01"
-srd: "srd-002"
+id: "cr-002"
 title: "Change $5000 deductible factor from -0.20 to -0.22"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "SetDisSur_Deductible"
-agent: "rate-modifier"
-pattern: "factor_table_change"
-parameters:
+description: "In function SetDisSur_Deductible, change Case 5000 deductible discount from -0.20 to -0.22"
+extracted:
   case_value: 5000
   old_value: -0.20
   new_value: -0.22
+  target_file_hint: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+  target_function_hint: "SetDisSur_Deductible"
 ```
 
 **Step 2 -- Parse .vbproj:**
@@ -3591,7 +3569,7 @@ parameters:
 **Show to developer:**
 
 ```
-[Analyzer] Operation op-002-01: Case 5000 in SetDisSur_Deductible has 2 value assignments:
+[Analyzer] CR cr-002: Case 5000 in SetDisSur_Deductible has 2 value assignments:
 
             1. Line 2202: dblDedDiscount = -0.2
                Context: Case 5000 > If blnFarmLocation Then (farm path)
@@ -3601,37 +3579,53 @@ parameters:
                Context: Case 5000 > Else (non-farm path)
                Does NOT match old_value (-0.20)
 
-            The SRD says change from -0.20 to -0.22.
+            The CR says change from -0.20 to -0.22.
             Which value(s) should be changed?
               a) Only line 2202 (farm path, matches old_value)
               b) Only line 2205 (non-farm path)
               c) Both lines
-              d) None (skip this operation)
+              d) None (skip this CR)
 ```
 
 **Developer selects (a).**
 
-**Updated operation file:**
+**Output CR analysis file:**
 
 ```yaml
-id: "op-002-01"
-srd: "srd-002"
+# File: analysis/analyzer_output/cr-002-analysis.yaml
+cr: "cr-002"
 title: "Change $5000 deductible factor from -0.20 to -0.22"
-description: |
-  In function SetDisSur_Deductible, find the Case 5000 block and change
-  the deductible discount value from -0.20 to -0.22. Note: this function
-  has nested If/Else blocks for farm vs non-farm within each Case.
-  The Analyzer must show ALL matching values to the developer.
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "SetDisSur_Deductible"
-agent: "rate-modifier"
-depends_on: []
-blocked_by: []
-pattern: "factor_table_change"
-parameters:
-  case_value: 5000
-  old_value: -0.20
+analyzed_at: "2026-03-03T10:30:00Z"
+functions_analyzed:
+  - function: "SetDisSur_Deductible"
+    file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+    source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
+    needs_copy: true
+    file_hash: "sha256:a1b2c3d4..."
+    function_line_start: 2108
+    function_line_end: 2227
+    returns: "Double"
+    target_select_depth: 1
+    target_lines:
+      - line: 2202
+        content: "                    dblDedDiscount = -0.2"
+        context: "Case 5000 > If blnFarmLocation Then (farm path)"
+        rounding: null
+        context_above:
+          - {line: 2201, content: "                If blnFarmLocation Then"}
+        context_below:
+          - {line: 2203, content: "                    dblMaxDedDiscount = -100"}
+    candidates_shown: 2
+    developer_confirmed: true
+    analysis_notes: |
+      Case 5000 has two code paths:
+        Farm (blnFarmLocation=True): dblDedDiscount = -0.2 (line 2202)
+        Non-Farm (blnFarmLocation=False): dblDedDiscount = -0.25 (line 2205)
+      Developer chose to modify the farm path only (line 2202).
+    related_functions: []
+    parameters:  # Preserved from CR extracted for downstream reference
+      case_value: 5000
+      old_value: -0.20
   new_value: -0.22
 
 # -- Added by Analyzer --
@@ -3659,21 +3653,19 @@ analysis_notes: |
 
 ### Example B: Array6 Rate Increase with Mixed Rounding
 
-**Input operation (from Decomposer):**
+**Input change request (from Intake):**
 
 ```yaml
-id: "op-004-01"
-srd: "srd-004"
+id: "cr-004"
 title: "Multiply liability bundle premiums by 1.03"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_type: "shared_module"
-function: "GetLiabilityBundlePremiums"
-agent: "rate-modifier"
-pattern: "base_rate_increase"
-parameters:
+description: "Apply 3% increase to all liability bundle premiums across all territories"
+extracted:
   factor: 1.03
   scope: "all_territories"
-  rounding: "auto"
+  target_file_hint: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+  target_function_hint: "GetLiabilityBundlePremiums"
+domain_hints:
+  rounding_hint: "auto"
 ```
 
 **Step 4 -- Find function:**
@@ -3696,7 +3688,7 @@ parameters:
 **Report to developer:**
 
 ```
-[Analyzer] Rounding resolution for op-004-01 (GetLiabilityBundlePremiums):
+[Analyzer] Rounding resolution for cr-004 (GetLiabilityBundlePremiums):
             48 Array6 assignment lines found:
               42 lines with integer values -> banker rounding (round to nearest cent)
               6 lines with decimal values -> no rounding (keep full precision)
@@ -3706,7 +3698,7 @@ parameters:
             Operation-level rounding: MIXED (per-line rounding in target_lines)
 ```
 
-**Updated operation (abbreviated):**
+**Output CR analysis (abbreviated):**
 
 ```yaml
 # -- Added by Analyzer --
@@ -3747,21 +3739,19 @@ developer_confirmed: true
 
 ### Example C: AB Auto Base Rate -- Function Name Variation
 
-**Input operation (from Decomposer):**
+**Input change request (from Intake):**
 
 ```yaml
-id: "op-001-01"
-srd: "srd-001"
-title: "Multiply AB Auto base rate Array6 values by 1.05"
-file: "Alberta/Code/mod_Algorithms_ABAuto20260101.vb"
-file_type: "lob_specific"
-function: "GetBaseRate_Auto"
-agent: "rate-modifier"
-pattern: "base_rate_increase"
-parameters:
+id: "cr-001"
+title: "Multiply AB Auto base rate values by 1.05"
+description: "Apply 5% increase to Alberta Auto base rate values across all territories"
+extracted:
   factor: 1.05
   scope: "all_territories"
-  rounding: "auto"
+  target_file_hint: "Alberta/Code/mod_Algorithms_ABAuto20260101.vb"
+  target_function_hint: "GetBaseRate_Auto"
+domain_hints:
+  rounding_hint: "auto"
 ```
 
 **Step 4 -- Find function:**
@@ -3783,7 +3773,7 @@ parameters:
               1. GetFactor_BaseRate (lines 1201-1235) -- contains territory Array6 tables
               2. SetFactor_BaseRateGroup (lines 1240-1288) -- contains class Array6 tables
 
-            Which function should op-001-01 target?
+            Which function should cr-001 target?
             (Enter a number, or type the function name)
 ```
 
@@ -3807,19 +3797,19 @@ End Select
 
 ### Example D: Multiple Select Case Blocks in One Function
 
-**Input operation (from Decomposer):**
+**Input change request (from Intake):**
 
 ```yaml
-id: "op-010-01"
-srd: "srd-010"
+id: "cr-010"
 title: "Multiply snowmobile deductible factors by 1.02"
-file: "Alberta/Code/mod_Algorithms_ABAuto20260101.vb"
-function: "GetBasePrem_Snowmobile"
-pattern: "base_rate_increase"
-parameters:
+description: "Apply 2% increase to snowmobile deductible factors"
+extracted:
   factor: 1.02
   scope: "all_territories"
-  rounding: "auto"
+  target_file_hint: "Alberta/Code/mod_Algorithms_ABAuto20260101.vb"
+  target_function_hint: "GetBasePrem_Snowmobile"
+domain_hints:
+  rounding_hint: "auto"
 ```
 
 **Step 4 -- Find function:**
@@ -3836,7 +3826,7 @@ parameters:
 **Show to developer (4 blocks, show ALL):**
 
 ```
-[Analyzer] Operation op-010-01: GetBasePrem_Snowmobile has 4 Select Case blocks
+[Analyzer] CR cr-010: GetBasePrem_Snowmobile has 4 Select Case blocks
             with Array6 assignments.
 
             Block 3 (lines 870-890): Deductible factors
@@ -3852,7 +3842,7 @@ parameters:
               Line 920: varRates = Array6(18, 6.74, 7.04, 7.04)  Case Else (varRates)
               Line 921: excessRates = Array6(1, 0.41, 0.44, 0.44) Case Else (excessRates)
 
-            The SRD says "multiply deductible factors by 1.02".
+            The CR says "multiply deductible factors by 1.02".
             Which block(s) should be modified?
               a) Block 3 only (deductible factors)
               b) Block 4 only (purchase price groups)
@@ -3900,7 +3890,7 @@ parameters:
 
 ### Example F: DAT File Detection in GetBasePremium_Home
 
-**Scenario:** An operation targets GetBasePremium_Home to multiply base rates by 5%.
+**Scenario:** A CR targets GetBasePremium_Home to multiply base rates by 5%.
 
 **Step 4 -- Find function:**
 - Found: GetBasePremium_Home (lines 3387-3543)
@@ -3914,7 +3904,7 @@ parameters:
 **Report:**
 
 ```
-[Analyzer] WARNING: Operation {op_id} targets GetBasePremium_Home, but this function
+[Analyzer] WARNING: CR {cr_id} targets GetBasePremium_Home, but this function
             uses DAT file lookups (GetPremFromResourceFile) for base rate values.
 
             The base rate values are NOT in VB source code -- they are in external
@@ -3923,9 +3913,9 @@ parameters:
             Found: 0 rate-bearing Array6 assignments
             Found: 8 GetPremFromResourceFile() calls
 
-            This operation should have been flagged as dat_file_warning by Intake.
+            This CR should have been flagged as dat_file_warning by Intake.
             Options:
-              a) Mark as OUT_OF_SCOPE (skip this operation)
+              a) Mark as OUT_OF_SCOPE (skip this CR)
               b) Override -- I know the rates are in code (explain where)
 ```
 
@@ -3946,7 +3936,7 @@ End Select
 ```
 
 **Handling:** The Analyzer must recognize `Case X To Y` and `Case Is > X` patterns.
-When the Decomposer specifies `case_value: 50`, search for both `Case 50` and ranges
+When a CR specifies `case_value: 50`, search for both `Case 50` and ranges
 that include 50 (`Case 26 To 50`). Show all matches and let the developer confirm.
 
 ### Case 2: Two Arrays on Adjacent Lines (Same Case Block)
@@ -3960,8 +3950,8 @@ Case Else
 ```
 
 **Handling:** Both lines are Array6 assignments in the same Case block but target
-DIFFERENT variables. The Analyzer lists both as separate target_lines. The SRD context
-determines which to modify (or both, if the SRD says "all rates").
+DIFFERENT variables. The Analyzer lists both as separate target_lines. The CR context
+determines which to modify (or both, if the CR says "all rates").
 
 ### Case 3: Array6 with Arithmetic Expressions
 
@@ -3973,7 +3963,7 @@ varRates = Array6(30 + 10, 25.5, 40, 50)
 
 **Handling:** The Analyzer flags `has_expressions: true` and precomputes
 `evaluated_args` by evaluating simple VB.NET arithmetic (addition, subtraction).
-The Rate Modifier uses `evaluated_args` (if present) instead of parsing VB.NET
+The Change Engine uses `evaluated_args` (if present) instead of parsing VB.NET
 arithmetic at execution time. If evaluation fails for any argument, fall back to
 flagging for manual review. Record:
 
@@ -3987,7 +3977,7 @@ target_lines:
     analysis_notes: "Array6 contains arithmetic expression '30 + 10', evaluated to 40."
 ```
 
-The Rate Modifier uses `evaluated_args` for value comparison and change calculation,
+The Change Engine uses `evaluated_args` for value comparison and change calculation,
 then replaces the entire expression with the computed result in the output.
 
 ### Case 4: Source File Already at Target Date
@@ -4001,20 +3991,20 @@ already updated the reference, or a previous plugin run already created the copy
 - Read the existing file at the target date
 - Proceed with line number discovery normally
 
-### Case 5: Multiple Operations in the Same Function
+### Case 5: Multiple CRs Targeting the Same Function
 
-**Scenario:** Two operations (op-002-01 and op-003-01) both target `SetDisSur_Deductible`
+**Scenario:** Two CRs (cr-002 and cr-003) both target `SetDisSur_Deductible`
 but for different Case values (5000 and 2500).
 
 **Handling:** The Analyzer finds function boundaries ONCE (lines 2108-2227). For each
-operation, it searches within those same boundaries for the specific Case value. Each
-operation gets its own `target_lines` pointing to different lines within the same
+CR, it searches within those same boundaries for the specific Case value. Each
+CR analysis gets its own `target_lines` pointing to different lines within the same
 function. The Planner will sequence them bottom-to-top (Case 5000 on line 2199 runs
 before Case 2500 on line 2178).
 
 ### Case 6: Cross-LOB File Discovery
 
-**Scenario:** The operation targets `Option_SewerBackup_SKHome20231001.vb`, which
+**Scenario:** The CR targets `Option_SewerBackup_SKHome20231001.vb`, which
 the File Reference Map shows is compiled by BOTH Home and Condo.
 
 **Handling:** Record the cross-LOB nature in the blast radius:
@@ -4023,7 +4013,7 @@ the File Reference Map shows is compiled by BOTH Home and Condo.
 cross_lob_warning: "Option_SewerBackup_SKHome20231001.vb is named for Home but also compiled by Condo"
 ```
 
-If the operation needs a new dated copy, the .vbproj updates must include BOTH the
+If the CR needs a new dated copy, the .vbproj updates must include BOTH the
 Home and Condo .vbproj files. The files_to_copy.yaml entry includes both:
 
 ```yaml
@@ -4055,12 +4045,12 @@ but the file does not exist on disk.
               - The .vbproj was manually edited with a wrong path
               - The file was deleted or renamed
 
-            Cannot analyze operations targeting this file until it exists.
+            Cannot analyze CRs targeting this file until it exists.
 ```
 
 ### Case 8: Nova Scotia SharedClass/ Directory
 
-**Scenario:** An operation targets a Nova Scotia hab workflow. The SHARDCLASS folder
+**Scenario:** A CR targets a Nova Scotia hab workflow. The SHARDCLASS folder
 is named "SharedClass" instead of "SHARDCLASS".
 
 **Handling:** Read `config.yaml` for the `shardclass_folder` value for this province.
@@ -4092,15 +4082,15 @@ target_lines:
     rounding: null
 ```
 
-### Case 10: Operation Targets a New File (Logic Modifier Creates It)
+### Case 10: CR Targets a New File (Change Engine Creates It)
 
-**Scenario:** An operation for `new_endorsement_flat` targets a new
+**Scenario:** A CR for a new endorsement targets a new
 `Option_NewEndorsement_SKHome20260101.vb` that does not yet exist in any .vbproj.
 
 **Handling:**
 - `source_file: null` (no existing file)
 - `target_file: "Saskatchewan/Code/Option_NewEndorsement_SKHome20260101.vb"`
-- `needs_copy: false` (no copy, the Logic Modifier will CREATE this file)
+- `needs_copy: false` (no copy, the Change Engine will CREATE this file)
 - `needs_new_file: true`
 - Provide a template reference from an existing similar file:
 
@@ -4109,7 +4099,7 @@ template_reference: "Saskatchewan/Code/Option_Bicycle_SKHome20220502.vb"
 template_reason: "Similar endorsement option file in the same LOB"
 ```
 
-The Logic Modifier uses the template as a structural guide for the new file.
+The Change Engine uses the template as a structural guide for the new file.
 
 ---
 
@@ -4123,12 +4113,12 @@ The Logic Modifier uses the template as a structural guide for the new file.
    Classify each file (shared_module, lob_specific, cross_lob, local, shardclass,
    cross_province_shared, engine_shared, hub_shared).
 
-3. **Resolve source files** from target filenames. The Decomposer's `file` field uses
+3. **Resolve source files** from target filenames. Intake's `extracted.target_file_hint` uses
    the target date; the Analyzer finds the actual file referenced by the .vbproj
    (which may have an older date).
 
 4. **Compute file hashes** for TOCTOU protection. Record SHA-256 hash of each source
-   file. Rate Modifier / Logic Modifier will re-check before writing.
+   file. Change Engine will re-check before writing.
 
 5. **Build a function index** for each source file. Find all Sub/Function declarations
    and their matching End Sub/End Function boundaries.
@@ -4137,16 +4127,16 @@ The Logic Modifier uses the template as a structural guide for the new file.
    insensitive match, and wildcard pattern match. Present candidates when ambiguous.
    Flag DAT-file functions (GetPremFromResourceFile users) as non-editable.
 
-7. **Apply pattern-specific search** within function boundaries:
-   - base_rate_increase: find `= Array6(...)` assignments, filter out `IsItemInArray`
+7. **Apply appropriate search strategy** within function boundaries based on the CR:
+   - Array6 rate values: find `= Array6(...)` assignments, filter out `IsItemInArray`
      and default initializations
-   - factor_table_change: find `Case {value}`, extract ALL value assignments including
+   - Factor tables: find `Case {value}`, extract ALL value assignments including
      nested If/Else branches
-   - included_limits: find variable/constant declarations with limit values
-   - new_endorsement_flat: find CalcOption routing and insertion point
-   - new_liability_option: find liability function and insertion point
-   - new_coverage_type: find constants section, routing function, ResourceID.vb
-   - eligibility_rules: find validation function and insertion point
+   - Limit values: find variable/constant declarations with limit values
+   - Endorsement routing: find CalcOption routing and insertion point
+   - Liability options: find liability function and insertion point
+   - Coverage types: find constants section, routing function, ResourceID.vb
+   - Eligibility rules: find validation function and insertion point
 
 8. **Resolve rounding from "auto"** by inspecting actual Array6 values:
    - All integers --> "banker"
@@ -4161,7 +4151,7 @@ The Logic Modifier uses the template as a structural guide for the new file.
     update instructions for each (including references found by reverse lookup).
 
 11. **Check for cross-province shared files** and REFUSE to assign line numbers if
-    an operation targets one.
+    a CR targets one.
 
 12. **Include SHARDCLASS/SharedClass** files in blast radius analysis. Use the correct
     directory name from config.yaml (NS uses "SharedClass").
@@ -4180,22 +4170,24 @@ The Logic Modifier uses the template as a structural guide for the new file.
     Select Case blocks. Show ALL blocks with Array6 assignments and let the developer
     specify which to modify.
 
-## Boundary with Decomposer and Planner
+## Boundary with Intake, Decomposer, and Planner
 
-| Responsibility | Decomposer | Analyzer | Planner |
-|---------------|:----------:|:--------:|:-------:|
-| Identify target files | YES | Verifies | Uses |
-| Classify file types | YES | Verifies | Uses |
-| Determine function names | Best guess | Confirms by reading code | Uses |
-| Determine exact line numbers | NO | YES | Uses for ordering |
-| Resolve rounding: "auto" | Passes through | Resolves to banker/none/mixed | Uses |
-| Detect cross-LOB file refs | Flags from .vbproj | Full reverse lookup | Reports |
-| Show candidates to developer | NO (does not read code) | YES (reads actual code) | NO |
-| Build dependency graph | YES | Preserves | Uses for ordering |
-| Determine file copy needs | NO | YES (files_to_copy.yaml) | Builds copy phase |
-| Build blast radius report | NO | YES (blast_radius.md) | Includes in plan |
-| Sequence operations bottom-to-top | NO | Provides line numbers | YES (orders by line) |
-| Build approval document | NO | NO | YES |
+The Analyzer runs AFTER Intake and Discovery, and BEFORE the Decomposer and Planner.
+
+| Responsibility | Intake | Analyzer | Decomposer | Planner |
+|---------------|:------:|:--------:|:----------:|:-------:|
+| Identify target files | Provides target_file_hint | Verifies via .vbproj | Uses confirmed files | Uses |
+| Classify file types | NO | YES | Uses | Uses |
+| Determine function names | Provides target_function_hint | Confirms by reading code | Uses confirmed names | Uses |
+| Determine exact line numbers | NO | YES | Uses for intent mapping | Uses for ordering |
+| Resolve rounding: "auto" | Provides rounding_hint | Resolves to banker/none/mixed | Uses | Uses |
+| Detect cross-LOB file refs | NO | Full reverse lookup | Uses | Reports |
+| Show candidates to developer | NO | YES (reads actual code) | NO | NO |
+| Build intent graph | NO | NO | YES (from CR analyses) | Uses for ordering |
+| Determine file copy needs | NO | YES (files_to_copy.yaml) | Uses | Builds copy phase |
+| Build blast radius report | NO | YES (blast_radius.md) | Uses | Includes in plan |
+| Sequence changes bottom-to-top | NO | Provides line numbers | NO | YES (orders by line) |
+| Build approval document | NO | NO | NO | YES |
 
 ## Error Handling
 
@@ -4205,7 +4197,7 @@ The Logic Modifier uses the template as a structural guide for the new file.
 [Analyzer] ERROR: .vbproj file not found:
             {path}
 
-            This file is listed in change_spec.yaml target_folders but does not
+            This file is listed in change_requests.yaml target_folders but does not
             exist on disk. Was IQWiz run to create this version folder?
 ```
 
@@ -4222,25 +4214,25 @@ The Logic Modifier uses the template as a structural guide for the new file.
 ### Source File Not Found
 
 ```
-[Analyzer] ERROR: Cannot find source file for operation {op_id}:
+[Analyzer] ERROR: Cannot find source file for CR {cr_id}:
             Expected pattern: {file_pattern}
             Searched in File Reference Map ({N} Code/ files)
 
             No file matches. Either:
-              - The Decomposer has a wrong file name
-              - The .vbproj references have changed since Decomposer ran
+              - Intake's target_file_hint has a wrong file name
+              - The .vbproj references have changed since Intake ran
               - This is a new file that needs to be created
 ```
 
 ### Function Not Found
 
 ```
-[Analyzer] WARNING: Function "{function_hint}" not found in {source_file}
+[Analyzer] WARNING: Function "{target_function_hint}" not found in {source_file}
 
             Searched {N} functions. Similar names:
               {candidates}
 
-            Which function should operation {op_id} target?
+            Which function should CR {cr_id} target?
 ```
 
 ### Hash Mismatch (TOCTOU Violation)
@@ -4271,6 +4263,147 @@ The Logic Modifier uses the template as a structural guide for the new file.
               - {M} non-Array6 assignments
               - {K} Array6 calls inside IsItemInArray (membership tests)
 ```
+
+---
+
+## Sub-Agent Dispatch (Coordinator Mode)
+
+The Analyzer MAY spawn its own sub-agents for per-function analysis when the
+workload exceeds the safe threshold. This is the Analyzer's internal optimization —
+the orchestrator does not control it. The Analyzer decides when to use sub-agents
+based on the complexity heuristic below.
+
+### When to Use Sub-Agents
+
+**Complexity heuristic — spawn sub-agents when ANY of these are true:**
+- Total unique target functions across all CRs > 5
+- Any target source file exceeds 5,000 lines
+- Total CRs > 6
+
+**When below threshold:** Run Steps 4-5 inline (single context window) as normal.
+
+### How It Works
+
+The Analyzer transitions from a sequential processor to a coordinator:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ANALYZER (coordinator)                                     │
+│                                                             │
+│  Steps 1-3: Load context, parse .vbproj, resolve sources   │
+│  (Always runs inline — lightweight, no code reading)        │
+│                                                             │
+│  Step 4+5: Function reading + target search + FUB building  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  IF complexity threshold MET:                        │   │
+│  │    For each unique {function, source_file} pair:     │   │
+│  │      Spawn "Function Reader" sub-agent               │   │
+│  │      Sub-agent reads ONE function body               │   │
+│  │      Sub-agent searches for targets (Step 5)         │   │
+│  │      Sub-agent builds ONE FUB (Step 5.10)            │   │
+│  │      Sub-agent writes fub-{function}.yaml to disk    │   │
+│  │                                                      │   │
+│  │  IF complexity threshold NOT MET:                    │   │
+│  │    Run Steps 4-5 inline (current behavior)           │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  Steps 6-14: Rounding, reverse lookup, blast radius, etc.   │
+│  (Always runs inline — uses FUB outputs, no large reads)    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Concurrency Limit
+
+**Max 2 concurrent sub-agents** (RAM constraint — the Analyzer itself occupies
+1 agent slot, leaving 2 of the 3-agent max). Spawn sub-agents sequentially or
+in pairs. Do NOT exceed 2 at a time.
+
+### Sub-Agent Prompt Template
+
+Each Function Reader sub-agent receives a focused prompt with ONLY the relevant
+sections of this spec (not the full 4,000+ lines):
+
+```
+You are a Function Reader sub-agent for the IQ Rate Update Plugin Analyzer.
+
+TASK: Read ONE function, search for targets, and build a FUB.
+
+CARRIER ROOT: {root_path}
+WORKSTREAM: .iq-workstreams/changes/{workstream-name}/
+SOURCE FILE: {source_file_path}
+FUNCTION: {function_name} (lines {start}-{end})
+CR(s): {cr_ids targeting this function}
+
+Read the Analyzer spec sections you need:
+  .iq-update/agents/analyzer.md — Steps 4, 5 (5.1-5.10), and the SPECIAL CASES section
+
+For each CR targeting this function:
+  1. Read the source file between lines {start} and {end}
+  2. Apply the appropriate search strategy (Step 5.1-5.8) based on the CR
+  3. Build a Function Understanding Block (Step 5.10)
+  4. Write the FUB to: analysis/analyzer_output/fub-{function_name}.yaml
+
+Use this format for the FUB output file:
+  function_name: "{function_name}"
+  source_file: "{source_file}"
+  line_range: [{start}, {end}]
+  cr_targets:
+    - cr_id: "cr-NNN"
+      search_results: {from Step 5}
+  fub: {from Step 5.10}
+
+CR details:
+{paste each cr-NNN.yaml content for CRs targeting this function}
+
+Config values:
+  shardclass_folder: {from config.yaml}
+
+IMPORTANT:
+  - Write ONLY to analysis/analyzer_output/fub-{function_name}.yaml
+  - Do NOT modify any source code files
+  - Do NOT update manifest.yaml (the coordinator handles that)
+  - If you encounter a question for the developer, write it to the FUB file
+    as: pending_questions: ["question text"]
+```
+
+### Crash Resilience
+
+Sub-agent results are written to disk as individual YAML files:
+`analysis/analyzer_output/fub-{function_name}.yaml`
+
+If a sub-agent crashes or times out:
+1. The coordinator checks if the FUB file exists on disk
+2. If file exists and is valid YAML: sub-agent succeeded (use the file)
+3. If file is missing or empty: retry once with a new sub-agent
+4. If retry also fails: fall back to inline processing for that function
+5. Log the failure in manifest error_log
+
+### Coordinator Collation
+
+After all sub-agents complete (or fall back to inline):
+
+```
+1. Read all fub-{function}.yaml files from analysis/analyzer_output/
+2. Collect any pending_questions from sub-agents:
+   - Present ALL pending questions to the developer in one batch
+   - Record answers in developer_decisions
+   - If answers change the analysis: re-run the affected sub-agent
+3. Merge FUB data into the per-CR analysis files (cr-NNN-analysis.yaml)
+4. Continue with Steps 6-14 (rounding, reverse lookup, etc.)
+```
+
+### What Sub-Agents Do NOT Handle
+
+Sub-agents only handle Steps 4-5 (function reading, target search, FUB building).
+The coordinator always handles:
+- .vbproj parsing (Step 2) — needs full project context
+- Source file resolution (Step 3) — needs file reference map
+- Rounding resolution (Step 6) — needs cross-CR view
+- Reverse lookup (Step 7) — needs province-wide .vbproj scan
+- files_to_copy.yaml (Step 8) — needs all CRs aggregated
+- Cross-province check (Step 9) — needs config.yaml
+- Blast radius report (Step 12) — needs everything
+- Output writing and manifest update (Steps 13-14)
 
 ---
 

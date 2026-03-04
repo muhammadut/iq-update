@@ -1,8 +1,9 @@
-# IQ Rate Update Plugin
+# IQ Update Plugin
 
 This folder contains a TBW/IntelliQuote rating engine. The `.iq-update/` plugin
-automates rate value changes in the existing VB.NET codebase. Portage Mutual is
-the first carrier -- this plugin is designed to work with any TBW carrier folder.
+helps developers implement any ticket against the existing VB.NET codebase. Portage
+Mutual is the first carrier -- this plugin is designed to work with any TBW carrier
+folder.
 
 **Carrier-agnostic design:** This plugin works with any TBW/IntelliQuote carrier
 that uses manufactured rating. Examples throughout use Portage Mutual (the first
@@ -151,31 +152,14 @@ workstream files. These six commands cover the full workflow.
     iq-status/SKILL.md               <- /iq-status skill definition (dashboard)
     iq-investigate/SKILL.md          <- /iq-investigate skill definition (codebase investigation)
   agents/
-    intake.md                        <- Parses Summary of Changes into structured spec
-    discovery.md                     <- Reads code, traces CalcMain flow, resolves SRD targets
-    decomposer.md                    <- Breaks spec into atomic operations + dependencies
-    analyzer.md                      <- Maps operations to files:lines (blast radius)
-    planner.md                       <- Generates execution plan for approval
-    rate-modifier/                   <- Array6/Select Case value changes (progressive layers)
+    intake.md                        <- Understands any ticket format, extracts change requests
+    discovery.md                     <- Reads code, traces CalcMain flow, resolves change request targets
+    analyzer.md                      <- Reads actual code, builds FUBs, maps targets to files:lines
+    decomposer.md                    <- Breaks change requests into intents grounded in discovered code
+    planner.md                       <- Generates execution plan with Q&A flow for approval
+    change-engine/                   <- Unified code modification engine
       core.md                        <- Universal rules, schemas, execution steps (always loaded)
-      dispatch.md                    <- Operation type routing table (always loaded)
-      modules/                       <- Loaded per operation type by capsule
-        array6-multiply.md           <- base_rate_increase pattern
-        mixed-rounding.md            <- Per-line mixed rounding specialization
-        factor-table.md              <- factor_table_change + included_limits
-        expressions.md               <- Arithmetic expression handling
-      edge-cases.md                  <- Worked examples + error handling (loaded on demand)
-    logic-modifier/                  <- New functions, conditionals, eligibility (progressive layers)
-      core.md                        <- Universal rules, schemas, execution steps (always loaded)
-      dispatch.md                    <- Pattern routing table (always loaded)
-      modules/                       <- Loaded per operation type by capsule
-        constant-insertion.md        <- new_coverage_type (constant)
-        case-block-insertion.md      <- new_coverage_type (Case block)
-        dat-constants.md             <- ResourceID.vb DAT constants
-        new-endorsement-file.md      <- new_endorsement_flat + new_liability_option
-        validation-function.md       <- eligibility_rules
-        alert-message.md             <- alert_message
-      edge-cases.md                  <- Worked examples + error handling (loaded on demand)
+      strategies.md                  <- Reference examples for common patterns (loaded when strategy_hint present)
     reviewer.md                      <- Validates all changes, produces summary
   patterns/                          <- Reusable recipes for common change types
   validators/                        <- Automated validation checks (Python)
@@ -187,9 +171,11 @@ workstream files. These six commands cover the full workflow.
   changes/
     {workflow-id}/                   <- One folder per ticket (created by /iq-plan)
       manifest.yaml                  <- State machine + all tracking data
-      input/, parsed/                <- Intake artifacts
-      analysis/                      <- Discovery + Decomposer + Analyzer artifacts (from /iq-plan)
-        code_discovery.yaml          <- CalcMain flow + SRD→function mapping (from Discovery)
+      input/, parsed/                <- Intake artifacts (parsed/requests/cr-NNN.yaml)
+      analysis/                      <- Discovery + Analyzer + Decomposer artifacts (from /iq-plan)
+        code_discovery.yaml          <- CalcMain flow + CR→function mapping (from Discovery)
+        intent_graph.yaml            <- Intents with target regions + dependencies (from Decomposer)
+        analyzer_output/             <- Function understanding blocks (from Analyzer)
       plan/                          <- Planner artifacts (from /iq-plan)
       execution/                     <- Execution artifacts (from /iq-execute)
         checkpoint.yaml              <- Crash-recovery state for orchestrator
@@ -207,26 +193,27 @@ workstream files. These six commands cover the full workflow.
 ## Agent Pipeline
 
 ```
-/iq-plan:    Intake -> Discovery -> Decomposer -> Analyzer -> Planner -> [GATE 1]
-/iq-execute: Build Capsules -> [File-Copy Worker] -> [Modifier Workers...] -> [Review Worker] -> [EXECUTED]
-/iq-review:  Validator -> Diff -> Report -> [GATE 2] -> DONE
+/iq-plan:    Intake -> Discovery -> Analyzer -> Decomposer -> Planner -> [GATE 1]
+/iq-execute: Build Capsules -> [File-Copy Worker] -> [Change Engine Workers...] -> [EXECUTED]
+/iq-review:  Validator -> Diff -> Semantic Verifier -> Report -> [GATE 2] -> DONE
 ```
 
-**Discovery Agent:** Reads CalcMain.vb, traces the calculation flow, matches SRDs
-to exact functions, and produces `analysis/code_discovery.yaml`. Runs every time
-(tokens are cheap). All downstream agents use verified function names/files instead
-of guessing. If Discovery fails, agents fall back to existing heuristic behavior.
+**Discovery Agent:** Reads CalcMain.vb, traces the calculation flow, matches change
+requests to exact functions, and produces `analysis/code_discovery.yaml`. Runs every
+time (tokens are cheap). All downstream agents use verified function names/files
+instead of guessing. If Discovery fails, agents fall back to existing heuristic behavior.
 
 **Context engineering:** `/iq-execute` uses the **capsule pattern** — the orchestrator
-pre-builds self-contained operation capsules (one per target file), then spawns
-short-lived worker agents that each get a fresh context window. Workers load only
-the progressive spec layers they need (core + dispatch + relevant module card).
-Progress is tracked in `execution/checkpoint.yaml` for crash recovery.
+pre-builds self-contained capsules (one per target file), then spawns short-lived
+Change Engine workers that each get a fresh context window. Workers load
+`change-engine/core.md` (always) and optionally `change-engine/strategies.md`
+(when strategy_hint is present). Progress is tracked in `execution/checkpoint.yaml`
+for crash recovery.
 
 `/iq-plan` launches agents as an **agent team** (default) or **sequential sub-agents**
 (fallback). `/iq-review` uses the same team/sequential pattern.
 
-Same-file operations are always sequential, bottom-to-top.
+Same-file intents are always sequential, bottom-to-top.
 
 ## Three Workflows
 

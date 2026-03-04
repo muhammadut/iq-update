@@ -5,7 +5,7 @@ name: base_rate_increase
 description: "Multiply all Array6 base rate values by a factor"
 complexity: SIMPLE
 agents:
-  - rate-modifier
+  - change-engine
 
 classification_hints:
   - "base rate"

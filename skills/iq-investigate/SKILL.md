@@ -561,7 +561,7 @@ Developer runs /iq-plan
   → Analyzer Step 5.9.7 reads investigation/finding-001.yaml
   → Matches access need "claims" → uses pre-validated pattern
   → Skips Pattern Library lookup + confirmation (developer already validated)
-  → Logic Modifier gets the correct pattern in operation YAML capsule
+  → Change Engine gets the correct pattern in intent capsule
 ```
 
 ### Path B: Global Knowledge (Step 5 — Promote to Profile)

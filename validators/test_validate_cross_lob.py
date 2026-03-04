@@ -11,7 +11,7 @@ Tests use the ACTUAL config.yaml schema produced by /iq-init:
   - lobs is a LIST of dicts [{name, folder, is_hab, ...}]
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_cross_lob.py -v
 """
 

@@ -5,7 +5,7 @@ name: eligibility_rules
 description: "Add validation/eligibility logic with alert messages"
 complexity: COMPLEX
 agents:
-  - logic-modifier
+  - change-engine
 
 classification_hints:
   - "eligibility"

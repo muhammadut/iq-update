@@ -12,7 +12,9 @@ This module provides common utilities used by 2+ validators:
 Dependencies: PyYAML (yaml), Python 3.8+ standard library.
 """
 
+import ast
 import hashlib
+import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -99,6 +101,9 @@ def load_context(manifest_path):
     # Snapshots directory
     snapshots_dir = workstream_dir / "execution" / "snapshots"
 
+    # Schema warnings (non-fatal — validators still run on older manifests)
+    schema_warnings = validate_manifest_schema(manifest)
+
     return {
         "manifest": manifest,
         "workstream_dir": workstream_dir,
@@ -108,7 +113,59 @@ def load_context(manifest_path):
         "file_hashes": file_hashes,
         "snapshots_dir": snapshots_dir,
         "config": config,
+        "schema_warnings": schema_warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Manifest Schema Validation
+# ---------------------------------------------------------------------------
+
+# Current manifest version. Increment when the schema changes.
+MANIFEST_VERSION = "2.0"
+
+# Required top-level keys for a valid manifest.yaml.
+MANIFEST_REQUIRED_KEYS = {
+    "manifest_version", "workflow_id", "state", "province", "lobs",
+    "effective_date", "created_at", "updated_at",
+}
+
+
+def validate_manifest_schema(manifest):
+    """Validate manifest.yaml has the expected version and required keys.
+
+    Args:
+        manifest: Parsed manifest.yaml dict.
+
+    Returns:
+        list of warning strings. Empty if the manifest is valid.
+    """
+    warnings = []
+
+    if not isinstance(manifest, dict):
+        return [f"manifest.yaml is not a dict (got {type(manifest).__name__})"]
+
+    # Version check
+    version = manifest.get("manifest_version")
+    if version is None:
+        warnings.append(
+            "manifest.yaml missing 'manifest_version' — may be from an older "
+            "plugin version. Expected version: " + MANIFEST_VERSION
+        )
+    elif version != MANIFEST_VERSION:
+        warnings.append(
+            f"manifest_version mismatch: found '{version}', "
+            f"expected '{MANIFEST_VERSION}'. Schema may have changed."
+        )
+
+    # Required keys
+    missing = MANIFEST_REQUIRED_KEYS - set(manifest.keys())
+    if missing:
+        warnings.append(
+            "manifest.yaml missing required keys: " + ", ".join(sorted(missing))
+        )
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -148,21 +205,27 @@ def make_result(severity, passed, findings, message=""):
 # ---------------------------------------------------------------------------
 
 def build_inventory(ops_log):
-    """Categorize files from the operations log by agent type.
+    """Categorize files from the operations log by change type.
+
+    Uses the change_type field to classify each operation entry:
+    - "value_editing"        -> value_files
+    - "structure_insertion"  -> structure_files
+    - "file_creation"        -> structure_files + new_files
+    - "flow_modification"    -> structure_files
 
     Args:
         ops_log: Parsed operations_log.yaml dict with "operations" key.
 
     Returns:
         dict with keys:
-            rate_modifier_files  - set of relative file paths touched by rate-modifier/orchestrator
-            logic_modifier_files - set of relative file paths touched by logic-modifier
-            new_files            - set of files created by logic-modifier (new_file_created flag)
-            all_files            - union of all files
+            value_files      - set of relative file paths for value editing
+            structure_files  - set of relative file paths for structure changes
+            new_files        - set of files created (change_type == "file_creation")
+            all_files        - union of all files
     """
     inventory = {
-        "rate_modifier_files": set(),
-        "logic_modifier_files": set(),
+        "value_files": set(),
+        "structure_files": set(),
         "new_files": set(),
         "all_files": set(),
     }
@@ -170,14 +233,19 @@ def build_inventory(ops_log):
         filepath = entry.get("file", "")
         if not filepath:
             continue
-        agent = entry.get("agent", "")
         inventory["all_files"].add(filepath)
-        if agent in ("rate-modifier", "orchestrator"):
-            inventory["rate_modifier_files"].add(filepath)
-        elif agent == "logic-modifier":
-            inventory["logic_modifier_files"].add(filepath)
-            if entry.get("summary", {}).get("new_file_created"):
+
+        change_type = entry.get("change_type", "")
+        if change_type == "value_editing":
+            inventory["value_files"].add(filepath)
+        elif change_type in ("structure_insertion", "file_creation",
+                             "flow_modification"):
+            inventory["structure_files"].add(filepath)
+            if change_type == "file_creation":
                 inventory["new_files"].add(filepath)
+        elif change_type:
+            inventory.setdefault("unknown_types", set()).add(change_type)
+
     return inventory
 
 
@@ -381,27 +449,6 @@ def is_array6_test_usage(line):
     return True
 
 
-def classify_array6_usage(line):
-    """Classify Array6 usage on a line.
-
-    Returns:
-        "rate"  - if Array6 is assigned to a variable (modifiable)
-        "test"  - if Array6 is used as a function argument (never modify)
-        "none"  - if no Array6 on this line or line is a comment
-    """
-    if "Array6" not in line:
-        return "none"
-
-    stripped = line.strip()
-    if stripped.startswith("'"):
-        return "none"
-
-    # Rate pattern: identifier = Array6(...)
-    if re.search(r'\w+\$?\s*=\s*Array6\s*\(', line):
-        return "rate"
-
-    return "test"
-
 
 # ---------------------------------------------------------------------------
 # VB.NET Parsing: Comment Detection
@@ -463,6 +510,41 @@ def is_inline_comment_only_change(before, after):
 
 
 # ---------------------------------------------------------------------------
+# Path Containment Check
+# ---------------------------------------------------------------------------
+
+def check_path_containment(filepath, root):
+    """Verify that filepath resolves within root directory.
+
+    Prevents path traversal attacks where a malformed manifest could cause
+    reads outside the carrier root (e.g., "../../etc/passwd").
+
+    On Windows, normalizes case before comparison to avoid false failures
+    from case-insensitive filesystems with differing path case.
+
+    Args:
+        filepath: Relative file path (str or Path) to check.
+        root: Root directory (str or Path) that filepath must stay within.
+
+    Returns:
+        Path: The resolved absolute path.
+
+    Raises:
+        ValueError: If the resolved path escapes the root directory.
+    """
+    resolved = (Path(root) / filepath).resolve()
+    root_resolved = Path(root).resolve()
+    # On Windows, normalize case for case-insensitive filesystem comparison
+    if os.name == "nt":
+        resolved_cmp = Path(os.path.normcase(str(resolved)))
+        root_cmp = Path(os.path.normcase(str(root_resolved)))
+        resolved_cmp.relative_to(root_cmp)  # raises ValueError if outside
+    else:
+        resolved.relative_to(root_resolved)  # raises ValueError if outside
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Hash Computation
 # ---------------------------------------------------------------------------
 
@@ -490,6 +572,7 @@ def compute_file_hash(filepath):
     return f"sha256:{h.hexdigest()}"
 
 
+
 # ---------------------------------------------------------------------------
 # Snapshot Path Resolution
 # ---------------------------------------------------------------------------
@@ -497,13 +580,11 @@ def compute_file_hash(filepath):
 def resolve_snapshot_path(filepath, snapshots_dir):
     """Resolve the snapshot file path for a given source file.
 
-    Tries path-safe encoding first (slashes replaced with underscores),
-    then falls back to basename-only for backward compatibility with
-    existing snapshots created by iq-execute.
+    Uses path-encoded naming (separators replaced with __) to prevent
+    basename collisions across directories.
 
-    Path-safe encoding: "Saskatchewan/Code/mod_Common.vb"
-        -> "Saskatchewan_Code_mod_Common.vb.snapshot"
-    Basename fallback: -> "mod_Common.vb.snapshot"
+    Example: "Saskatchewan/Code/mod_Common.vb"
+        -> "Saskatchewan__Code__mod_Common.vb.snapshot"
 
     Args:
         filepath: Relative file path (e.g., "Saskatchewan/Code/mod_Common.vb").
@@ -515,17 +596,11 @@ def resolve_snapshot_path(filepath, snapshots_dir):
     if not snapshots_dir or not snapshots_dir.exists():
         return None
 
-    # Try path-safe encoding first (forward-looking)
-    safe_name = filepath.replace("/", "_").replace("\\", "_")
+    # Path-encoded snapshot name (separators replaced with __)
+    safe_name = filepath.replace("/", "__").replace("\\", "__")
     safe_path = snapshots_dir / f"{safe_name}.snapshot"
     if safe_path.exists():
         return safe_path
-
-    # Fall back to basename-only (current iq-execute convention)
-    basename = Path(filepath).name
-    basename_path = snapshots_dir / f"{basename}.snapshot"
-    if basename_path.exists():
-        return basename_path
 
     return None
 
@@ -556,21 +631,22 @@ def load_snapshot_lines(filepath, snapshots_dir):
 # Operation ID Parsing
 # ---------------------------------------------------------------------------
 
-def extract_srd_from_op(op_id):
-    """Extract SRD ID from an operation ID.
+def extract_cr_from_intent(intent_id):
+    """Extract CR ID from an intent ID.
 
-    "op-001-01" -> "srd-001"
-    "op-012-03" -> "srd-012"
+    Format:
+        "intent-001" -> "cr-001"
+        "intent-012" -> "cr-012"
 
     Args:
-        op_id: Operation ID string (e.g., "op-001-01").
+        intent_id: Intent ID string (e.g., "intent-001").
 
     Returns:
-        SRD ID string (e.g., "srd-001"), or None if pattern doesn't match.
+        CR ID string (e.g., "cr-001"), or None if pattern doesn't match.
     """
-    match = re.match(r'op-(\d+)-\d+', op_id)
+    match = re.match(r'intent-(\d+)(?:-\d+)?', intent_id)
     if match:
-        return f"srd-{match.group(1)}"
+        return f"cr-{match.group(1)}"
     return None
 
 
@@ -742,11 +818,78 @@ def find_shared_module_ref(vbproj_path, module_name):
 # Numeric Evaluation & Value Extraction
 # ---------------------------------------------------------------------------
 
+def _eval_node(node):
+    """Recursively evaluate an AST node without ever calling eval().
+
+    Supports: numeric constants, binary ops (+, -, *, /), unary ops (+, -).
+    """
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if not isinstance(node.value, (int, float)):
+            raise ValueError(f"Non-numeric constant: {node.value!r}")
+        return node.value
+    # ast.Num for older Python versions (removed in 3.14)
+    if type(node).__name__ == "Num":
+        return node.n  # noqa: attr-defined — ast.Num.n exists pre-3.14
+    if isinstance(node, ast.BinOp):
+        left = _eval_node(node.left)
+        right = _eval_node(node.right)
+        ops = {
+            ast.Add: lambda a, b: a + b,
+            ast.Sub: lambda a, b: a - b,
+            ast.Mult: lambda a, b: a * b,
+            ast.Div: lambda a, b: a / b,
+        }
+        op_func = ops.get(type(node.op))
+        if op_func is None:
+            raise ValueError(f"Unsupported binary op: {type(node.op).__name__}")
+        return op_func(left, right)
+    if isinstance(node, ast.UnaryOp):
+        operand = _eval_node(node.operand)
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        raise ValueError(f"Unsupported unary op: {type(node.op).__name__}")
+    raise ValueError(f"Unsupported node: {type(node).__name__}")
+
+
+def safe_eval_arithmetic(expr):
+    """Safely evaluate simple arithmetic expressions (numbers, +, -, *, /).
+
+    Uses a recursive AST evaluator — never calls eval(). Only allows numeric
+    literals and basic arithmetic operators. Rejects function calls, attribute
+    access, imports, etc.
+
+    Args:
+        expr: String expression to evaluate (e.g., "30 + 10", "100 * 1.05").
+
+    Returns:
+        The numeric result (int or float).
+
+    Raises:
+        ValueError: If the expression is too long, has invalid syntax,
+                    or contains unsafe AST nodes.
+    """
+    if len(expr) > 200:
+        raise ValueError(f"Expression too long ({len(expr)} chars)")
+
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError:
+        raise ValueError(f"Invalid expression: {expr}")
+
+    return _eval_node(tree)
+
+
 def try_eval_numeric(expr):
     """Try to evaluate a string as a numeric value.
 
     Handles: "50", "-0.22", "30 + 10", "512.59"
     Returns None for variables, function calls, or complex expressions.
+
+    Uses safe_eval_arithmetic() instead of eval() for security.
 
     Args:
         expr: String expression to evaluate.
@@ -769,9 +912,9 @@ def try_eval_numeric(expr):
     # Allow digits, whitespace, decimal point, +, -, *, /, and parentheses
     if re.fullmatch(r'[\d\s\.\+\-\*/\(\)]+', expr):
         try:
-            result = eval(expr, {"__builtins__": {}}, {})
+            result = safe_eval_arithmetic(expr)
             return float(result)
-        except Exception:
+        except (ValueError, Exception):
             return None
 
     return None

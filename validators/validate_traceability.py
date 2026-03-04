@@ -3,31 +3,31 @@ Validator: Traceability
 Severity: WARNING
 
 Purpose:
-    Verify that every SRD requirement maps to at least one code change
-    and that no orphan changes exist (changes not linked to any SRD).
+    Verify that every CR (change request) maps to at least one code change
+    and that no orphan changes exist (changes not linked to any CR).
     This ensures nothing was missed and nothing was added without
     authorization.
 
 What it checks:
-    1. Every SRD in the parsed/srds/ directory (or change_spec.yaml)
-       has at least one corresponding operation in the operations log
-    2. Every operation in the operations log traces back to a valid SRD
-    3. No orphan changes: every operation ID maps to a known SRD, and
+    1. Every CR in the parsed/requests/ directory (or change_requests.yaml)
+       has at least one corresponding intent in the operations log
+    2. Every intent in the operations log traces back to a valid CR
+    3. No orphan changes: every intent ID maps to a known CR, and
        non-standard IDs are flagged
 
 What it does NOT check:
     - Whether the changes are correct (other validators)
-    - Whether the changes are complete for each SRD (validate_completeness)
-    - Whether the SRDs were correctly parsed from the input (Intake's job)
+    - Whether the changes are complete for each CR (validate_completeness)
+    - Whether the CRs were correctly parsed from the input (Intake's job)
 
 Edge cases handled:
     - Rework entries (rework-*) are skipped in the orphan check
-    - DAT-file SRDs with no operations are still flagged as untraced
+    - DAT-file CRs with no intents are still flagged as untraced
       (developer decides at Gate 2 if acceptable)
-    - SKIPPED operations still count as traced log entries
-    - FAILED operations still count for traceability mapping
-    - No SRDs found returns passed=true with informational message
-    - Non-standard op IDs (not matching op-NNN-NN) flagged as orphans
+    - SKIPPED intents still count as traced log entries
+    - FAILED intents still count for traceability mapping
+    - No CRs found returns passed=true with informational message
+    - Non-standard intent IDs (not matching intent-NNN-NN) flagged as orphans
 
 Return schema:
     {
@@ -35,11 +35,11 @@ Return schema:
         "severity": "WARNING",
         "findings": [
             {
-                "issue": str,         # "untraced_srd" | "orphan_change"
-                "srd": str,           # SRD ID (for untraced_srd)
-                "description": str,   # SRD description (for untraced_srd)
-                "operation": str,     # Operation ID (for orphan_change)
-                "mapped_srd": str,    # SRD the op claims to belong to (for orphan_change)
+                "issue": str,         # "untraced_cr" | "orphan_change"
+                "cr": str,            # CR ID (for untraced_cr)
+                "description": str,   # CR description (for untraced_cr)
+                "operation": str,     # Intent ID (for orphan_change)
+                "mapped_cr": str,     # CR the intent claims to belong to (for orphan_change)
                 "message": str,       # Human-readable
             }
         ],
@@ -49,173 +49,174 @@ Return schema:
 
 from pathlib import Path
 
-from _helpers import extract_srd_from_op, load_context, load_yaml, make_result
+from _helpers import extract_cr_from_intent, load_context, load_yaml, make_result
 
 
 # ---------------------------------------------------------------------------
-# SRD Loading
+# CR Loading
 # ---------------------------------------------------------------------------
 
-def _load_srds_from_files(srds_dir):
-    """Load SRD IDs and descriptions from individual srd-*.yaml files.
+def _load_crs_from_files(requests_dir):
+    """Load CR IDs and descriptions from individual cr-*.yaml files.
 
     Args:
-        srds_dir: Path to the parsed/srds/ directory.
+        requests_dir: Path to the parsed/requests/ directory.
 
     Returns:
-        Tuple of (srd_ids set, srd_descriptions dict).
+        Tuple of (cr_ids set, cr_descriptions dict).
     """
-    srd_ids = set()
-    srd_descriptions = {}
+    cr_ids = set()
+    cr_descriptions = {}
 
-    if not srds_dir.exists():
-        return srd_ids, srd_descriptions
+    if not requests_dir.exists():
+        return cr_ids, cr_descriptions
 
-    for srd_file in srds_dir.glob("srd-*.yaml"):
+    for cr_file in requests_dir.glob("cr-*.yaml"):
         try:
-            srd_data = load_yaml(srd_file)
+            cr_data = load_yaml(cr_file)
         except Exception:
             continue  # Skip malformed YAML files
-        if not isinstance(srd_data, dict):
+        if not isinstance(cr_data, dict):
             continue
-        srd_id = srd_data.get("id", srd_data.get("srd_id", srd_file.stem))
-        srd_ids.add(srd_id)
-        srd_descriptions[srd_id] = srd_data.get("description", "")
+        cr_id = cr_data.get("id", cr_data.get("cr_id", cr_file.stem))
+        cr_ids.add(cr_id)
+        cr_descriptions[cr_id] = cr_data.get("description", "")
 
-    return srd_ids, srd_descriptions
+    return cr_ids, cr_descriptions
 
 
-def _load_srds_from_change_spec(change_spec_path):
-    """Load SRD IDs and descriptions from change_spec.yaml as fallback.
+def _load_crs_from_change_requests(change_requests_path):
+    """Load CR IDs and descriptions from change_requests.yaml as fallback.
 
-    Only used when no individual srd-*.yaml files were found.
+    Only used when no individual cr-*.yaml files were found.
 
     Args:
-        change_spec_path: Path to parsed/change_spec.yaml.
+        change_requests_path: Path to parsed/change_requests.yaml.
 
     Returns:
-        Tuple of (srd_ids set, srd_descriptions dict).
+        Tuple of (cr_ids set, cr_descriptions dict).
     """
-    srd_ids = set()
-    srd_descriptions = {}
+    cr_ids = set()
+    cr_descriptions = {}
 
-    if not change_spec_path.exists():
-        return srd_ids, srd_descriptions
+    if not change_requests_path.exists():
+        return cr_ids, cr_descriptions
 
     try:
-        change_spec = load_yaml(change_spec_path)
+        change_requests = load_yaml(change_requests_path)
     except Exception:
-        return srd_ids, srd_descriptions  # Malformed YAML
-    if not isinstance(change_spec, dict):
-        return srd_ids, srd_descriptions
+        return cr_ids, cr_descriptions  # Malformed YAML
+    if not isinstance(change_requests, dict):
+        return cr_ids, cr_descriptions
 
-    for srd in change_spec.get("srds", []):
-        if not isinstance(srd, dict):
+    for cr in (change_requests.get("change_requests")
+                or change_requests.get("requests", [])):
+        if not isinstance(cr, dict):
             continue
-        srd_id = srd.get("id", srd.get("srd_id", ""))
-        if srd_id:
-            srd_ids.add(srd_id)
-            srd_descriptions[srd_id] = srd.get("description", "")
+        cr_id = cr.get("id", cr.get("cr_id", ""))
+        if cr_id:
+            cr_ids.add(cr_id)
+            cr_descriptions[cr_id] = cr.get("description", "")
 
-    return srd_ids, srd_descriptions
+    return cr_ids, cr_descriptions
 
 
 # ---------------------------------------------------------------------------
-# Operation Mapping
+# Intent Mapping
 # ---------------------------------------------------------------------------
 
-def _build_op_srd_mapping(ops_log):
-    """Build mappings between operations and SRDs.
+def _build_intent_cr_mapping(ops_log):
+    """Build mappings between intents and CRs.
 
     Args:
         ops_log: Parsed operations_log.yaml dict with "operations" key.
 
     Returns:
-        Tuple of (ops_by_srd dict, all_op_srds dict).
-            ops_by_srd: srd_id -> [op_id, ...]
-            all_op_srds: op_id -> srd_id (only for ops matching op-NNN-NN)
+        Tuple of (intents_by_cr dict, all_intent_crs dict).
+            intents_by_cr: cr_id -> [intent_id, ...]
+            all_intent_crs: intent_id -> cr_id (only for intents matching intent-NNN-NN)
     """
-    ops_by_srd = {}   # srd_id -> [op_id, ...]
-    all_op_srds = {}   # op_id -> srd_id
+    intents_by_cr = {}   # cr_id -> [intent_id, ...]
+    all_intent_crs = {}   # intent_id -> cr_id
 
     for entry in ops_log.get("operations", []):
-        op_id = entry.get("operation", "")
-        srd_id = extract_srd_from_op(op_id)
-        if srd_id:
-            all_op_srds[op_id] = srd_id
-            ops_by_srd.setdefault(srd_id, []).append(op_id)
+        intent_id = entry.get("operation", "")
+        cr_id = extract_cr_from_intent(intent_id)
+        if cr_id:
+            all_intent_crs[intent_id] = cr_id
+            intents_by_cr.setdefault(cr_id, []).append(intent_id)
 
-    return ops_by_srd, all_op_srds
+    return intents_by_cr, all_intent_crs
 
 
 # ---------------------------------------------------------------------------
-# Check 1: Every SRD has at least one operation
+# Check 1: Every CR has at least one intent
 # ---------------------------------------------------------------------------
 
-def _check_untraced_srds(srd_ids, srd_descriptions, ops_by_srd, findings):
-    """Check that every SRD has at least one operation in the log.
+def _check_untraced_crs(cr_ids, cr_descriptions, intents_by_cr, findings):
+    """Check that every CR has at least one intent in the log.
 
-    SRDs with no operations are flagged as "untraced_srd". This includes
-    DAT-file SRDs -- the developer decides at Gate 2 if acceptable.
+    CRs with no intents are flagged as "untraced_cr". This includes
+    DAT-file CRs -- the developer decides at Gate 2 if acceptable.
 
     Args:
-        srd_ids: Set of known SRD IDs.
-        srd_descriptions: Dict mapping srd_id -> description.
-        ops_by_srd: Dict mapping srd_id -> [op_id, ...].
+        cr_ids: Set of known CR IDs.
+        cr_descriptions: Dict mapping cr_id -> description.
+        intents_by_cr: Dict mapping cr_id -> [intent_id, ...].
         findings: List to append finding dicts to (mutated in place).
     """
-    for srd_id in sorted(srd_ids):
-        if srd_id not in ops_by_srd:
-            srd_desc = srd_descriptions.get(srd_id, "")
+    for cr_id in sorted(cr_ids):
+        if cr_id not in intents_by_cr:
+            cr_desc = cr_descriptions.get(cr_id, "")
             findings.append({
-                "issue": "untraced_srd",
-                "srd": srd_id,
-                "description": srd_desc,
-                "message": f"SRD {srd_id} has no operations in the log",
+                "issue": "untraced_cr",
+                "cr": cr_id,
+                "description": cr_desc,
+                "message": f"CR {cr_id} has no intents in the log",
             })
 
 
 # ---------------------------------------------------------------------------
-# Check 2: Every operation maps to a known SRD
+# Check 2: Every intent maps to a known CR
 # ---------------------------------------------------------------------------
 
-def _check_orphan_changes(ops_log, srd_ids, all_op_srds, findings):
-    """Check that every operation maps to a known SRD.
+def _check_orphan_changes(ops_log, cr_ids, all_intent_crs, findings):
+    """Check that every intent maps to a known CR.
 
-    Rework entries (starting with "rework-") are skipped. Operations
-    whose op_id follows op-NNN-NN but maps to an unknown SRD are flagged.
-    Operations with non-standard IDs are also flagged.
+    Rework entries (starting with "rework-") are skipped. Intents
+    whose ID follows intent-NNN-NN but maps to an unknown CR are flagged.
+    Intents with non-standard IDs are also flagged.
 
     Args:
         ops_log: Parsed operations_log.yaml dict.
-        srd_ids: Set of known SRD IDs.
-        all_op_srds: Dict mapping op_id -> srd_id.
+        cr_ids: Set of known CR IDs.
+        all_intent_crs: Dict mapping intent_id -> cr_id.
         findings: List to append finding dicts to (mutated in place).
     """
     for entry in ops_log.get("operations", []):
-        op_id = entry.get("operation", "")
+        intent_id = entry.get("operation", "")
 
-        # Skip rework entries -- they don't map to SRDs
-        if op_id.startswith("rework-"):
+        # Skip rework entries -- they don't map to CRs
+        if intent_id.startswith("rework-"):
             continue
 
-        srd_id = all_op_srds.get(op_id)
-        if srd_id and srd_id not in srd_ids:
-            # op_id matches op-NNN-NN but the SRD doesn't exist
+        cr_id = all_intent_crs.get(intent_id)
+        if cr_id and cr_id not in cr_ids:
+            # intent_id matches intent-NNN-NN but the CR doesn't exist
             findings.append({
                 "issue": "orphan_change",
-                "operation": op_id,
-                "mapped_srd": srd_id,
-                "message": f"Operation {op_id} maps to {srd_id} which is not in the SRD list",
+                "operation": intent_id,
+                "mapped_cr": cr_id,
+                "message": f"Intent {intent_id} maps to {cr_id} which is not in the CR list",
             })
-        elif not srd_id and op_id:
-            # op_id doesn't match the op-NNN-NN pattern
-            # Could be a custom operation -- flag but don't block
+        elif not cr_id and intent_id:
+            # intent_id doesn't match the intent-NNN-NN pattern
+            # Could be a custom intent -- flag but don't block
             findings.append({
                 "issue": "orphan_change",
-                "operation": op_id,
-                "mapped_srd": None,
-                "message": f"Operation {op_id} does not follow op-NNN-NN naming convention",
+                "operation": intent_id,
+                "mapped_cr": None,
+                "message": f"Intent {intent_id} does not follow intent-NNN-NN naming convention",
             })
 
 
@@ -223,40 +224,40 @@ def _check_orphan_changes(ops_log, srd_ids, all_op_srds, findings):
 # Message Builder
 # ---------------------------------------------------------------------------
 
-def _build_message(findings, srd_ids, ops_by_srd, all_op_srds):
+def _build_message(findings, cr_ids, intents_by_cr, all_intent_crs):
     """Build a human-readable summary message.
 
     Args:
         findings: List of finding dicts.
-        srd_ids: Set of known SRD IDs.
-        ops_by_srd: Dict mapping srd_id -> [op_id, ...].
-        all_op_srds: Dict mapping op_id -> srd_id.
+        cr_ids: Set of known CR IDs.
+        intents_by_cr: Dict mapping cr_id -> [intent_id, ...].
+        all_intent_crs: Dict mapping intent_id -> cr_id.
 
     Returns:
         str summary message.
     """
-    if not srd_ids:
-        return "No SRDs found to trace"
+    if not cr_ids:
+        return "No CRs found to trace"
 
-    traced_srds = len(srd_ids & set(ops_by_srd.keys()))
-    total_ops = len(all_op_srds)
+    traced_crs = len(cr_ids & set(intents_by_cr.keys()))
+    total_intents = len(all_intent_crs)
 
     if not findings:
         return (
-            f"Full traceability: {traced_srds}/{len(srd_ids)} SRDs traced, "
-            f"{total_ops} operations mapped."
+            f"Full traceability: {traced_crs}/{len(cr_ids)} CRs traced, "
+            f"{total_intents} intents mapped."
         )
 
-    untraced = sum(1 for f in findings if f["issue"] == "untraced_srd")
+    untraced = sum(1 for f in findings if f["issue"] == "untraced_cr")
     orphans = sum(1 for f in findings if f["issue"] == "orphan_change")
     parts = []
     if untraced:
-        parts.append(f"{untraced} untraced SRD(s)")
+        parts.append(f"{untraced} untraced CR(s)")
     if orphans:
         parts.append(f"{orphans} orphan change(s)")
     return (
         f"Traceability gaps: {'; '.join(parts)}. "
-        f"{traced_srds}/{len(srd_ids)} SRDs traced."
+        f"{traced_crs}/{len(cr_ids)} CRs traced."
     )
 
 
@@ -265,15 +266,15 @@ def _build_message(findings, srd_ids, ops_by_srd, all_op_srds):
 # ---------------------------------------------------------------------------
 
 def validate(manifest_path: str) -> dict:
-    """Validate that all SRDs trace to code changes and vice versa.
+    """Validate that all CRs trace to code changes and vice versa.
 
     Runs 2 traceability checks:
-      1. Every SRD has at least one operation in the operations log.
-      2. Every operation maps back to a known SRD (rework entries skipped).
+      1. Every CR has at least one intent in the operations log.
+      2. Every intent maps back to a known CR (rework entries skipped).
 
     Args:
         manifest_path: Absolute path to the workflow manifest.yaml file.
-                       Used to locate SRD files, change_spec, and
+                       Used to locate CR files, change_requests, and
                        operations_log for traceability checking.
 
     Returns:
@@ -298,40 +299,40 @@ def validate(manifest_path: str) -> dict:
 
     findings = []
 
-    # --- Load SRDs ---
-    # Primary: individual srd-*.yaml files in parsed/srds/
-    srds_dir = workstream_dir / "parsed" / "srds"
-    srd_ids, srd_descriptions = _load_srds_from_files(srds_dir)
+    # --- Load CRs ---
+    # Primary: individual cr-*.yaml files in parsed/requests/
+    requests_dir = workstream_dir / "parsed" / "requests"
+    cr_ids, cr_descriptions = _load_crs_from_files(requests_dir)
 
-    # Fallback: change_spec.yaml (only if no individual files found)
-    if not srd_ids:
-        change_spec_path = workstream_dir / "parsed" / "change_spec.yaml"
-        srd_ids, srd_descriptions = _load_srds_from_change_spec(change_spec_path)
+    # Fallback: change_requests.yaml (only if no individual files found)
+    if not cr_ids:
+        change_requests_path = workstream_dir / "parsed" / "change_requests.yaml"
+        cr_ids, cr_descriptions = _load_crs_from_change_requests(change_requests_path)
 
-    # Edge case: no SRDs found at all
-    if not srd_ids:
+    # Edge case: no CRs found at all
+    if not cr_ids:
         return make_result(
             severity="WARNING",
             passed=True,
             findings=[],
-            message="No SRDs found to trace",
+            message="No CRs found to trace",
         )
 
-    # --- Build operation-to-SRD mapping ---
-    ops_by_srd, all_op_srds = _build_op_srd_mapping(ops_log)
+    # --- Build intent-to-CR mapping ---
+    intents_by_cr, all_intent_crs = _build_intent_cr_mapping(ops_log)
 
-    # --- Check 1: Every SRD has at least one operation ---
+    # --- Check 1: Every CR has at least one intent ---
     try:
-        _check_untraced_srds(srd_ids, srd_descriptions, ops_by_srd, findings)
+        _check_untraced_crs(cr_ids, cr_descriptions, intents_by_cr, findings)
     except Exception as e:
         findings.append({
             "issue": "check1_error",
-            "message": f"Untraced SRD check crashed: {e}",
+            "message": f"Untraced CR check crashed: {e}",
         })
 
-    # --- Check 2: Every operation maps to a known SRD ---
+    # --- Check 2: Every intent maps to a known CR ---
     try:
-        _check_orphan_changes(ops_log, srd_ids, all_op_srds, findings)
+        _check_orphan_changes(ops_log, cr_ids, all_intent_crs, findings)
     except Exception as e:
         findings.append({
             "issue": "check2_error",
@@ -339,7 +340,7 @@ def validate(manifest_path: str) -> dict:
         })
 
     # --- Build summary message ---
-    message = _build_message(findings, srd_ids, ops_by_srd, all_op_srds)
+    message = _build_message(findings, cr_ids, intents_by_cr, all_intent_crs)
 
     return make_result(
         severity="WARNING",

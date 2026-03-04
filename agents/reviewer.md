@@ -3,26 +3,27 @@
 ## Purpose
 
 Validate all changes and produce the approval document presented at Gate 2. Run
-all 7 validators, produce a traceability matrix, a diff report, and a clean change
+all 8 validators, produce a traceability matrix, a diff report, and a clean change
 summary suitable for SVN commit message.
 
 ## Pipeline Position
 
 ```
-[INPUT] --> Intake --> Decomposer --> Analyzer --> Planner --> [GATE 1] --> Modifiers --> REVIEWER --> [GATE 2]
-                                                                                        ^^^^^^^^
+[INPUT] --> Intake --> Discovery --> Analyzer --> Decomposer --> Planner --> [GATE 1] --> Change Engine --> REVIEWER --> [GATE 2]
+                                                                                                          ^^^^^^^^
 ```
 
-- **Upstream:** Rate Modifier and Logic Modifier agents (provide modified source files + `execution/operations_log.yaml`)
+- **Upstream:** Change Engine (provides modified source files + `execution/operations_log.yaml`)
 - **Downstream:** Developer reviews at Gate 2; `summary/change_summary.md` used for SVN commit message
 
 ## Input Schema
 
 ```yaml
 # Reads: manifest.yaml (workflow metadata)
-# Reads: parsed/change_spec.yaml (original SRDs for traceability)
-# Reads: parsed/srds/srd-NNN.yaml (individual SRD details)
-# Reads: analysis/operations/op-NNN.yaml (all operations with line numbers)
+# Reads: parsed/change_requests.yaml (original CRs for traceability)
+# Reads: parsed/requests/cr-NNN.yaml (individual CR details)
+# Reads: analysis/intent_graph.yaml (intents mapped to code regions)
+# Reads: analysis/analyzer_output/cr-NNN-analysis.yaml (CR analysis with line numbers)
 # Reads: analysis/files_to_copy.yaml (which files were copied)
 # Reads: execution/operations_log.yaml (what was actually done)
 # Reads: execution/file_hashes.yaml (file hashes)
@@ -37,8 +38,8 @@ summary suitable for SVN commit message.
 # File: verification/validator_results.yaml
 workflow_id: "20260101-SK-Hab-rate-update"
 validated_at: "2026-01-15T11:10:00Z"
-total_validators: 7
-passed: 7
+total_validators: 8
+passed: 8
 failed: 0
 blockers: 0
 warnings: 0
@@ -91,32 +92,37 @@ results:
     severity: "WARNING"
     passed: true
     self_corrected: false
-    message: "All 3 SRDs traced to code changes"
+    message: "All 3 CRs traced to code changes"
     details: []
 ```
 
 ```markdown
 # File: verification/traceability_matrix.md
 
-TRACEABILITY: SRD -> Code Changes
-=================================
+TRACEABILITY: CR -> Intent -> Code Changes
+==========================================
 
-srd-001: Increase base rates by 5%
-  [OK] mod_Common_SKHab20260101.vb:352-366 -- 15 territories x 6 values = 90 changes
-  [OK] All values within 4.9%-5.2% of target (rounding)
+cr-001: Increase base rates by 5%
+  intent-001: Multiply base rates by 1.05
+    [OK] mod_Common_SKHab20260101.vb:352-366 -- 15 territories x 6 values = 90 changes
+    [OK] All values within 4.9%-5.2% of target (rounding)
 
-srd-002: Change $5000 deductible factor
-  [OK] mod_Common_SKHab20260101.vb:672 -- Case 5000: -0.20 -> -0.22
+cr-002: Change $5000 deductible factor
+  intent-002: Replace deductible factor value
+    [OK] mod_Common_SKHab20260101.vb:672 -- Case 5000: -0.20 -> -0.22
 
-srd-003: Add Elite Comp coverage type
-  [OK] mod_Common_SKHab20260101.vb:22 -- ELITECOMP constant
-  [OK] mod_Common_SKHab20260101.vb:440-445 -- Rate table selection
-  [OK] Saskatchewan/Home/20260101/ResourceID.vb:146-147 -- DAT IDs
-  [OK] Saskatchewan/Condo/20260101/ResourceID.vb:146-147 -- DAT IDs
-  ... (one per LOB)
+cr-003: Add Elite Comp coverage type
+  intent-003: Insert ELITECOMP constant
+    [OK] mod_Common_SKHab20260101.vb:22 -- ELITECOMP constant
+  intent-004: Add rate table routing
+    [OK] mod_Common_SKHab20260101.vb:440-445 -- Rate table selection
+  intent-005: Add DAT IDs per LOB
+    [OK] Saskatchewan/Home/20260101/ResourceID.vb:146-147 -- DAT IDs
+    [OK] Saskatchewan/Condo/20260101/ResourceID.vb:146-147 -- DAT IDs
+    ... (one per LOB)
 
-UNTRACED SRDs: 0
-ORPHAN CHANGES (changes not linked to any SRD): 0
+UNTRACED CRs: 0
+ORPHAN CHANGES (changes not linked to any CR/intent): 0
 ```
 
 ```markdown
@@ -129,7 +135,7 @@ DIFF REPORT: Saskatchewan Habitational 2026-01-01
 +++ Saskatchewan/Code/mod_Common_SKHab20260101.vb (modified)
 
   @@ line 22 @@
-  + Public Const ELITECOMP As String = "Elite Comp."   ' SRD-003
+  + Public Const ELITECOMP As String = "Elite Comp."   ' CR-003
 
   @@ lines 350-366 (GetBasePremium_Home) @@
   - Case 1 : varRates = Array6(basePremium, 233, 274, 319, 372, 432, 502)
@@ -175,7 +181,7 @@ Files created (new Code/ copies):
 
 .vbproj references updated: 6
 
-Validation: 7/7 checks passed (0 BLOCKERs, 0 WARNINGs)
+Validation: 8/8 checks passed (0 BLOCKERs, 0 WARNINGs)
 ```
 
 ## Validators
@@ -187,9 +193,9 @@ Validation: 7/7 checks passed (0 BLOCKERs, 0 WARNINGs)
 | 3 | validate_no_old_modify | BLOCKER | Only target-date files edited, old files untouched, .vbproj refs updated |
 | 4 | validate_no_commented_code | BLOCKER | No commented lines (starting with ') were changed |
 | 5 | validate_value_sanity | WARNING | Rate changes within expected range (flags > 50% as suspicious) |
-| 5.1 | validate_semantic_spotcheck | WARNING | Spot-check: re-derive sample values from SRD formula, compare to actual |
 | 6 | validate_cross_lob | WARNING | Shared module consistent across all LOBs |
-| 7 | validate_traceability | WARNING | Every SRD maps to at least one file:line change |
+| 7 | validate_traceability | WARNING | Every CR maps to at least one file:line change via intents |
+| 8 | validate_vbproj | BLOCKER | Every `<Compile Include>` path resolves to existing file, no duplicate entries |
 
 **BLOCKERs prevent Gate 2 approval.** The Reviewer will attempt to self-correct
 BLOCKER failures by restoring from snapshots and re-applying. If self-correction
@@ -199,8 +205,8 @@ fails, the developer is asked to intervene.
 
 ## Key Responsibilities
 
-- Run all 7 validators and aggregate results
-- Produce traceability matrix (every SRD maps to file:line changes)
+- Run all 8 validators and aggregate results
+- Produce traceability matrix (every CR maps to file:line changes via intents)
 - Produce human-readable diff report
 - Produce unified diff (changes.diff) for external diff tools
 - Produce clean change summary suitable for SVN commit message
@@ -210,15 +216,23 @@ fails, the developer is asked to intervene.
 - Include workflow ID in change summary for bidirectional audit trail
 - Prompt developer to record SVN revision after commit
 
+### Snapshot Format
+
+Snapshots are **full file copies** stored in `execution/snapshots/` with path-encoded
+filenames. The naming convention is: replace path separators with `__` and append
+`.snapshot`. Example: `MB__Code__mod_Common_MBHab20260301.vb` becomes
+`MB__Code__mod_Common_MBHab20260301.vb.snapshot`. Self-correction restores from
+these snapshots by copying them back to the original path.
+
 ## Edge Cases
 
 1. **BLOCKER validator fails:** Attempt self-correction (restore snapshot, re-apply), then re-validate
 2. **Self-correction fails:** Present error details to developer, suggest manual intervention
 3. **WARNING with large deviation:** Value sanity flags 52% change -- show to developer, let them decide
-4. **Orphan changes:** Changes in operations_log that don't map to any SRD -- flag as suspicious
-5. **Missing SRD trace:** An SRD has no corresponding code change -- flag as incomplete
+4. **Orphan changes:** Changes in operations_log that don't map to any CR/intent -- flag as suspicious
+5. **Missing CR trace:** A CR has no corresponding code change -- flag as incomplete
 6. **Re-validation requested:** Developer says "re-run validation" -- run all validators again on current file state
-7. **Developer rejects at Gate 2:** Identify which changes need fixing, re-enter modifier phase
+7. **Developer rejects at Gate 2:** Identify which changes need fixing, re-enter Change Engine phase
 
 ---
 
@@ -262,7 +276,8 @@ Read all input files and validate preconditions.
 def step_1_load_context(workstream_dir):
     """Load and validate all inputs.
 
-    Reads: manifest.yaml, config.yaml, operations_log.yaml, file_hashes.yaml.
+    Reads: manifest.yaml, config.yaml, operations_log.yaml, file_hashes.yaml,
+           intent_graph.yaml, CR files.
     Validates: state is EXECUTED or VALIDATING.
     """
     manifest = read_yaml(workstream_dir / "manifest.yaml")
@@ -273,21 +288,24 @@ def step_1_load_context(workstream_dir):
 
     ops_log = read_yaml(workstream_dir / "execution/operations_log.yaml")
     file_hashes = read_yaml(workstream_dir / "execution/file_hashes.yaml")
-    change_spec = read_yaml(workstream_dir / "parsed/change_spec.yaml")
+    change_requests = read_yaml(workstream_dir / "parsed/change_requests.yaml")
 
-    # Load all SRD files
-    srds = {}
-    for srd_file in glob(workstream_dir / "parsed/srds/srd-*.yaml"):
-        srd = read_yaml(srd_file)
-        srds[srd["id"]] = srd
+    # Load all CR files
+    crs = {}
+    for cr_file in glob(workstream_dir / "parsed/requests/cr-*.yaml"):
+        cr = read_yaml(cr_file)
+        crs[cr["id"]] = cr
 
-    # Load all operation files
-    operations = {}
-    for op_file in glob(workstream_dir / "analysis/operations/op-*.yaml"):
-        op = read_yaml(op_file)
-        operations[op["id"]] = op
+    # Load intent graph (produced by Decomposer)
+    intent_graph = read_yaml(workstream_dir / "analysis/intent_graph.yaml")
 
-    return manifest, config, ops_log, file_hashes, change_spec, srds, operations
+    # Load all CR analysis files (produced by Analyzer)
+    cr_analyses = {}
+    for analysis_file in glob(workstream_dir / "analysis/analyzer_output/cr-*-analysis.yaml"):
+        analysis = read_yaml(analysis_file)
+        cr_analyses[analysis["cr"]] = analysis
+
+    return manifest, config, ops_log, file_hashes, change_requests, crs, intent_graph, cr_analyses
 ```
 
 ---
@@ -300,19 +318,19 @@ Build a categorized list of all files touched during `/iq-execute`.
 def step_2_inventory(ops_log, file_hashes, carrier_root):
     """Build file inventory from operations_log.
 
-    Categorize files into: rate-modifier, logic-modifier, new (no snapshot).
+    Categorize files into: value_editing, structure_insertion/file_creation/flow_modification, new (no snapshot).
     Verify each file exists on disk.
     """
     inventory = {
-        "rate_modifier_files": set(),
-        "logic_modifier_files": set(),
-        "new_files": set(),          # Created by logic-modifier, no snapshot
+        "value_files": set(),     # Files with value edits (Array6, factors, etc.)
+        "structure_files": set(), # Files with structural changes (new code, insertions)
+        "new_files": set(),              # Created by Change Engine, no snapshot
         "all_files": set(),
     }
 
     for entry in ops_log.get("operations", []):
         filepath = entry["file"]
-        agent = entry["agent"]
+        change_type = entry.get("change_type", "value_editing")
         full_path = carrier_root / filepath
 
         if not full_path.exists():
@@ -320,12 +338,12 @@ def step_2_inventory(ops_log, file_hashes, carrier_root):
 
         inventory["all_files"].add(filepath)
 
-        if agent == "rate-modifier" or agent == "orchestrator":
-            inventory["rate_modifier_files"].add(filepath)
-        elif agent == "logic-modifier":
-            inventory["logic_modifier_files"].add(filepath)
+        if change_type in ("structure_insertion", "file_creation", "flow_modification"):
+            inventory["structure_files"].add(filepath)
             if entry.get("summary", {}).get("new_file_created"):
                 inventory["new_files"].add(filepath)
+        else:
+            inventory["value_files"].add(filepath)
 
     # Cross-check: every file in file_hashes should be in inventory or be a source
     # NOTE: file_hashes["files"] is a dict keyed by filepath (from Planner)
@@ -409,8 +427,8 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
     findings = []
 
     for entry in ops_log.get("operations", []):
-        if entry["agent"] not in ("rate-modifier", "orchestrator"):
-            continue
+        if entry.get("change_type") in ("structure_insertion", "file_creation", "flow_modification"):
+            continue  # Array6 validation only applies to value changes
         if entry["status"] != "COMPLETED":
             continue
 
@@ -433,7 +451,7 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "operation": entry["operation"],
+                    "intent": entry.get("operation", ""),
                     "expected_args": before_count,
                     "actual_args": after_count,
                     "before": before_line.strip(),
@@ -445,7 +463,7 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "operation": entry["operation"],
+                    "intent": entry.get("operation", ""),
                     "issue": "empty_arg",
                     "after": after_line.strip(),
                 })
@@ -455,13 +473,13 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "operation": entry["operation"],
+                    "intent": entry.get("operation", ""),
                     "issue": "unmatched_parens",
                     "after": after_line.strip(),
                 })
 
     # ALSO: Full-file scan of every modified file for corrupt Array6 calls
-    for filepath in inventory["rate_modifier_files"]:
+    for filepath in inventory["value_files"]:
         full_path = carrier_root / filepath
         lines = open(full_path, "r").readlines()
         for i, line in enumerate(lines):
@@ -510,66 +528,71 @@ def is_array6_test_usage(line):
 #### Step 4b: Completeness Validator
 
 ```python
-def validate_completeness(ops_log, operations, workstream_dir, carrier_root, snapshots_dir):
-    """BLOCKER: Verify every planned operation was executed.
+def validate_completeness(ops_log, intent_graph, cr_analyses, workstream_dir, carrier_root, snapshots_dir):
+    """BLOCKER: Verify every planned intent was executed.
 
     Checks:
-    1. Every op-*.yaml has a corresponding entry in operations_log
-    2. No operation has status FAILED (unless developer accepted)
+    1. Every intent in intent_graph.yaml has a corresponding entry in operations_log
+    2. No intent has status FAILED (unless developer accepted)
     3. Territory counting: for territory-based changes, count Case branches
        in the snapshot and confirm all were updated
     4. LOB completeness: for multi-LOB hab tickets, all LOBs handled
     """
     findings = []
 
-    # Check 1: Every planned operation has a log entry
-    logged_ops = {e["operation"] for e in ops_log.get("operations", [])}
-    for op_id, op_spec in operations.items():
-        if op_id not in logged_ops:
+    # Check 1: Every planned intent has a log entry
+    logged_intents = {e.get("operation", "") for e in ops_log.get("operations", [])}
+    for intent in intent_graph.get("intents", []):
+        intent_id = intent["id"]
+        if intent_id not in logged_intents:
             findings.append({
-                "operation": op_id,
+                "intent": intent_id,
                 "issue": "not_in_log",
-                "message": f"Operation {op_id} planned but not in operations_log",
+                "message": f"Intent {intent_id} planned but not in operations_log",
             })
 
-    # Check 2: No FAILED operations (SKIPPED is OK)
+    # Check 2: No FAILED intents (SKIPPED is OK)
     for entry in ops_log.get("operations", []):
         if entry["status"] == "FAILED":
             findings.append({
-                "operation": entry["operation"],
+                "intent": entry.get("operation", ""),
                 "issue": "failed",
-                "message": f"Operation {entry['operation']} has status FAILED",
+                "message": f"Intent {entry.get('operation', '')} has status FAILED",
                 "file": entry.get("file"),
             })
 
-    # Check 3: Territory counting for territory-based operations
+    # Check 3: Territory counting for territory-based changes
     #   Uses Algorithm 3 (count_territories_in_function) to verify against
-    #   the SNAPSHOT (original file), not just the op-*.yaml target_lines count.
+    #   the SNAPSHOT (original file), not just the target_lines count.
     for entry in ops_log.get("operations", []):
         if entry["status"] != "COMPLETED":
             continue
-        op_spec = operations.get(entry["operation"])
-        if not op_spec:
-            continue
-        if op_spec.get("pattern") != "base_rate_increase":
-            continue
+        intent_id = entry.get("operation", "")
+        # Find corresponding CR analysis for territory counting
+        cr_id = entry.get("cr_id")
+        cr_analysis = cr_analyses.get(cr_id, {}) if cr_id else {}
+        if not cr_analysis.get("extracted", {}).get("factor"):
+            continue  # Only applies to rate multiplication changes
 
         # Count territories from snapshot (ground truth)
         snapshot_path = workstream_dir / "execution/snapshots" / (
             Path(entry["file"]).name + ".snapshot"
         )
-        if snapshot_path.exists() and op_spec.get("function"):
+        func_name = entry.get("function")
+        if snapshot_path.exists() and func_name:
             snapshot_territory_count = count_territories_in_function(
-                snapshot_path, op_spec["function"]
+                snapshot_path, func_name
             )
         else:
-            # Fallback: use op-*.yaml target_lines count
-            snapshot_territory_count = len(op_spec.get("target_lines", []))
+            # Fallback: use CR analysis target_lines count
+            func_analyses = cr_analysis.get("functions_analyzed", [])
+            target_lines = func_analyses[0].get("target_lines", []) if func_analyses else []
+            snapshot_territory_count = len(target_lines)
 
         actual_count = len(entry.get("changes", []))
         if snapshot_territory_count > 0 and actual_count != snapshot_territory_count:
             findings.append({
-                "operation": entry["operation"],
+                "intent": intent_id,
                 "issue": "territory_count_mismatch",
                 "expected": snapshot_territory_count,
                 "actual": actual_count,
@@ -578,7 +601,7 @@ def validate_completeness(ops_log, operations, workstream_dir, carrier_root, sna
 
     # Check 4: LOB completeness for multi-LOB hab tickets
     #   If manifest indicates multiple LOBs sharing a module, verify all LOBs
-    #   have at least one COMPLETED operation in the operations_log.
+    #   have at least one COMPLETED intent in the operations_log.
     shared_modules = manifest.get("shared_modules", [])
     if shared_modules and len(manifest.get("lobs", [])) > 1:
         lobs_with_ops = set()
@@ -594,14 +617,14 @@ def validate_completeness(ops_log, operations, workstream_dir, carrier_root, sna
             findings.append({
                 "issue": "lob_missing",
                 "lob": lob,
-                "message": f"LOB {lob} has no completed operations in a multi-LOB ticket",
+                "message": f"LOB {lob} has no completed changes in a multi-LOB ticket",
             })
 
     return ValidatorResult(
         validator_name="validate_completeness",
         severity="BLOCKER",
         passed=len(findings) == 0,
-        message=_completeness_message(findings, operations),
+        message=_completeness_message(findings, intent_graph),
         details=findings,
     )
 ```
@@ -689,14 +712,14 @@ def validate_no_commented_code(ops_log):
         for change in entry.get("changes", []):
             before_line = change.get("before")
             if before_line is None:
-                continue  # Pure insertion (logic-modifier) -- no before line
+                continue  # Pure insertion (structure change) -- no before line
 
             # Check if the ORIGINAL line was a full-line comment
             if before_line.strip().startswith("'"):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "operation": entry["operation"],
+                    "intent": entry.get("operation", ""),
                     "issue": "commented_line_modified",
                     "before": before_line.strip(),
                     "after": change.get("after", "").strip(),
@@ -708,7 +731,7 @@ def validate_no_commented_code(ops_log):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "operation": entry["operation"],
+                    "intent": entry.get("operation", ""),
                     "issue": "inline_comment_only_change",
                     "before": before_line.strip(),
                     "after": change.get("after", "").strip(),
@@ -720,8 +743,11 @@ def validate_no_commented_code(ops_log):
         if entry["status"] != "COMPLETED":
             continue
         # Check surrounding context -- if any skipped_lines in op-spec were comments
-        op_spec = operations.get(entry["operation"], {})
-        for sl in op_spec.get("skipped_lines", []):
+        cr_id = entry.get("cr_id")
+        cr_analysis = cr_analyses.get(cr_id, {}) if cr_id else {}
+        func_analyses = cr_analysis.get("functions_analyzed", [])
+        skipped = func_analyses[0].get("skipped_lines", []) if func_analyses else []
+        for sl in skipped:
             if sl.get("reason") == "commented":
                 commented_lines_untouched += 1
 
@@ -739,17 +765,17 @@ def validate_no_commented_code(ops_log):
 ### Step 5: Handle BLOCKER Failures (Self-Correction)
 
 If any BLOCKER validator fails, attempt ONE self-correction per validator:
-restore from snapshot, re-apply all operations for the affected file, re-validate.
+restore from snapshot, re-apply all intents for the affected file, re-validate.
 
 ```python
-def step_5_self_correct(failed_validators, ops_log, operations, carrier_root,
+def step_5_self_correct(failed_validators, ops_log, intent_specs, carrier_root,
                         snapshots_dir, workstream_dir):
     """Attempt self-correction for BLOCKER failures.
 
     Strategy: snapshot-restore-reapply (database-like rollback+replay).
 
     CRITICAL: Restoring a file from snapshot reverts ALL changes to that file.
-    Therefore we must re-apply ALL operations for that file, not just the failing one.
+    Therefore we must re-apply ALL changes for that file, not just the failing one.
 
     Max 1 retry per BLOCKER. If retry fails, mark as unresolvable.
     """
@@ -782,7 +808,7 @@ def step_5_self_correct(failed_validators, ops_log, operations, carrier_root,
             # 1. Restore from snapshot
             copy_file(snapshot_path, target_path)
 
-            # 2. Re-apply ALL operations for this file (bottom-to-top order)
+            # 2. Re-apply ALL changes for this file (bottom-to-top order)
             file_ops = [
                 e for e in ops_log.get("operations", [])
                 if e["file"] == filepath and e["status"] == "COMPLETED"
@@ -796,9 +822,10 @@ def step_5_self_correct(failed_validators, ops_log, operations, carrier_root,
 
             reapply_success = True
             for op_entry in file_ops_sorted:
-                op_spec = operations.get(op_entry["operation"])
-                if op_spec:
-                    result = reapply_operation(target_path, op_spec)
+                intent_id = op_entry.get("operation", "")
+                intent_spec = intent_specs.get(intent_id)
+                if intent_spec:
+                    result = reapply_change(target_path, intent_spec)
                     if not result.ok:
                         reapply_success = False
                         break
@@ -817,7 +844,7 @@ def step_5_self_correct(failed_validators, ops_log, operations, carrier_root,
                 "validator": vr.validator_name,
                 "original_error": vr.details[0].get("message", str(vr.details[0])),
                 "action": "snapshot_restore_reapply",
-                "operations_reapplied": [e["operation"] for e in file_ops_sorted],
+                "intents_reapplied": [e.get("operation", "") for e in file_ops_sorted],
                 "re_validated": re_result.passed,
                 "result": "PASSED" if re_result.passed else "UNRESOLVABLE",
                 "timestamp": now_utc(),
@@ -832,15 +859,15 @@ def step_5_self_correct(failed_validators, ops_log, operations, carrier_root,
     return corrections
 ```
 
-**Helper: `reapply_operation()`**
+**Helper: `reapply_change()`**
 
 ```python
-def reapply_operation(target_path, op_spec):
-    """Re-apply a single operation to a restored file.
+def reapply_change(target_path, op_spec):
+    """Re-apply a single change to a restored file.
 
-    Handles both agent types:
-    - Rate Modifier (agent="rate-modifier"): line replacement (before -> after)
-    - Logic Modifier (agent="logic-modifier"): insertion (change_type="insert")
+    Handles both change types:
+    - Value changes: line replacement (before -> after)
+    - Structure changes: insertion (change_type="insert")
 
     Returns a result object with .ok (bool) and .error (str or None).
     """
@@ -850,12 +877,12 @@ def reapply_operation(target_path, op_spec):
         line_idx = change["line"] - 1  # 0-indexed
 
         if change.get("change_type") == "insert":
-            # Logic modifier: insert new lines at position
+            # Structure change: insert new lines at position
             insert_lines = change["after"].split("\n")
             for i, il in enumerate(insert_lines):
                 lines.insert(line_idx + i, il + "\n")
         else:
-            # Rate modifier: replace existing line
+            # Value change: replace existing line
             if line_idx < len(lines):
                 lines[line_idx] = change["after"] + "\n"
             else:
@@ -877,7 +904,7 @@ def update_file_hash(workstream_dir, filepath, new_hash):
 **When self-correction should NOT be attempted:**
 
 - Logic errors (wrong values computed) -- re-applying produces same wrong result
-- Missing operations (SKIPPED/FAILED upstream) -- nothing to re-apply
+- Missing changes (SKIPPED/FAILED upstream) -- nothing to re-apply
 - TOCTOU violations (file modified externally) -- warn developer instead
 - Cross-file dependencies (file A depends on file B) -- fixing A alone may not help
 
@@ -901,8 +928,8 @@ def validate_value_sanity(ops_log):
     all_pct_changes = []
 
     for entry in ops_log.get("operations", []):
-        if entry["agent"] not in ("rate-modifier", "orchestrator"):
-            continue
+        if entry.get("change_type") in ("structure_insertion", "file_creation", "flow_modification"):
+            continue  # Value sanity only applies to value changes
         if entry["status"] != "COMPLETED":
             continue
 
@@ -935,7 +962,7 @@ def validate_value_sanity(ops_log):
                     findings.append({
                         "file": entry["file"],
                         "line": change["line"],
-                        "operation": entry["operation"],
+                        "intent": entry.get("operation", ""),
                         "issue": "sentinel_modified",
                         "arg_index": i,
                         "before": bv,
@@ -979,7 +1006,7 @@ def _check_value(findings, all_pct, entry, change, bv, av, pct, arg_idx=None):
             findings.append({
                 "file": entry["file"],
                 "line": change["line"],
-                "operation": entry["operation"],
+                "intent": entry.get("operation", ""),
                 "issue": "zero_to_nonzero",
                 "arg_index": arg_idx,
                 "before": bv,
@@ -992,7 +1019,7 @@ def _check_value(findings, all_pct, entry, change, bv, av, pct, arg_idx=None):
         findings.append({
             "file": entry["file"],
             "line": change["line"],
-            "operation": entry["operation"],
+            "intent": entry.get("operation", ""),
             "issue": "large_change",
             "arg_index": arg_idx,
             "before": bv,
@@ -1001,121 +1028,8 @@ def _check_value(findings, all_pct, entry, change, bv, av, pct, arg_idx=None):
         })
 ```
 
-#### Step 6a.1: Semantic Spot-Check Validator (NEW)
-
-```python
-def validate_semantic_spotcheck(ops_log, srd_files, source_files):
-    """WARNING: Re-derive a SAMPLE of values from the SRD formula and compare
-    to actual file content. Catches "right syntax, wrong number" errors.
-
-    For each rate-modifier operation with pattern base_rate_increase:
-    1. Read the SRD's factor (e.g., 1.05)
-    2. Read 3 RANDOM before/after pairs from the operations_log
-    3. Compute: expected_after = round(before * factor, precision)
-    4. Compare expected_after to actual after value in the log
-    5. If ANY mismatch: flag as WARNING with the specific discrepancy
-
-    For factor_table_change operations:
-    1. Read old_value and new_value from the SRD
-    2. Check that EVERY before value matches old_value and after matches new_value
-
-    This catches:
-    - Wrong factor applied (e.g., 1.03 instead of 1.05)
-    - Factor applied to values that should be exempt
-    - Rounding discrepancies (integer vs decimal)
-    - Double-application of a factor
-    """
-    import random
-    findings = []
-
-    for entry in ops_log.get("operations", []):
-        if entry["status"] != "COMPLETED":
-            continue
-        if entry["agent"] != "rate-modifier":
-            continue
-
-        srd = load_srd_for_op(entry, srd_files)
-        if not srd:
-            continue
-
-        changes = entry.get("changes", [])
-        if not changes:
-            continue
-
-        # Sample up to 3 changes for spot-checking
-        sample = random.sample(changes, min(3, len(changes)))
-
-        if srd.get("pattern") == "base_rate_increase":
-            factor = srd.get("factor")
-            if factor is None:
-                continue
-            for change in sample:
-                before_args = parse_array6_values(change.get("before", ""))
-                after_args = parse_array6_values(change.get("after", ""))
-                if before_args and after_args:
-                    for i, (bv, av) in enumerate(zip(before_args, after_args)):
-                        if bv is None or av is None or bv == -999:
-                            continue
-                        # Determine precision from original value
-                        precision = detect_decimal_places_from_value(bv)
-                        expected = round(bv * factor, max(precision, 2))
-                        if abs(expected - av) > 0.01:
-                            findings.append({
-                                "file": entry["file"],
-                                "line": change["line"],
-                                "operation": entry["operation"],
-                                "issue": "value_mismatch",
-                                "arg_index": i,
-                                "before": bv,
-                                "expected": expected,
-                                "actual": av,
-                                "factor": factor,
-                            })
-
-        elif srd.get("pattern") == "factor_table_change":
-            old_val = srd.get("old_value")
-            new_val = srd.get("new_value")
-            if old_val is not None and new_val is not None:
-                for change in sample:
-                    before_val = extract_numeric_value(change.get("before", ""))
-                    after_val = extract_numeric_value(change.get("after", ""))
-                    if before_val is not None and after_val is not None:
-                        if abs(before_val - old_val) > 0.001:
-                            findings.append({
-                                "file": entry["file"],
-                                "line": change["line"],
-                                "operation": entry["operation"],
-                                "issue": "unexpected_before_value",
-                                "expected_before": old_val,
-                                "actual_before": before_val,
-                            })
-                        if abs(after_val - new_val) > 0.001:
-                            findings.append({
-                                "file": entry["file"],
-                                "line": change["line"],
-                                "operation": entry["operation"],
-                                "issue": "unexpected_after_value",
-                                "expected_after": new_val,
-                                "actual_after": after_val,
-                            })
-
-    return ValidatorResult(
-        validator_name="validate_semantic_spotcheck",
-        severity="WARNING",
-        passed=len(findings) == 0,
-        message=_semantic_spotcheck_message(findings),
-        details=findings,
-    )
-```
-
-**Why this matters:** The existing validators check structural correctness (Array6
-syntax, arg count, completeness). This spot-check validator adds SEMANTIC verification
-— it re-derives values from the original SRD formula and compares to what the worker
-actually wrote. If a worker applied a 1.03 factor instead of 1.05, or modified a
-value that should have been exempt, this catches it.
-
-**Cost:** Negligible. Reads 3 random samples per operation from the already-loaded
-operations_log. No file I/O.
+<!-- Semantic spot-checking is handled by the Semantic Verifier agent (semantic-verifier.md) -->
+<!-- which runs as Agent 3 in the review pipeline: Validator → Diff → Semantic Verifier → Report -->
 
 #### Step 6b: Cross-LOB Consistency Validator
 
@@ -1193,58 +1107,56 @@ def validate_cross_lob(manifest, config, carrier_root):
 #### Step 6c: Traceability Validator
 
 ```python
-def validate_traceability(srds, ops_log):
-    """WARNING: Verify every SRD maps to at least one operation, and vice versa.
+def validate_traceability(crs, intent_graph, ops_log):
+    """WARNING: Verify every CR/intent maps to at least one executed change, and vice versa.
 
     Reports:
-    - UNTRACED SRDs: SRD with no corresponding operation in operations_log
-    - ORPHAN CHANGES: operation in operations_log with no corresponding SRD
+    - UNTRACED CRs: CR with no corresponding intent executed in operations_log
+    - ORPHAN CHANGES: entry in operations_log with no corresponding CR/intent
     """
     findings = []
 
-    # Build mapping: operation_id -> SRD (from op-*.yaml, each has an srd_ref)
-    op_to_srd = {}
-    for entry in ops_log.get("operations", []):
-        op_id = entry["operation"]
-        # Operation IDs follow pattern: op-{SRD_NUM}-{SEQ}
-        # e.g., op-001-01 maps to srd-001, op-002-03 maps to srd-002
-        srd_num = extract_srd_num(op_id)  # "op-001-01" -> "srd-001"
-        if srd_num:
-            op_to_srd[op_id] = srd_num
+    # Build mapping: intent_id -> cr_id (from intent_graph.yaml)
+    intent_to_cr = {}
+    for intent in intent_graph.get("intents", []):
+        intent_id = intent["id"]
+        cr_id = extract_cr_from_intent(intent_id)  # "intent-001" -> "cr-001"
+        if cr_id:
+            intent_to_cr[intent_id] = cr_id
 
-    # Check 1: Every SRD has at least one operation
-    ops_by_srd = {}
-    for op_id, srd_id in op_to_srd.items():
-        ops_by_srd.setdefault(srd_id, []).append(op_id)
+    # Check 1: Every CR has at least one intent in operations_log
+    intents_by_cr = {}
+    for intent_id, cr_id in intent_to_cr.items():
+        intents_by_cr.setdefault(cr_id, []).append(intent_id)
 
-    for srd_id in srds:
-        if srd_id not in ops_by_srd:
+    for cr_id in crs:
+        if cr_id not in intents_by_cr:
             findings.append({
-                "issue": "untraced_srd",
-                "srd": srd_id,
-                "description": srds[srd_id].get("description", ""),
-                "message": f"SRD {srd_id} has no operations in the log",
+                "issue": "untraced_cr",
+                "cr": cr_id,
+                "description": crs[cr_id].get("description", ""),
+                "message": f"CR {cr_id} has no intents in the log",
             })
 
-    # Check 2: Every operation maps to a known SRD
+    # Check 2: Every executed intent maps to a known CR
     for entry in ops_log.get("operations", []):
-        op_id = entry["operation"]
-        if op_id.startswith("rework-"):
-            continue  # Rework entries don't map to SRDs
-        srd_id = op_to_srd.get(op_id)
-        if srd_id and srd_id not in srds:
+        intent_id = entry.get("operation", "")
+        if intent_id.startswith("rework-"):
+            continue  # Rework entries don't map to CRs
+        cr_id = extract_cr_from_intent(intent_id)
+        if cr_id and cr_id not in crs:
             findings.append({
                 "issue": "orphan_change",
-                "operation": op_id,
-                "mapped_srd": srd_id,
-                "message": f"Operation {op_id} maps to {srd_id} which doesn't exist",
+                "intent": intent_id,
+                "mapped_cr": cr_id,
+                "message": f"Intent {intent_id} maps to {cr_id} which doesn't exist",
             })
 
     return ValidatorResult(
         validator_name="validate_traceability",
         severity="WARNING",
         passed=len(findings) == 0,
-        message=_traceability_message(findings, srds, ops_by_srd),
+        message=_traceability_message(findings, crs, intents_by_cr),
         details=findings,
     )
 ```
@@ -1304,7 +1216,7 @@ def step_7_write_results(all_results, workstream_dir, workflow_id):
 
 ### Step 8: Generate Diff Report
 
-Compare snapshots to current files. Annotate each hunk with operation ID and SRD.
+Compare snapshots to current files. Annotate each hunk with intent ID and CR reference.
 
 ```python
 def step_8_generate_diff(ops_log, inventory, carrier_root, snapshots_dir,
@@ -1315,7 +1227,7 @@ def step_8_generate_diff(ops_log, inventory, carrier_root, snapshots_dir,
     1. Read snapshot (pre-edit state)
     2. Read current file (post-edit state)
     3. Generate unified diff
-    4. Annotate with operation ID and SRD reference
+    4. Annotate with intent ID and CR reference
     5. Detect anomalies: logged-but-no-change, undocumented-change
 
     New files (no snapshot): use empty content as baseline.
@@ -1378,7 +1290,7 @@ def step_8_generate_diff(ops_log, inventory, carrier_root, snapshots_dir,
             if file_ops:
                 anomalies.append(
                     f"Logged-but-no-change: {filepath} "
-                    f"({len(file_ops)} operations logged but diff is empty)"
+                    f"({len(file_ops)} intents logged but diff is empty)"
                 )
             continue
 
@@ -1432,44 +1344,45 @@ def step_8_generate_diff(ops_log, inventory, carrier_root, snapshots_dir,
 
 ### Step 9: Generate Traceability Matrix
 
-Map every SRD to its operations and file:line changes.
+Map every CR to its intents and file:line changes.
 
 ```python
-def step_9_traceability_matrix(srds, ops_log, operations, workstream_dir):
+def step_9_traceability_matrix(crs, intent_graph, ops_log, workstream_dir):
     """Write verification/traceability_matrix.md.
 
-    For each SRD: list all operations and their file:line changes.
+    For each CR: list all intents and their file:line changes.
     Mark each as [OK], [FAILED], [SKIPPED], or [FLAG].
 
-    Count UNTRACED SRDs and ORPHAN CHANGES.
+    Count UNTRACED CRs and ORPHAN CHANGES.
     """
     lines = []
-    lines.append("TRACEABILITY: SRD -> Code Changes")
+    lines.append("TRACEABILITY: CR -> Intent -> Code Changes")
     lines.append("=" * 40)
     lines.append("")
 
     untraced_count = 0
     orphan_count = 0
 
-    # Group operations by SRD
-    ops_by_srd = {}
+    # Group executed intents by CR
+    intents_by_cr = {}
     for entry in ops_log.get("operations", []):
-        srd_id = extract_srd_from_op(entry["operation"])
-        if srd_id:
-            ops_by_srd.setdefault(srd_id, []).append(entry)
+        intent_id = entry.get("operation", "")
+        cr_id = extract_cr_from_intent(intent_id)
+        if cr_id:
+            intents_by_cr.setdefault(cr_id, []).append(entry)
 
-    # For each SRD, list its operations
-    for srd_id, srd_spec in sorted(srds.items()):
-        lines.append(f"{srd_id}: {srd_spec.get('description', '')}")
+    # For each CR, list its intents
+    for cr_id, cr_spec in sorted(crs.items()):
+        lines.append(f"{cr_id}: {cr_spec.get('description', '')}")
 
-        srd_ops = ops_by_srd.get(srd_id, [])
-        if not srd_ops:
-            lines.append("  [UNTRACED] No operations found for this SRD")
+        cr_intents = intents_by_cr.get(cr_id, [])
+        if not cr_intents:
+            lines.append("  [UNTRACED] No intents found for this CR")
             untraced_count += 1
             lines.append("")
             continue
 
-        for entry in srd_ops:
+        for entry in cr_intents:
             status = entry["status"]
             marker = {
                 "COMPLETED": "OK",
@@ -1499,17 +1412,18 @@ def step_9_traceability_matrix(srds, ops_log, operations, workstream_dir):
 
         lines.append("")
 
-    # Check for orphan operations (not linked to any SRD)
-    all_srd_ids = set(srds.keys())
+    # Check for orphan intents (not linked to any CR)
+    all_cr_ids = set(crs.keys())
     for entry in ops_log.get("operations", []):
-        if entry["operation"].startswith("rework-"):
+        intent_id = entry.get("operation", "")
+        if intent_id.startswith("rework-"):
             continue
-        srd_id = extract_srd_from_op(entry["operation"])
-        if srd_id and srd_id not in all_srd_ids:
-            lines.append(f"[ORPHAN] {entry['operation']} -> {srd_id} (SRD not found)")
+        cr_id = extract_cr_from_intent(intent_id)
+        if cr_id and cr_id not in all_cr_ids:
+            lines.append(f"[ORPHAN] {intent_id} -> {cr_id} (CR not found)")
             orphan_count += 1
 
-    lines.append(f"UNTRACED SRDs: {untraced_count}")
+    lines.append(f"UNTRACED CRs: {untraced_count}")
     lines.append(f"ORPHAN CHANGES: {orphan_count}")
 
     write_file(workstream_dir / "verification/traceability_matrix.md",
@@ -1523,7 +1437,7 @@ def step_9_traceability_matrix(srds, ops_log, operations, workstream_dir):
 Build the SVN commit message and final change summary.
 
 ```python
-def step_10_change_summary(manifest, srds, ops_log, file_hashes, validator_results,
+def step_10_change_summary(manifest, crs, ops_log, file_hashes, validator_results,
                            workstream_dir):
     """Write summary/change_summary.md.
 
@@ -1560,10 +1474,10 @@ def step_10_change_summary(manifest, srds, ops_log, file_hashes, validator_resul
         if filepath.endswith(".vbproj") and fh.get("role") == "target":
             vbproj_count += 1
 
-    # Build SRD bullets
-    srd_bullets = []
-    for srd_id, srd_spec in sorted(srds.items()):
-        srd_bullets.append(f"  - {srd_spec.get('description', srd_id)}")
+    # Build CR bullets
+    cr_bullets = []
+    for cr_id, cr_spec in sorted(crs.items()):
+        cr_bullets.append(f"  - {cr_spec.get('description', cr_id)}")
 
     # Validator summary
     vr = validator_results
@@ -1578,7 +1492,7 @@ def step_10_change_summary(manifest, srds, ops_log, file_hashes, validator_resul
         "",
         "Changes:",
     ]
-    lines.extend(srd_bullets)
+    lines.extend(cr_bullets)
     lines.append("")
     lines.append("Files modified:")
     for mf in modified_files:
@@ -1610,20 +1524,20 @@ self_corrections:
   - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     validator: "validate_array6"
     failure_description: "Line 4051: Array6 has 5 args, expected 6"
-    correction_action: "Restored from snapshot, re-applied op-004-01, op-004-02, op-001-01"
-    operations_reapplied:
-      - "op-004-01"
-      - "op-004-02"
-      - "op-001-01"
+    correction_action: "Restored from snapshot, re-applied intent-004, intent-003, intent-001"
+    intents_reapplied:
+      - "intent-004"
+      - "intent-003"
+      - "intent-001"
     re_validated: true
     timestamp: "2026-01-15T11:12:00Z"
 
   - file: "Saskatchewan/Code/Option_Bicycle_SKHome20260101.vb"
     validator: "validate_no_commented_code"
     failure_description: "Line 15: commented line modified"
-    correction_action: "Restored from snapshot, re-applied op-005-01"
-    operations_reapplied:
-      - "op-005-01"
+    correction_action: "Restored from snapshot, re-applied intent-005"
+    intents_reapplied:
+      - "intent-005"
     re_validated: false     # Still failed after retry -- escalated to developer
     timestamp: "2026-01-15T11:12:05Z"
 ```
@@ -1662,478 +1576,17 @@ def step_12_signal_completion(validator_results, corrections, inventory):
 
 ---
 
-## Validator Algorithms
-
-Detailed reference implementations for all 7 validators. The Execution Steps
-(Section 5) call these algorithms. This section provides the complete logic.
-
-### Algorithm 1: Depth-Aware Array6 Arg Counter
-
-The core algorithm used by `validate_array6`. Handles nested parentheses,
-string literals, and arithmetic expressions within Array6 arguments.
-
-```python
-def count_array6_args(line):
-    """Count arguments in an Array6() call using depth-aware comma splitting.
-
-    Handles:
-    - Nested parens:  Array6(Func(a, b), c)  -> 2 args, not 3
-    - Strings:        Array6("a, b", c)      -> 2 args, not 3
-    - Expressions:    Array6(30 + 10, 40)    -> 2 args
-    - Single arg:     Array6(4)              -> 1 arg
-    - Negative vals:  Array6(-5, -10)        -> 2 args
-
-    Returns int (arg count) or 0 if line has no Array6 call.
-    """
-    import re
-    # Find the Array6( opening
-    match = re.search(r'Array6\s*\(', line)
-    if not match:
-        return 0
-
-    start = match.end()  # Position right after "Array6("
-
-    # Extract content up to the MATCHING close paren
-    content = extract_balanced_parens(line, start)
-    if content is None:
-        return -1  # Unmatched parens
-
-    content = content.strip()
-    if not content:
-        return 0
-
-    # Split by top-level commas
-    depth = 0
-    in_string = False
-    arg_count = 1
-
-    for ch in content:
-        if in_string:
-            if ch == '"':
-                in_string = False
-                # NOTE: VB.NET escapes literal quotes by doubling: "He said ""hi"""
-                # The toggle logic handles this implicitly: first " sets in_string=False,
-                # second " immediately sets in_string=True again. Net effect: correctly
-                # stays "in string" through escaped quotes. No special case needed.
-            continue
-        if ch == '"':
-            in_string = True
-            continue
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-        elif ch == ',' and depth == 0:
-            arg_count += 1
-
-    return arg_count
-
-
-def extract_balanced_parens(line, start_after_open):
-    """Extract content between Array6( and its matching ).
-
-    start_after_open: index right after the opening paren.
-    Returns the content string, or None if no matching close paren.
-    """
-    depth = 1
-    i = start_after_open
-    in_string = False
-
-    while i < len(line):
-        ch = line[i]
-        if in_string:
-            if ch == '"':
-                in_string = False
-            i += 1
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                return line[start_after_open:i]
-        i += 1
-
-    return None  # Unmatched -- no closing paren found
-
-
-def parens_balanced(line):
-    """Check if all parentheses in a line are balanced."""
-    depth = 0
-    in_string = False
-    for ch in line:
-        if in_string:
-            if ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth < 0:
-                return False
-    return depth == 0
-```
-
-### Algorithm 2: Dual-Use Array6 Detection
-
-Distinguishes rate assignments (modifiable) from test/lookup usages (never modify).
-
-```python
-import re
-
-def classify_array6_usage(line):
-    """Classify Array6 usage on a line.
-
-    Returns: "rate" | "test" | "none"
-
-    Rate usage (modifiable):
-      varRates = Array6(...)
-      premiumArray = Array6(...)
-      liabilityPremiumArray = Array6(...)
-
-    Test usage (NEVER modify):
-      IsItemInArray(x, Array6(...))
-      UBound(Array6(...))
-      If Array6(...) Then   (rare but possible)
-    """
-    if "Array6" not in line:
-        return "none"
-
-    stripped = line.strip()
-
-    # Skip comments
-    if stripped.startswith("'"):
-        return "none"
-
-    # Rate pattern: identifier = Array6(...)
-    # Allow optional type suffix: varRates$ = Array6(...)
-    if re.search(r'\w+\$?\s*=\s*Array6\s*\(', line):
-        return "rate"
-
-    # Everything else is a test/lookup
-    return "test"
-```
-
-### Algorithm 3: Territory Counter for Completeness
-
-Count territories in a Select Case block to verify completeness.
-
-```python
-def count_territories_in_function(snapshot_lines, function_name, func_start, func_end):
-    """Count unique Case labels within a territory-based Select Case.
-
-    Reads the snapshot (pre-edit) to establish the expected count.
-    The completeness validator compares this to the actual changes count.
-    """
-    import re
-    territory_count = 0
-
-    # Find the territory Select Case within the function
-    in_target_select = False
-
-    for i in range(func_start, func_end + 1):
-        line = snapshot_lines[i].strip()
-
-        # Skip comments
-        if line.startswith("'"):
-            continue
-
-        # Detect territory Select Case (Case 1, Case 2, ...)
-        # These use numeric Case labels (territory numbers)
-        case_match = re.match(r'^Case\s+(\d+)\s*:', line)
-        if case_match:
-            territory_count += 1
-
-        # Also handle Case without colon (multi-line body)
-        case_match_ml = re.match(r'^Case\s+(\d+)\s*$', line)
-        if case_match_ml:
-            territory_count += 1
-
-    return territory_count
-```
-
-### Algorithm 4: Hash Computation
-
-Used by Steps 3 and 4c for file integrity verification.
-
-```python
-import hashlib
-
-def compute_file_hash(filepath):
-    """Compute SHA-256 hash of a file, matching the format in file_hashes.yaml.
-
-    Returns: "sha256:{hex_digest}"
-    """
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
-
-
-def verify_hash(filepath, expected_hash):
-    """Compare computed hash to expected. Returns (matches: bool, actual: str)."""
-    actual = compute_file_hash(filepath)
-    return actual == expected_hash, actual
-```
-
-### Algorithm 5: Percentage Change with Edge Cases
-
-Used by `validate_value_sanity` for all numeric comparisons.
-
-```python
-def compute_pct_change_safe(before, after):
-    """Compute percentage change with comprehensive edge case handling.
-
-    Returns: (pct_change: float or None, classification: str)
-
-    | Before | After  | Classification          |
-    |--------|--------|-------------------------|
-    | 100    | 105    | "normal" (5.0%)         |
-    | 0      | 50     | "zero_to_nonzero"       |
-    | 50     | 0      | "value_zeroed" (100.0%) |
-    | -999   | -999   | "sentinel_unchanged"    |
-    | -999   | 50     | "sentinel_modified"     |
-    | -0.2   | -0.22  | "normal" (10.0%)        |
-    | 30+10  | 42     | evaluate first: 40->42  |
-    """
-    # Sentinel check
-    if before == -999:
-        if after == -999:
-            return 0.0, "sentinel_unchanged"
-        return None, "sentinel_modified"
-
-    # Zero baseline
-    if before == 0:
-        if after == 0:
-            return 0.0, "no_change"
-        return None, "zero_to_nonzero"
-
-    # Normal computation
-    pct = abs(after - before) / abs(before) * 100
-
-    if after == 0:
-        return pct, "value_zeroed"
-
-    return pct, "normal"
-
-
-def parse_array6_values(line):
-    """Extract numeric values from an Array6() call.
-
-    Returns list of floats (or None for non-numeric args like variables).
-    Returns None if line has no Array6.
-    """
-    import re
-
-    match = re.search(r'Array6\s*\(([^)]+)\)', line)
-    if not match:
-        return None
-
-    args_str = match.group(1)
-    raw_args = split_top_level_commas(args_str)  # Uses same depth-aware logic as Algorithm 1
-
-    values = []
-    for raw in raw_args:
-        raw = raw.strip()
-        val = try_eval_numeric(raw)
-        values.append(val)  # None if not evaluable
-
-    return values
-
-
-def try_eval_numeric(expr):
-    """Safely evaluate a numeric expression.
-
-    Handles: "50", "-0.22", "30 + 10", "basePremium" (returns None).
-    """
-    import re
-    expr = expr.strip()
-
-    # Pure numeric
-    try:
-        return float(expr)
-    except ValueError:
-        pass
-
-    # Simple arithmetic (digits and +,-,*,/ only, no function calls)
-    if re.match(r'^[\d\s\.\+\-\*/]+$', expr):
-        try:
-            return float(eval(expr))  # Safe: only digits and operators
-        except Exception:
-            pass
-
-    return None  # Variable or complex expression
-```
-
-### Algorithm 6: .vbproj Reference Checker
-
-Used by `validate_no_old_modify` and `validate_cross_lob`.
-
-```python
-import xml.etree.ElementTree as ET
-
-def check_vbproj_refs(vbproj_path, target_date):
-    """Check that Compile Include refs in a .vbproj point to target-dated files.
-
-    Returns list of findings (empty if all refs correct).
-    """
-    findings = []
-    ns = {"msbuild": "http://schemas.microsoft.com/developer/msbuild/2003"}
-
-    tree = ET.parse(vbproj_path)
-    root = tree.getroot()
-
-    for compile_elem in root.findall(".//msbuild:Compile", ns):
-        include = compile_elem.get("Include", "")
-        # Check Code/ file references
-        if "\\Code\\" in include or "/Code/" in include:
-            # Extract the date from the filename pattern
-            # e.g., mod_Common_SKHab20260101.vb -> 20260101
-            import re
-            date_match = re.search(r'(\d{8})\.vb', include)
-            if date_match:
-                file_date = date_match.group(1)
-                if file_date != target_date:
-                    findings.append({
-                        "vbproj": str(vbproj_path),
-                        "include": include,
-                        "issue": "old_date_ref",
-                        "found_date": file_date,
-                        "expected_date": target_date,
-                    })
-
-    return findings
-
-
-def find_mod_common_ref(vbproj_path):
-    """Find the mod_Common Compile Include path in a .vbproj file.
-
-    Returns the Include path string, or None if not found.
-    Used by validate_cross_lob.
-    """
-    ns = {"msbuild": "http://schemas.microsoft.com/developer/msbuild/2003"}
-    tree = ET.parse(vbproj_path)
-    root = tree.getroot()
-
-    for compile_elem in root.findall(".//msbuild:Compile", ns):
-        include = compile_elem.get("Include", "")
-        if "mod_Common" in include:
-            return include
-
-    return None
-```
-
-### Algorithm 7: Comment Line Detection
-
-Used by `validate_no_commented_code`.
-
-```python
-def is_full_line_comment(line):
-    """Determine if a line is a full-line VB.NET comment.
-
-    VB.NET only uses ' for comments. No REM in this codebase, no block comments.
-
-    Full-line comment:  '  This is a comment
-    Full-line comment:  'liabilityPremiumArray = Array6(24, 49, 99)
-    NOT a comment:      Case 200 'IQPORT-1082 Here for Farm Only
-    NOT a comment:      dblVal = -0.2   ' discount factor
-    """
-    stripped = line.strip()
-    if not stripped:
-        return False
-    return stripped[0] == "'"
-
-
-def is_inline_comment_only_change(before, after):
-    """Check if only the inline comment portion changed (code unchanged).
-
-    If the code portion (before the first unquoted ') is identical,
-    the change is to the comment only -- acceptable.
-    """
-    before_code = extract_code_portion(before)
-    after_code = extract_code_portion(after)
-    return before_code.rstrip() == after_code.rstrip()
-
-
-def extract_code_portion(line):
-    """Extract the code portion of a line (everything before the first unquoted ')."""
-    in_string = False
-    for i, ch in enumerate(line):
-        if in_string:
-            if ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "'":
-            return line[:i]
-    return line
-```
-
-### Helper Functions
-
-```python
-def split_top_level_commas(s):
-    """Split a string by commas at depth 0 only.
-
-    Uses the same depth-aware, string-aware logic as count_array6_args (Algorithm 1).
-    Handles nested parens, string literals, and arithmetic expressions.
-
-    Example: "Func(a, b), 30 + 10, -5" -> ["Func(a, b)", "30 + 10", "-5"]
-    """
-    args = []
-    current = []
-    depth = 0
-    in_string = False
-
-    for ch in s:
-        if ch == '"' and not in_string:
-            in_string = True
-            current.append(ch)
-        elif ch == '"' and in_string:
-            in_string = False  # Note: VB.NET "" (escaped quote) toggles twice, net no change
-            current.append(ch)
-        elif in_string:
-            current.append(ch)
-        elif ch == '(':
-            depth += 1
-            current.append(ch)
-        elif ch == ')':
-            depth -= 1
-            current.append(ch)
-        elif ch == ',' and depth == 0:
-            args.append(''.join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-
-    if current:
-        args.append(''.join(current).strip())
-
-    return args
-
-
-def extract_srd_from_op(op_id):
-    """Extract SRD ID from operation ID.
-
-    "op-001-01" -> "srd-001"
-    "op-012-03" -> "srd-012"
-    """
-    import re
-    match = re.match(r'op-(\d+)-\d+', op_id)
-    if match:
-        return f"srd-{match.group(1)}"
-    return None
-
-# Alias used in some steps:
-extract_srd_num = extract_srd_from_op
-```
+## Validator Algorithm Reference
+
+> **Do NOT reimplement validator logic.** Call the Python scripts in `validators/`.
+> Algorithm details are in `validators/_helpers.py`. Key functions:
+> - `count_array6_args()` + `extract_balanced_parens()` -- Array6 parsing
+> - `split_top_level_commas()` -- comma-aware argument splitting
+> - `safe_eval_arithmetic()` -- secure expression evaluation (no eval())
+> - `compute_file_hash()` -- SHA-256 for TOCTOU checks
+> - `check_path_containment()` -- directory traversal prevention
+> - `build_inventory()` -- classify files by change_type
+> - `is_full_line_comment()` + `is_inline_comment_only_change()` -- comment detection
 
 ---
 
@@ -2142,14 +1595,14 @@ extract_srd_num = extract_srd_from_op
 ### Example A: Clean Pass -- All 7 Validators Pass
 
 **Scenario:** Saskatchewan Habitational, 5% base rate increase across 15 territories
-in mod_Common_SKHab20260101.vb. Three SRDs, all executed by the Rate Modifier.
+in mod_Common_SKHab20260101.vb. Three CRs, all executed by the Change Engine.
 
 **operations_log.yaml (abbreviated):**
 ```yaml
 # Portage Mutual example
 operations:
-  - operation: "op-001-01"
-    agent: "rate-modifier"
+  - operation: "intent-001"
+    change_type: "value_editing"
     status: "COMPLETED"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     function: "GetBasePremium_Home"
@@ -2165,8 +1618,8 @@ operations:
       values_changed: 135
       change_range: "4.7% to 5.3%"
 
-  - operation: "op-002-01"
-    agent: "rate-modifier"
+  - operation: "intent-002"
+    change_type: "value_editing"
     status: "COMPLETED"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     function: "SetDisSur_Deductible"
@@ -2181,8 +1634,8 @@ operations:
       values_changed: 1
       change_range: "10.0%"
 
-  - operation: "op-003-01"
-    agent: "rate-modifier"
+  - operation: "intent-003"
+    change_type: "value_editing"
     status: "COMPLETED"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     function: "GetLiabilityBundlePremiums"
@@ -2202,8 +1655,8 @@ operations:
 ```yaml
 workflow_id: "20260101-SK-Hab-rate-update"
 validated_at: "2026-01-15T11:10:00Z"
-total_validators: 7
-passed: 7
+total_validators: 8
+passed: 8
 failed: 0
 blockers: 0
 warnings: 0
@@ -2220,7 +1673,7 @@ results:
   - validator: "validate_completeness"
     severity: "BLOCKER"
     passed: true
-    message: "3/3 operations COMPLETED, 15/15 territories updated"
+    message: "3/3 intents COMPLETED, 15/15 territories updated"
     details: []
     self_corrected: false
 
@@ -2255,29 +1708,29 @@ results:
   - validator: "validate_traceability"
     severity: "WARNING"
     passed: true
-    message: "3/3 SRDs traced, 0 untraced, 0 orphan changes"
+    message: "3/3 CRs traced, 0 untraced, 0 orphan changes"
     details: []
     self_corrected: false
 ```
 
 **traceability_matrix.md:**
 ```
-TRACEABILITY: SRD -> Code Changes
+TRACEABILITY: CR -> Intent -> Code Changes
 ========================================
 
-srd-001: Increase base rates by 5%
+cr-001: Increase base rates by 5%
   [OK] mod_Common_SKHab20260101.vb:352-366 -- 15 changes, 135 values
        Territory 1 through Territory 15
 
-srd-002: Change $5000 deductible factor
+cr-002: Change $5000 deductible factor
   [OK] mod_Common_SKHab20260101.vb:672 -- 1 changes, 1 values
        Case 5000 deductible factor
 
-srd-003: Increase liability premiums
+cr-003: Increase liability premiums
   [OK] mod_Common_SKHab20260101.vb:4051 -- 1 changes, 5 values
        Farm > PRIMARYITEM > Enhanced Comp
 
-UNTRACED SRDs: 0
+UNTRACED CRs: 0
 ORPHAN CHANGES: 0
 ```
 
@@ -2285,8 +1738,8 @@ ORPHAN CHANGES: 0
 
 ### Example B: BLOCKER Failure + Self-Correction
 
-**Scenario:** Rate Modifier accidentally dropped an argument from an Array6 call.
-Territory 5 had 9 args before and 8 after (modifier concatenated two args).
+**Scenario:** Change Engine accidentally dropped an argument from an Array6 call.
+Territory 5 had 9 args before and 8 after (Change Engine concatenated two args).
 
 **Detection (validate_array6):**
 ```yaml
@@ -2298,7 +1751,7 @@ Territory 5 had 9 args before and 8 after (modifier concatenated two args).
   details:
     - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
       line: 356
-      operation: "op-001-01"
+      intent: "intent-001"
       expected_args: 9
       actual_args: 8
       before: "            Case 5 : varRates = Array6(480, 27, 434, 27, 539, 27, 394, 27, 124)"
@@ -2309,7 +1762,7 @@ Territory 5 had 9 args before and 8 after (modifier concatenated two args).
 
 1. Identify affected file: `mod_Common_SKHab20260101.vb`
 2. Restore from `snapshots/mod_Common_SKHab20260101.vb.snapshot`
-3. Re-apply ALL operations for this file (op-001-01, op-002-01, op-003-01) bottom-to-top
+3. Re-apply ALL intents for this file (intent-003, intent-002, intent-001) bottom-to-top
 4. Re-run `validate_array6`
 
 **corrections.yaml:**
@@ -2318,11 +1771,11 @@ self_corrections:
   - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     validator: "validate_array6"
     failure_description: "Line 356: Array6 has 8 args, expected 9"
-    correction_action: "Restored from snapshot, re-applied op-003-01, op-002-01, op-001-01"
-    operations_reapplied:
-      - "op-003-01"
-      - "op-002-01"
-      - "op-001-01"
+    correction_action: "Restored from snapshot, re-applied intent-003, intent-002, intent-001"
+    intents_reapplied:
+      - "intent-003"
+      - "intent-002"
+      - "intent-001"
     re_validated: true
     timestamp: "2026-01-15T11:12:00Z"
 ```
@@ -2342,161 +1795,11 @@ At Gate 2, the orchestrator shows: `"[OK] Array6 Syntax: PASS (self-corrected)"`
 
 ---
 
-### Example C: Mixed Results -- BLOCKERs Pass, WARNINGs Flag
-
-**Scenario:** Alberta Auto rate update. Value sanity flags a 48% change on one
-deductible factor (legitimate -- insurer approved large change). Cross-LOB
-consistency passes (Auto has no shared modules).
-
-**validator_results.yaml (abbreviated):**
-```yaml
-# Portage Mutual example
-total_validators: 7
-passed: 6
-failed: 1
-blockers: 0
-warnings: 1
-self_corrections_applied: 0
-
-results:
-  # ... 4 BLOCKERs all pass ...
-
-  - validator: "validate_value_sanity"
-    severity: "WARNING"
-    passed: false
-    message: "1 change exceeds 50% threshold: max 52.0%"
-    details:
-      - file: "Alberta/Code/mod_DisSur_ABAutoHab20260101.vb"
-        line: 145
-        operation: "op-002-01"
-        issue: "large_change"
-        before: -0.25
-        after: -0.38
-        pct_change: 52.0
-
-  - validator: "validate_cross_lob"
-    severity: "WARNING"
-    passed: true
-    message: "No shared modules in this workflow"
-    details: []
-    self_corrected: false
-
-  - validator: "validate_traceability"
-    severity: "WARNING"
-    passed: true
-    message: "2/2 SRDs traced"
-    details: []
-    self_corrected: false
-```
-
-**At Gate 2, the orchestrator shows:**
-```
-Validators:
-  [OK] Array6 Syntax: PASS
-  [OK] Completeness: PASS
-  [OK] No Old File Modification: PASS
-  [OK] No Commented Code Modified: PASS
-  [!!] Value Sanity: WARNING -- 1 change exceeds 50% threshold (52.0%)
-       Alberta/Code/mod_DisSur_ABAutoHab20260101.vb:145
-       Deductible factor: -0.25 -> -0.38 (52.0% change)
-  [OK] Cross-LOB Consistency: PASS
-  [OK] Traceability: PASS
-
-6/7 validators passed. 0 BLOCKER(s), 1 WARNING(s).
-Approve results? Say 'approve' to finalize, or tell me what needs fixing.
-```
-
-The developer says "approve" -- the 48% change is intentional. Proceeds to Done.
-
----
-
-### Example D: Logic Modifier + Rate Modifier on Same File
-
-**Scenario:** Manitoba hab update. SRD-001 adds a new ELITECOMP constant
-(Logic Modifier). SRD-002 updates liability premiums in the same
-mod_Common_MBHab20260101.vb file (Rate Modifier).
-
-**operations_log.yaml (both agents):**
-```yaml
-# Portage Mutual example
-operations:
-  - operation: "op-001-01"
-    agent: "logic-modifier"
-    status: "COMPLETED"
-    file: "Manitoba/Code/mod_Common_MBHab20260101.vb"
-    location: "module-level constants"
-    changes:
-      - line: 23
-        description: "Add ELITECOMP constant"
-        before: null    # Pure insertion
-        after: '    Public Const ELITECOMP As String = "Elite Comp."'
-        change_type: "insert"
-    summary:
-      lines_added: 1
-      lines_modified: 0
-
-  - operation: "op-002-01"
-    agent: "rate-modifier"
-    status: "COMPLETED"
-    file: "Manitoba/Code/mod_Common_MBHab20260101.vb"
-    function: "GetLiabilityBundlePremiums"
-    changes:
-      - line: 4052
-        description: "Farm > PRIMARYITEM > Enhanced Comp"
-        before: "                        liabilityPremiumArray = Array6(0, 78, 161, 189, 213, 291)"
-        after:  "                        liabilityPremiumArray = Array6(0, 82, 169, 198, 224, 306)"
-        values_changed: 5
-    summary:
-      lines_changed: 1
-      values_changed: 5
-      change_range: "3.1% to 5.2%"
-```
-
-**diff_report.md (combined diff for one file):**
-```
---- Manitoba/Code/mod_Common_MBHab20260101.vb
-+++ Manitoba/Code/mod_Common_MBHab20260101.vb (modified)
-
-  @@ line 23 (module-level constants) @@
-  [op-001-01, SRD-001]
-  + Public Const ELITECOMP As String = "Elite Comp."
-
-  @@ line 4052 (GetLiabilityBundlePremiums > Farm > PRIMARYITEM > Enhanced Comp) @@
-  [op-002-01, SRD-002]
-  - liabilityPremiumArray = Array6(0, 78, 161, 189, 213, 291)
-  + liabilityPremiumArray = Array6(0, 82, 169, 198, 224, 306)
-
-Total: 1 files modified, 2 lines changed
-```
-
-**traceability_matrix.md:**
-```
-TRACEABILITY: SRD -> Code Changes
-========================================
-
-srd-001: Add Elite Comp coverage type
-  [OK] Manitoba/Code/mod_Common_MBHab20260101.vb:23 -- 1 changes
-       Add ELITECOMP constant
-
-srd-002: Increase liability premiums 3%
-  [OK] Manitoba/Code/mod_Common_MBHab20260101.vb:4052 -- 1 changes, 5 values
-       Farm > PRIMARYITEM > Enhanced Comp
-
-UNTRACED SRDs: 0
-ORPHAN CHANGES: 0
-```
-
-**Key point:** The diff is ONE diff for the file, with BOTH operations annotated.
-The traceability matrix maps each SRD to its specific operations regardless of
-agent type.
-
----
-
 ## Special Cases
 
 ### Special Case 1: New File Created (Option_*.vb)
 
-The Logic Modifier creates a new file (e.g., `Option_Bicycle_SKHome20260101.vb`).
+The Change Engine creates a new file (e.g., `Option_Bicycle_SKHome20260101.vb`).
 No snapshot exists for this file.
 
 **Diff behavior:**
@@ -2511,19 +1814,19 @@ No snapshot exists for this file.
 - `validate_no_commented_code`: Still applies to inserted content
 - `validate_value_sanity`: N/A (no before values to compare)
 - `validate_cross_lob`: Verify .vbproj Compile Include entry
-- `validate_traceability`: Map to the SRD that requested the new file
+- `validate_traceability`: Map to the CR that requested the new file
 
 ---
 
-### Special Case 2: All Operations SKIPPED (Values Already at Target)
+### Special Case 2: All Intents SKIPPED (Values Already at Target)
 
-If the Rate Modifier finds all values already match the target (e.g., a
+If the Change Engine finds all values already match the target (e.g., a
 previous manual edit already applied the change):
 
 ```yaml
 operations:
-  - operation: "op-001-01"
-    agent: "rate-modifier"
+  - operation: "intent-001"
+    change_type: "value_editing"
     status: "SKIPPED"
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     skip_reason: "All values already at target"
@@ -2539,13 +1842,13 @@ operations:
 
 ### Special Case 3: Empty Operations Log (All FAILED Upstream)
 
-All operations failed during `/iq-execute`. The operations_log has entries
+All intents failed during `/iq-execute`. The operations_log has entries
 but every one has `status: "FAILED"`.
 
 **Validator behavior:**
-- `validate_completeness`: BLOCKER FAIL (no operations completed)
+- `validate_completeness`: BLOCKER FAIL (no intents completed)
 - Self-correction: NOT applicable (nothing to restore/re-apply)
-- Report to developer: "All operations failed during execution."
+- Report to developer: "All intents failed during execution."
 - Suggest: review `/iq-execute` error logs, run `/iq-execute` again
 
 ---
@@ -2594,9 +1897,9 @@ After a minor rework at Gate 2, the orchestrator appends a rework entry:
 ```
 
 **Validator behavior:**
-- Treat `agent: "orchestrator"` like `agent: "rate-modifier"` for validation
+- Treat `agent: "orchestrator"` like `change_type: "value_editing"` for validation
 - Run Array6 syntax check, value sanity, etc.
-- In traceability: rework entries don't map to SRDs (skip orphan check)
+- In traceability: rework entries don't map to CRs (skip orphan check)
 
 ---
 
@@ -2607,10 +1910,10 @@ Line 4058 of mod_Common_SKHab20260101.vb:
 	'liabilityPremiumArray = Array6(24, 49, 99, 124, 149, 274)
 ```
 
-This commented-out line is a REAL trap. The Rate Modifier should skip it, and
+This commented-out line is a REAL trap. The Change Engine should skip it, and
 the `validate_no_commented_code` validator confirms.
 
-**If the modifier DID modify it:** BLOCKER. The `before` line starts with `'`.
+**If the Change Engine DID modify it:** BLOCKER. The `before` line starts with `'`.
 Self-correction restores from snapshot, re-applies without touching commented lines.
 
 **In the clean pass case:** The validator notes: "1 commented Array6 at line 4058
@@ -2625,7 +1928,7 @@ Cross-province shared files (e.g., `Code/PORTCommonHeat.vb`) are listed in
 
 **If the analysis flagged it as potentially affected:**
 - Traceability matrix shows: `[FLAG] Code/PORTCommonHeat.vb -- cross-province shared, NOT modified (manual review needed)`
-- The completeness validator does NOT count this as an incomplete operation
+- The completeness validator does NOT count this as an incomplete intent
 - The change summary includes a note: "Cross-province file flagged for manual review"
 
 ---
@@ -2656,19 +1959,19 @@ update the operations_log -- it only fixes the file on disk.
 **Implication:** The `changes[].after` field in operations_log may not match
 the actual current line if self-correction changed the output.
 
-**Mitigation:** The diff agent compares snapshot to CURRENT file (not to
+**Mitigation:** The diff step compares snapshot to CURRENT file (not to
 operations_log). The diff report shows the ACTUAL state, not what the log
 says. The corrections.yaml file documents what was changed during self-
 correction.
 
 **In validator_results.yaml:** The `self_corrected: true` flag signals to the
-diff agent and orchestrator that operations_log may be stale for this file.
+orchestrator that operations_log may be stale for this file.
 
 ---
 
 ### Special Case 10: Sentinel Value (-999) Changed by Rate Factor
 
-The Rate Modifier should NEVER multiply sentinel values by a rate factor.
+The Change Engine should NEVER multiply sentinel values by a rate factor.
 But if it does:
 
 ```yaml
@@ -2681,7 +1984,7 @@ But if it does:
 details:
   - file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     line: 4051
-    operation: "op-001-01"
+    intent: "intent-001"
     issue: "sentinel_modified"
     arg_index: 7
     before: -999
@@ -2704,7 +2007,7 @@ manually or re-execute.
 
 | Responsibility | Reviewer Agent | Orchestrator (/iq-review) | Developer |
 |---------------|:-:|:-:|:-:|
-| Run 7 validators against modified files | X | | |
+| Run 8 validators against modified files | X | | |
 | Attempt self-correction for BLOCKERs | X | | |
 | Write validator_results.yaml | X | | |
 | Write corrections.yaml (if self-correction) | X | | |
@@ -2727,25 +2030,25 @@ manually or re-execute.
 | Build and test DLL in Visual Studio | | | X |
 | Commit to SVN | | | X |
 
-### Reviewer vs Modifier Agents
+### Reviewer vs Change Engine
 
-| Responsibility | Reviewer Agent | Rate Modifier | Logic Modifier |
-|---------------|:-:|:-:|:-:|
-| Validate Array6 arg counts unchanged | X | | |
-| Validate no old-file modifications | X | | |
-| Validate value sanity (% change) | X | | |
-| Validate completeness (all ops executed) | X | | |
-| Validate cross-LOB consistency | X | | |
-| Validate traceability (SRD coverage) | X | | |
-| Validate no commented code modified | X | | |
-| Modify Array6 / factor / limit values | | X | |
-| Add functions, constants, Case blocks | | | X |
-| Re-apply operations during self-correction | X* | | |
-| Restore from per-file snapshots | X* | | |
+| Responsibility | Reviewer Agent | Change Engine |
+|---------------|:-:|:-:|
+| Validate Array6 arg counts unchanged | X | |
+| Validate no old-file modifications | X | |
+| Validate value sanity (% change) | X | |
+| Validate completeness (all intents executed) | X | |
+| Validate cross-LOB consistency | X | |
+| Validate traceability (CR coverage) | X | |
+| Validate no commented code modified | X | |
+| Modify Array6 / factor / limit values | | X |
+| Add functions, constants, Case blocks | | X |
+| Re-apply intents during self-correction | X* | |
+| Restore from per-file snapshots | X* | |
 
 \* Self-correction restores the ENTIRE file from its snapshot and re-applies ALL
-operations for that file. The Reviewer re-applies using the operation YAML specs
-(same specs the modifiers used). It does NOT re-invoke the modifier agents --
+intents for that file. The Reviewer re-applies using the intent YAML specs
+(same specs the Change Engine used). It does NOT re-invoke the Change Engine --
 it performs the re-application itself using the logged before/after values.
 
 ### Key Boundary Principles
@@ -2850,7 +2153,7 @@ after self-correction still fails.
     line: 4051
     expected_args: 6
     actual_args: 5
-    operations_reapplied: ["op-004-01", "op-004-02"]
+    intents_reapplied: ["intent-004", "intent-003"]
 ```
 
 **Recovery:** Orchestrator presents BLOCKER with options: show affected file,
@@ -2885,7 +2188,7 @@ error_type: "DIFF_GENERATION_FAILED"
 file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
 message: "Diff produced empty output but operations_log records 15 changes"
 details:
-  operations_on_file: ["op-001-01", "op-001-02", "op-002-01"]
+  intents_on_file: ["intent-001", "intent-002", "intent-003"]
   snapshot_exists: true
   file_exists: true
 ```
@@ -2894,8 +2197,8 @@ details:
 
 ### Error 7: TRACEABILITY_GAP
 
-**Trigger:** One or more SRDs have zero operations mapped to them in the
-operations_log. The SRD was planned but nothing was executed for it.
+**Trigger:** One or more CRs have zero intents mapped to them in the
+operations_log. The CR was planned but nothing was executed for it.
 
 **Action:** Report as WARNING in validator_results under `validate_traceability`.
 Include in traceability_matrix.md with `[UNTRACED]` marker.
@@ -2904,18 +2207,18 @@ Include in traceability_matrix.md with `[UNTRACED]` marker.
 - validator: "validate_traceability"
   severity: "WARNING"
   passed: false
-  message: "1 SRD has no executed operations"
+  message: "1 CR has no executed intents"
   error_type: "TRACEABILITY_GAP"
   details:
-    untraced_srds:
-      - srd_id: "srd-003"
+    untraced_crs:
+      - cr_id: "cr-003"
         description: "Change heating surcharge factor"
-        reason: "No operations with prefix op-003 found in log"
+        reason: "No intents for cr-003 found in log"
     orphan_changes: []
 ```
 
-**Recovery:** Developer reviews at Gate 2. May indicate a missed operation (re-plan)
-or an SRD that was intentionally deferred (acknowledge and approve).
+**Recovery:** Developer reviews at Gate 2. May indicate a missed intent (re-plan)
+or a CR that was intentionally deferred (acknowledge and approve).
 
 ### Error 8: CROSS_PROVINCE_VIOLATION
 
@@ -2932,7 +2235,7 @@ appears as a modified file in operations_log.yaml.
   error_type: "CROSS_PROVINCE_VIOLATION"
   details:
     file: "Code/PORTCommonHeat.vb"  # Portage Mutual example
-    operations: ["op-003-01"]
+    intents: ["intent-003"]
 ```
 
 **Recovery:** Restore from snapshot immediately. Developer must apply cross-province
@@ -2967,15 +2270,15 @@ this check if the .vbproj was manually verified.
 1. Orchestrator applies the edit using the Edit tool
 2. Orchestrator appends a `rework-{NNN}` entry to operations_log.yaml
 3. Orchestrator updates file_hashes.yaml with the new hash
-4. Orchestrator re-launches the Reviewer (all 3 agents) for re-validation
-5. Reviewer treats rework entries (`agent: "orchestrator"`) like rate-modifier
+4. Orchestrator re-launches the Reviewer (all 4 agents) for re-validation
+5. Reviewer treats rework entries (`agent: "orchestrator"`) like value_change
    entries for validation purposes
 6. Re-present updated Gate 2 results
 
 **Complex rework** (multiple files affected, scope change, shifted line numbers):
 
 1. Orchestrator sets state to PLANNED with rework_notes in manifest.yaml
-2. Developer runs /iq-execute (modifier agents read rework_notes for context)
+2. Developer runs /iq-execute (Change Engine reads rework_notes for context)
 3. Developer runs /iq-review again (fresh validation cycle)
 
 **Rework loop limit:** After 3 rework cycles without developer approval:
@@ -3005,8 +2308,8 @@ Options:
    After 1 failed retry, escalate to the developer via the orchestrator.
 
 4. **Self-correction restores the ENTIRE file from snapshot.** Because snapshots
-   are per-file (not per-operation), restoring one operation's failure reverts ALL
-   operations on that file. The Reviewer must re-apply ALL operations for the
+   are per-file (not per-intent), restoring one intent's failure reverts ALL
+   intents on that file. The Reviewer must re-apply ALL intents for the
    file, in execution_order.yaml sequence.
 
 5. **Write ALL output files before signaling completion.** The orchestrator reads
@@ -3025,15 +2328,15 @@ Options:
 8. **Use SHA-256 for all hash comparisons.** Compute via Python hashlib. Compare
    against `execution/file_hashes.yaml` entries (prefixed `sha256:`).
 
-9. **Handle both agent log formats.** Rate Modifier entries have `changes[].values_changed`
-   and `summary.change_range`. Logic Modifier entries have `changes[].change_type`
-   and `summary.lines_added`. Dispatch validators by the `agent` field.
+9. **Handle both change type log formats.** Value change entries have `changes[].values_changed`
+   and `summary.change_range`. Structure change entries have `changes[].change_type`
+   and `summary.lines_added`. Dispatch validators by the `change_type` field.
 
-10. **Treat `agent: "orchestrator"` rework entries like rate-modifier entries.**
+10. **Treat `agent: "orchestrator"` rework entries like value_change entries.**
     These are minor rework edits applied by the orchestrator during /iq-review.
     Run Array6 syntax, value sanity, and completeness validators on them.
 
-11. **New files (no snapshot) use empty baseline for diff.** When the Logic Modifier
+11. **New files (no snapshot) use empty baseline for diff.** When the Change Engine
     creates a new file (`new_file_created: true`), the diff baseline is `/dev/null`.
     The entire file content is shown as additions.
 
@@ -3041,9 +2344,9 @@ Options:
     value was modified (e.g., `-999` multiplied to `-1049`). The developer should
     treat sentinel modification as effectively a BLOCKER.
 
-13. **Report untraced SRDs and orphan changes in the traceability matrix.** An
-    untraced SRD has zero executed operations. An orphan change has no matching
-    SRD. Both are WARNINGs, not BLOCKERs -- the developer decides at Gate 2.
+13. **Report untraced CRs and orphan changes in the traceability matrix.** An
+    untraced CR has zero executed intents. An orphan change has no matching
+    CR. Both are WARNINGs, not BLOCKERs -- the developer decides at Gate 2.
 
 14. **Bottom-to-top execution order is NOT relevant to the Reviewer.** The Reviewer
     reads files and compares content -- it does not apply changes by line number.
@@ -3064,14 +2367,14 @@ Options:
   and type mismatches that text-based validators cannot detect.
 
 - **Visual diff viewer:** Generate an HTML diff report with VB.NET syntax
-  highlighting, side-by-side comparison, and clickable operation annotations.
+  highlighting, side-by-side comparison, and clickable intent annotations.
   Currently the diff_report.md is plain text with unified diff format.
 
 - **Regression testing:** Run existing TBW test cases against the modified DLL
   and compare quote outputs to a baseline. This would catch functional regressions
   that pass all structural validators but produce incorrect premium calculations.
 
-- **Parallel validator execution:** Run all 7 validators concurrently instead of
+- **Parallel validator execution:** Run all 8 validators concurrently instead of
   sequentially. The validators are independent (each reads the same input files)
   and do not modify state. Parallelization would reduce review time for large
   workstreams with many modified files.

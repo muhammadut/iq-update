@@ -13,7 +13,7 @@
         "source": "github",
         "repo": "muhammadut/iq-update"
       },
-      "description": "7-agent pipeline: Intake, Decomposer, Analyzer, Planner, Rate Modifier, Logic Modifier, Reviewer. Two human approval gates.",
+      "description": "8-agent pipeline: Intake, Discovery, Analyzer, Decomposer, Planner, Change Engine, Reviewer, Semantic Verifier. Understanding-driven — handles any ticket type with two human approval gates.",
       "version": "0.1.0",
       "license": "MIT",
       "keywords": ["vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"]

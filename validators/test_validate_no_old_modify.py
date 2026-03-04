@@ -6,7 +6,7 @@ file_hashes.yaml, operations_log.yaml, manifest.yaml, config.yaml, and
 fake .vbproj / source files.
 
 Run with:
-    cd "E:/intelli-new/Cssi.Net/Portage Mutual/.iq-update/validators"
+    cd <plugin-root>/validators
     python -m pytest test_validate_no_old_modify.py -v
 """
 
@@ -185,8 +185,8 @@ def test_clean_pass():
             },
             ops_log_operations=[
                 {"file": "Alberta/Code/CalcOption_ABHome20260101.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED",
-                 "operation": "op-001-01"},
+                 "change_type": "value_editing", "status": "COMPLETED",
+                 "operation": "intent-001"},
             ],
             effective_date="20260101",
         )
@@ -306,8 +306,8 @@ def test_cross_province_violation():
             tmpdir,
             ops_log_operations=[
                 {"file": "Code/PORTCommonHeat.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED",
-                 "operation": "op-001-01"},
+                 "change_type": "value_editing", "status": "COMPLETED",
+                 "operation": "intent-001"},
             ],
             cross_province_files=["Code/PORTCommonHeat.vb", "Code/mod_VICCAuto.vb"],
             effective_date="20260101",
@@ -418,8 +418,8 @@ def test_cross_province_suffix_match():
             tmpdir,
             ops_log_operations=[
                 {"file": "Code/PORTCommonHeat.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED",
-                 "operation": "op-001-01"},
+                 "change_type": "value_editing", "status": "COMPLETED",
+                 "operation": "intent-001"},
             ],
             cross_province_files=["PORTCommonHeat.vb"],
             effective_date="20260101",
@@ -456,8 +456,8 @@ def test_combined_failures():
             },
             ops_log_operations=[
                 {"file": "Code/PORTCommonHeat.vb",
-                 "agent": "rate-modifier", "status": "COMPLETED",
-                 "operation": "op-001-01"},
+                 "change_type": "value_editing", "status": "COMPLETED",
+                 "operation": "intent-001"},
             ],
             cross_province_files=["Code/PORTCommonHeat.vb"],
             effective_date="20260101",
@@ -566,3 +566,84 @@ def test_find_mod_common_ref_malformed():
 
         result = find_mod_common_ref(path)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test: Path traversal blocked
+# ---------------------------------------------------------------------------
+
+def test_path_traversal_source_file():
+    """A source file path like '../../etc/passwd' in file_hashes should
+    produce a 'path_traversal' BLOCKER finding, not a crash or read outside
+    the carrier root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        carrier_root = tmpdir
+        workstreams_root = os.path.join(carrier_root, ".iq-workstreams")
+        workstream_dir = os.path.join(workstreams_root, "changes", "test-ticket")
+        execution_dir = os.path.join(workstream_dir, "execution")
+
+        # file_hashes with a traversal path as source role
+        file_hashes_data = {
+            "files": {
+                "../../etc/passwd": {
+                    "hash": "sha256:deadbeef",
+                    "role": "source",
+                },
+            }
+        }
+        _write_yaml(os.path.join(execution_dir, "file_hashes.yaml"), file_hashes_data)
+        _write_yaml(os.path.join(execution_dir, "operations_log.yaml"), {"operations": []})
+        manifest = {
+            "codebase_root": carrier_root,
+            "effective_date": "20260101",
+            "state": "EXECUTED",
+        }
+        _write_yaml(os.path.join(workstream_dir, "manifest.yaml"), manifest)
+        _write_yaml(os.path.join(workstreams_root, "config.yaml"), {})
+        os.makedirs(os.path.join(execution_dir, "snapshots"), exist_ok=True)
+
+        manifest_path = os.path.join(workstream_dir, "manifest.yaml")
+        result = validate(manifest_path)
+        assert result["passed"] is False
+
+        traversal_findings = [f for f in result["findings"]
+                              if f["issue"] == "path_traversal"]
+        assert len(traversal_findings) >= 1
+        assert "etc/passwd" in traversal_findings[0]["message"]
+
+
+def test_path_traversal_vbproj():
+    """A .vbproj path like '../../Windows/System32/evil.vbproj' in file_hashes
+    should produce a 'path_traversal' BLOCKER finding."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        carrier_root = tmpdir
+        workstreams_root = os.path.join(carrier_root, ".iq-workstreams")
+        workstream_dir = os.path.join(workstreams_root, "changes", "test-ticket")
+        execution_dir = os.path.join(workstream_dir, "execution")
+
+        file_hashes_data = {
+            "files": {
+                "../../Windows/System32/evil.vbproj": {
+                    "hash": "sha256:deadbeef",
+                    "role": "target",
+                },
+            }
+        }
+        _write_yaml(os.path.join(execution_dir, "file_hashes.yaml"), file_hashes_data)
+        _write_yaml(os.path.join(execution_dir, "operations_log.yaml"), {"operations": []})
+        manifest = {
+            "codebase_root": carrier_root,
+            "effective_date": "20260101",
+            "state": "EXECUTED",
+        }
+        _write_yaml(os.path.join(workstream_dir, "manifest.yaml"), manifest)
+        _write_yaml(os.path.join(workstreams_root, "config.yaml"), {})
+        os.makedirs(os.path.join(execution_dir, "snapshots"), exist_ok=True)
+
+        manifest_path = os.path.join(workstream_dir, "manifest.yaml")
+        result = validate(manifest_path)
+        assert result["passed"] is False
+
+        traversal_findings = [f for f in result["findings"]
+                              if f["issue"] == "path_traversal"]
+        assert len(traversal_findings) >= 1

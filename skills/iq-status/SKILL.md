@@ -1,6 +1,6 @@
 ---
 name: iq-status
-description: Read-only dashboard showing all workstreams, next actions, overlap alerts, and auto-archiving stale completions.
+description: Dashboard and archive sweep -- displays all workstream statuses, next actions, overlap alerts, and optionally archives completed workstreams.
 user-invocable: true
 ---
 
@@ -8,11 +8,12 @@ user-invocable: true
 
 ## 1. Purpose & Trigger
 
-Quick, read-only dashboard. Answers one question: **what do I do next?**
+Dashboard and archive sweep. Answers one question: **what do I do next?**
 
 Scans all workstreams, groups by state, flags overlaps, detects staleness,
 and runs an archive sweep on completed work. No changes to code files --
-the only side effect is moving old completed workstreams to the archive.
+the only side effect is moving completed/discarded workstream directories
+to `.iq-workstreams/archive/` and updating `archive/index.yaml`.
 
 **Trigger:** Slash command `/iq-status`
 
@@ -118,7 +119,8 @@ If nothing archived, skip this message silently.
 Classify each workstream:
 
 **In-flight** (needs developer action):
-- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING
+- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING,
+  GATE_1_REJECTED, GATE_2_REJECTED
 
 **Terminal** (no action needed):
 - COMPLETED, DISCARDED
@@ -135,6 +137,8 @@ For each in-flight workstream, derive the next action from state:
 | EXECUTING | Run /iq-execute (will resume) |
 | EXECUTED | Run /iq-review |
 | VALIDATING | Run /iq-review (will resume) |
+| GATE_1_REJECTED | Run /iq-plan (revise and re-plan) |
+| GATE_2_REJECTED | Run /iq-execute (re-apply changes) |
 
 ### Step 3.5: Detect Staleness
 
@@ -291,7 +295,7 @@ effective_date, updated_at, ticket, footprint, lifecycle, svn_revision.
 ### Computing "time ago"
 
 ```bash
-python -c "
+{python_cmd} -c "
 from datetime import datetime, timezone
 then = datetime.fromisoformat('{updated_at}'.replace('Z','+00:00'))
 now = datetime.now(timezone.utc)
@@ -317,10 +321,11 @@ mkdir -p ".iq-workstreams/archive/{YYYY-MM}/{workstream-id}"
 
 Use Write tool. Validate after:
 ```bash
-python -c "import yaml; yaml.safe_load(open('.iq-workstreams/archive/index.yaml')); print('YAML OK')"
+{python_cmd} -c "import yaml; yaml.safe_load(open('.iq-workstreams/archive/index.yaml')); print('YAML OK')"
 ```
 
 ### Context management
 
 This skill runs in a FRESH context window. Read all state from disk.
-No changes to code files -- only archive moves and index updates.
+No changes to code files -- only archive moves (completed/discarded workstreams)
+and `archive/index.yaml` updates.

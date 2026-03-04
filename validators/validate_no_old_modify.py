@@ -47,6 +47,7 @@ Return schema:
 from pathlib import Path
 
 from _helpers import (
+    check_path_containment,
     check_vbproj_refs,
     compute_file_hash,
     load_context,
@@ -80,7 +81,17 @@ def _check_source_hashes(file_hashes, carrier_root, findings):
         if fh_info.get("role") != "source":
             continue
 
-        path = carrier_root / filepath
+        # Path containment check — reject paths that escape carrier root
+        try:
+            path = check_path_containment(filepath, carrier_root)
+        except ValueError:
+            findings.append({
+                "file": filepath,
+                "issue": "path_traversal",
+                "message": f"Path escapes carrier root: {filepath}",
+            })
+            continue
+
         if not path.exists():
             findings.append({
                 "file": filepath,
@@ -132,7 +143,17 @@ def _check_vbproj_references(file_hashes, carrier_root, target_date, findings):
         if not filepath.endswith(".vbproj"):
             continue
 
-        vbproj_path = carrier_root / filepath
+        # Path containment check — reject paths that escape carrier root
+        try:
+            vbproj_path = check_path_containment(filepath, carrier_root)
+        except ValueError:
+            findings.append({
+                "file": filepath,
+                "issue": "path_traversal",
+                "message": f"Path escapes carrier root: {filepath}",
+            })
+            continue
+
         if not vbproj_path.exists():
             continue
 

@@ -5,8 +5,7 @@ name: new_liability_option
 description: "Add a new liability sub-option with premium array"
 complexity: MEDIUM
 agents:
-  - rate-modifier
-  - logic-modifier
+  - change-engine
 
 classification_hints:
   - "liability option"

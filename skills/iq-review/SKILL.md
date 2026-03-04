@@ -1,6 +1,6 @@
 ---
 name: iq-review
-description: Validate all changes and produce a summary report. Runs 7 validators, generates diffs, and presents Gate 2 for developer approval.
+description: Validate all changes and produce a summary report. Runs 8 validators, generates diffs, performs semantic verification, and presents Gate 2 for developer approval.
 user-invocable: true
 ---
 
@@ -11,7 +11,7 @@ user-invocable: true
 Run the RIGOROUS final review after /iq-execute has applied all modifications.
 This is the third and final command in the plugin's workflow -- it validates
 everything, generates comprehensive reports, and presents Gate 2 for developer
-approval. The orchestrator launches the review agent team, runs all 7 validators,
+approval. The orchestrator launches the review agent team, runs all 8 validators,
 produces diffs and traceability reports, and walks the developer through approval
 or rework.
 
@@ -22,6 +22,7 @@ files ARE the memory.
 **Trigger:** Slash command `/iq-review`
 
 **State transition:** `EXECUTED` --> `VALIDATING` --> `COMPLETED`
+                                              `--> `GATE_2_REJECTED` (if developer rejects at Gate 2)
 
 ---
 
@@ -59,8 +60,9 @@ Scan `.iq-workstreams/changes/` for `manifest.yaml` where state is `EXECUTED` or
 Confirm these exist in the workstream directory:
 
 ```
-From /iq-plan:  manifest.yaml, input/source.md, parsed/change_spec.yaml,
-                parsed/srds/ (1+ files), analysis/operations/ (1+ files),
+From /iq-plan:  manifest.yaml, input/source.md, parsed/change_requests.yaml,
+                parsed/requests/ (1+ files), analysis/intent_graph.yaml,
+                analysis/analyzer_output/ (1+ files),
                 plan/execution_plan.md, plan/execution_order.yaml
 From /iq-execute: execution/operations_log.yaml, execution/file_hashes.yaml,
                   execution/snapshots/ (1+ .snapshot files)
@@ -113,21 +115,22 @@ Read `execution_mode` from manifest.yaml ("team" or "sequential").
 **Team mode (default):**
 ```
 1. TeamCreate(team_name="iq-review-{workstream-name}")
-2. Create 3 tasks with sequential dependencies:
-   - "Run validator agent"   (no blockers)
-   - "Run diff agent"        (blocked by validator)
-   - "Run report agent"      (blocked by diff)
+2. Create 4 tasks with sequential dependencies:
+   - "Run validator agent"            (no blockers)
+   - "Run diff agent"                 (blocked by validator)
+   - "Run semantic verifier agent"    (blocked by diff)
+   - "Run report agent"              (blocked by semantic verifier)
 3. Spawn each agent (see Agent Launch Protocol below)
 4. Monitor for DEVELOPER_QUESTION, AGENT_COMPLETE, AGENT_ERROR messages
-5. After all 3 complete: TeamDelete(), proceed to Gate 2
+5. After all 4 complete: TeamDelete(), proceed to Gate 2
 ```
 
 If TeamCreate fails, fall back to sequential mode. Log to error_log.
 
 **Sequential mode (fallback):**
 ```
-For each agent (validator, diff, report):
-  1. Launch via Task tool (no team_name)
+For each agent (validator, diff, semantic-verifier, report):
+  1. Launch via Agent tool (no team_name)
   2. Agent runs, returns when done
   3. Read output files, proceed to next
 ```
@@ -136,13 +139,13 @@ For each agent (validator, diff, report):
 
 **Team mode** -- include `team_name`:
 ```
-Task(name: "{agent}-agent", team_name: "iq-review-{workstream-name}",
-     subagent_type: "general-purpose", prompt: <below>)
+Agent(name: "{agent}-agent", team_name: "iq-review-{workstream-name}",
+      subagent_type: "general-purpose", prompt: <below>)
 ```
 
 **Sequential mode** -- no `team_name`:
 ```
-Task(name: "{agent}-agent", subagent_type: "general-purpose", prompt: <below>)
+Agent(name: "{agent}-agent", subagent_type: "general-purpose", prompt: <below>)
 ```
 
 **Standard prompt template:**
@@ -182,11 +185,11 @@ ON COMPLETION: Return summary with output counts, issues, warnings.
 
 ### Agent 1: VALIDATOR
 
-**Purpose:** Run all 7 validators. Attempt self-correction for BLOCKERs.
+**Purpose:** Run all 8 validators. Attempt self-correction for BLOCKERs.
 
 **Input:** execution/operations_log.yaml, execution/file_hashes.yaml,
-execution/snapshots/*.snapshot, parsed/change_spec.yaml, parsed/srds/srd-NNN.yaml,
-analysis/operations/op-NNN.yaml, analysis/files_to_copy.yaml, all modified source
+execution/snapshots/*.snapshot, parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
+analysis/intent_graph.yaml, analysis/files_to_copy.yaml, all modified source
 files, all target .vbproj files.
 
 **Output:** verification/validator_results.yaml
@@ -211,8 +214,12 @@ files, all target .vbproj files.
 6. **CROSS-LOB CONSISTENCY (WARNING):** If shared_modules exist, verify all .vbproj
    files referencing the shared module point to the same file (same path, same date).
 
-7. **TRACEABILITY (WARNING):** Verify every SRD maps to at least one operation in
-   operations_log. Report untraced SRDs and orphan changes.
+7. **TRACEABILITY (WARNING):** Verify every CR maps to at least one intent in
+   operations_log. Report untraced CRs and orphan changes.
+
+8. **VBPROJ INTEGRITY (BLOCKER):** Verify every `<Compile Include>` path in
+   modified .vbproj files resolves to an existing file on disk. Check for
+   duplicate entries. Uses `validate_vbproj.py`.
 
 **Self-Correction Protocol (include in agent prompt):**
 ```
@@ -257,34 +264,88 @@ verification/corrections.yaml (if exists), all modified source files.
 **Output:** verification/diff_report.md, verification/changes.diff
 
 **Steps (included in agent prompt):**
-1. For each snapshot: generate unified diff, annotate with operation ID and SRD.
+1. For each snapshot: generate unified diff, annotate with intent ID and CR.
 2. Cross-check: logged-but-no-change and undocumented-change detection.
 3. Intended-vs-actual comparison against execution_order.yaml. Flag discrepancies.
 4. Write diff_report.md (human-readable, annotated, per-file sections, summary).
 5. Write changes.diff (standard unified diff, file paths relative to carrier root).
 6. If validator flagged issues or self-corrections: highlight at TOP of diff report.
 
-**After diff-agent completes:** Confirm diff_report.md exists. Proceed to report-agent.
+**After diff-agent completes:** Confirm diff_report.md exists. Proceed to semantic-verifier-agent.
 
-### Agent 3: REPORT
+### Agent 3: SEMANTIC VERIFIER
 
-**Purpose:** Produce traceability matrix and final change summary.
+**Purpose:** For each intent, read the before/after code and reason about whether
+the change matches the original intent description. Produce a reasoning chain
+showing arithmetic checks (for value edits) and structural checks (for insertions).
 
-**Input:** manifest.yaml, parsed/change_spec.yaml, parsed/srds/srd-NNN.yaml,
-analysis/operations/op-NNN.yaml, execution/operations_log.yaml,
-verification/validator_results.yaml, verification/diff_report.md.
+**Input:** analysis/intent_graph.yaml, analysis/analyzer_output/cr-NNN-analysis.yaml,
+execution/operations_log.yaml, execution/snapshots/*.snapshot, plan/execution_order.yaml,
+parsed/requests/cr-NNN.yaml, all modified source files.
+
+**Output:** verification/semantic_verification.yaml, verification/semantic_report.md
+
+**Agent-specific instructions (included in agent prompt):**
+```
+Read the semantic verifier agent spec from: .iq-update/agents/semantic-verifier.md
+Follow ALL steps in that spec.
+
+For each intent in intent_graph.yaml:
+  1. Read the snapshot (before) and modified file (after)
+  2. Apply verification method based on capability type:
+     - value_editing: arithmetic check (old × factor = new? within rounding)
+     - structure_insertion: placement + content + no collateral damage
+     - file_creation: file exists + .vbproj updated + source unchanged
+     - flow_modification: control flow structure matches plan
+  3. Produce reasoning chain with MATCH or MISMATCH verdict
+  4. Write results to verification/semantic_verification.yaml
+  5. Write human-readable report to verification/semantic_report.md
+
+IMPORTANT: You are READ-ONLY except for your output files. Do NOT modify
+any source code, snapshots, or plan files.
+```
+
+**After semantic-verifier-agent completes:**
+
+Read semantic_verification.yaml. If any MISMATCH has severity "BLOCKER":
+```
+SEMANTIC MISMATCH detected:
+  {intent_id}: {description}
+    {reasoning summary}
+
+This may indicate a calculation error or wrong edit location.
+Options:
+  1. Show me the full reasoning
+  2. Show me the affected file
+  3. I'll fix it manually -- then say "re-validate"
+  4. Proceed anyway (log as accepted deviation)
+```
+
+If all verdicts are MATCH or WARNING: proceed to report-agent. Pass the
+semantic_report.md path to the report-agent so it can include semantic
+findings in the final summary.
+
+### Agent 4: REPORT
+
+**Purpose:** Produce traceability matrix and final change summary. Incorporate
+semantic verification findings.
+
+**Input:** manifest.yaml, parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
+analysis/intent_graph.yaml, execution/operations_log.yaml,
+verification/validator_results.yaml, verification/diff_report.md,
+verification/semantic_verification.yaml, verification/semantic_report.md.
 
 **Output:** verification/traceability_matrix.md, summary/change_summary.md
 
 **Steps (included in agent prompt):**
-1. **Traceability matrix:** For each SRD, list all operations, map to file:line
-   changes, mark [OK] or [MISSING]. Count UNTRACED SRDs and ORPHAN CHANGES.
+1. **Traceability matrix:** For each CR, list all intents, map to file:line
+   changes, mark [OK] or [MISSING]. Count UNTRACED CRs and ORPHAN CHANGES.
 2. **Change summary:** Use EXACT format from reviewer.md -- RATE UPDATE header,
-   ticket ref, workflow ID, bullet per SRD, files modified/created, .vbproj count,
+   ticket ref, workflow ID, bullet per CR, files modified/created, .vbproj count,
    validation pass count.
 
 **After report-agent completes:**
-1. Read traceability_matrix.md and change_summary.md
+1. Read traceability_matrix.md, change_summary.md, and semantic_report.md
 2. Team mode: TeamDelete()
 3. Update manifest: `phase_status.reviewer.status: "completed"`, summary, updated_at
 4. Proceed to Gate 2
@@ -305,9 +366,29 @@ Validators:
   [{OK_or_FAIL}] Value Sanity: {PASS_or_FAIL} {detail}
   [{OK_or_FAIL}] Cross-LOB Consistency: {PASS_or_FAIL} {detail}
   [{OK_or_FAIL}] Traceability: {PASS_or_FAIL} {detail}
+  [{OK_or_FAIL}] Vbproj Integrity: {PASS_or_FAIL} {detail}
 
-{passed}/7 validators passed. {blockers} BLOCKER(s), {warnings} WARNING(s).
+{passed}/8 validators passed. {blockers} BLOCKER(s), {warnings} WARNING(s).
+
+Semantic Verification:
+  {matched}/{total} intents verified as MATCH
+  {mismatched} MISMATCH(es): {blocker_count} BLOCKER, {warning_count} WARNING
+  {For each MISMATCH:}
+  [{severity}] {intent_id}: {description}
+    {1-line reasoning summary}
 ```
+
+**Semantic reasoning preview:** After validators, show the semantic verifier's
+reasoning for any MISMATCH intents. For MATCH intents, show a compact summary:
+`"✓ {matched} intents verified (arithmetic + structural checks passed)"`
+`"Full reasoning: verification/semantic_report.md"`
+
+**Inline diff preview:** After semantic results, show a summary of key changes inline
+(not just in the file). Read `verification/changes.diff` and display the first
+50 lines or 3 file sections (whichever is shorter). End with:
+`"Full diff: verification/changes.diff ({N} lines total)"`
+
+This lets the developer see actual changes without opening a separate file.
 
 If WARNINGs exist, show each with context. If BLOCKERs persist (safety net),
 show VALIDATION FAILED with fix/show/restore options -- do NOT show approval prompt.
@@ -329,7 +410,7 @@ Developer says: "territory 5 values are wrong" / "fix the Array6 in territory 12
 2. TOCTOU CHECK: Compare file hash. Warn on mismatch.
 3. APPLY FIX: Edit tool, preserve VB.NET formatting
 4. LOG: Append "rework-{NNN}" entry to operations_log.yaml. Update file hashes.
-5. RE-VALIDATE: Re-launch all 3 review agents (or inline if simple)
+5. RE-VALIDATE: Re-launch all 4 review agents (or inline if simple)
 6. RE-PRESENT at Gate 2 with updated results
 ```
 
@@ -381,7 +462,7 @@ On developer approval at Gate 2, read `summary/change_summary.md` and present:
    - {new_file} (from {old_file})
 
  .vbproj references updated: {N}
- Validation: {N}/7 checks passed
+ Validation: {N}/8 checks passed
 
 ---------------------------------------------------------------------------
  Suggested SVN commit message:
@@ -391,7 +472,7 @@ On developer approval at Gate 2, read `summary/change_summary.md` and present:
  Ticket: {ticket_ref or "N/A"}
  IQ-Workflow: {workflow_id}
 
-   - {bullet per SRD}
+   - {bullet per CR}
 
  Files modified:
    - {list}
@@ -429,7 +510,7 @@ lifecycle:
   archive_after: "{now + 14 days}"
   archived_at: null
 phase_status:
-  reviewer: {status: "completed", summary: "{N}/7 passed, {b} BLOCKERs, {w} WARNINGs"}
+  reviewer: {status: "completed", summary: "{N}/8 passed, {b} BLOCKERs, {w} WARNINGs"}
   gate_2: {status: "approved", summary: "Developer approved{. SVN rNNN if provided}"}
 ```
 
@@ -512,7 +593,7 @@ any investigation query: `"Back to the review results -- approve or tell me what
 | "Compare before/after" | Show snapshot vs current |
 | "Which territories updated?" | Parse operations_log |
 | "Show traceability matrix" | Display verification/traceability_matrix.md |
-| "Is SRD-{N} covered?" | Look up in traceability_matrix.md |
+| "Is CR-{N} covered?" | Look up in traceability_matrix.md |
 
 ---
 
@@ -526,7 +607,7 @@ phase_status.reviewer: {status: "in_progress"}
 
 ### After Review Team Completes
 ```yaml
-phase_status.reviewer: {status: "completed", summary: "{N}/7 passed, ..."}
+phase_status.reviewer: {status: "completed", summary: "{N}/8 passed, ..."}
 ```
 
 ### On Minor Rework
@@ -549,14 +630,15 @@ Also set `lifecycle.completed_at` = now, `lifecycle.archive_after` = now + 7 day
 ## 12. Implementation Notes
 
 ### Reading manifest.yaml
-Use Read tool. Parse YAML for state, SRD progress, target folders, shared modules.
+Use Read tool. Parse YAML for state, CR progress, target folders, shared modules.
 
 ### Scanning for workstreams
 Bash `ls` on `.iq-workstreams/changes/`, then Read each manifest.yaml.
 
 ### Computing file hashes
+Use `python_cmd` from config.yaml (discovered by /iq-init). Never hardcode `python` or `python3`.
 ```bash
-python -c "import hashlib; print(hashlib.sha256(open('{filepath}','rb').read()).hexdigest())"
+{python_cmd} -c "import hashlib; print(hashlib.sha256(open('{filepath}','rb').read()).hexdigest())"
 ```
 
 ### Comparing files (diff generation)
@@ -567,7 +649,7 @@ diff -u "execution/snapshots/{file}.snapshot" "{current_file_path}"
 ### Writing YAML files
 Use Write tool. Validate after:
 ```bash
-python -c "import yaml; yaml.safe_load(open('{filepath}')); print('YAML OK')"
+{python_cmd} -c "import yaml; yaml.safe_load(open('{filepath}')); print('YAML OK')"
 ```
 
 ### Generating timestamps

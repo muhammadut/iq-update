@@ -9,7 +9,7 @@ Usage:
   export ADO_PAT='...'
   export ADO_ORG='your-org'
   export ADO_PROJECT='Your Project Name'
-  ./fetch-ado-ticket-full.sh <work_item_id_or_url>
+  ./fetch-ticket.sh <work_item_id_or_url>
 
 Options via env:
   ADO_OUT_DIR   Output directory (default: current directory)

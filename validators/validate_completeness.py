@@ -31,7 +31,7 @@ Return schema:
             {
                 "file": str,      # File with incomplete changes
                 "issue": str,     # Description (e.g., "Territory 12 not updated")
-                "operation": str, # Operation ID (e.g., "op-001")
+                "operation": str, # Intent ID (e.g., "intent-001")
                 "expected": str,  # What was expected
                 "actual": str,    # What was found
             }
@@ -50,40 +50,61 @@ from _helpers import load_context, load_yaml, make_result
 # ---------------------------------------------------------------------------
 
 def _load_planned_operations(workstream_dir, findings=None):
-    """Load all op-*.yaml files from analysis/operations/.
+    """Load planned operations from intent_graph.yaml.
 
-    Each file defines a planned operation with id, pattern, function,
-    target_lines, file, etc. as written by the Decomposer/Analyzer agents.
+    Reads analysis/intent_graph.yaml (the single source of planned intents).
+    If the file does not exist, appends an error finding and returns empty.
+
+    Each intent defines a planned change with id, capability, strategy_hint,
+    function, target_lines, file, etc. as written by the Decomposer/Analyzer agents.
 
     Args:
         workstream_dir: Path to the workstream directory.
         findings: Optional list to append parse error findings to.
 
     Returns:
-        dict mapping operation ID (str) -> parsed operation spec (dict).
-        Empty dict if the directory does not exist or contains no files.
+        dict mapping intent ID (str) -> parsed intent spec (dict).
+        Empty dict if intent_graph.yaml is missing or contains no entries.
     """
-    ops_dir = workstream_dir / "analysis" / "operations"
-    if not ops_dir.exists():
+    intent_graph_path = workstream_dir / "analysis" / "intent_graph.yaml"
+    if not intent_graph_path.exists():
+        if findings is not None:
+            findings.append({
+                "file": str(intent_graph_path),
+                "issue": "intent_graph_missing",
+                "operation": "",
+                "expected": "analysis/intent_graph.yaml exists",
+                "actual": "file not found -- no planned operations to validate against",
+            })
         return {}
 
-    operations = {}
-    for op_file in sorted(ops_dir.glob("op-*.yaml")):
-        try:
-            op_spec = load_yaml(op_file)
-        except Exception as e:
-            if findings is not None:
-                findings.append({
-                    "file": str(op_file),
-                    "issue": "operation_spec_parse_error",
-                    "operation": op_file.stem,
-                    "expected": "valid YAML",
-                    "actual": str(e),
-                })
-            continue
-        if op_spec and isinstance(op_spec, dict) and "id" in op_spec:
-            operations[op_spec["id"]] = op_spec
-    return operations
+    try:
+        graph = load_yaml(intent_graph_path)
+    except Exception as e:
+        if findings is not None:
+            findings.append({
+                "file": str(intent_graph_path),
+                "issue": "intent_graph_parse_error",
+                "operation": "",
+                "expected": "valid YAML",
+                "actual": str(e),
+            })
+        return {}
+
+    if graph and isinstance(graph, dict):
+        intents = graph.get("intents", [])
+        if isinstance(intents, list) and intents:
+            operations = {}
+            for intent in intents:
+                if not isinstance(intent, dict):
+                    continue
+                intent_id = intent.get("id", "")
+                if not intent_id:
+                    continue
+                operations[intent_id] = intent
+            return operations
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +119,7 @@ def _check_all_ops_logged(operations, ops_log, findings):
     the execution was incomplete.
 
     Args:
-        operations: dict mapping op_id -> op_spec (from op-*.yaml files).
+        operations: dict mapping op_id -> op_spec (from intent_graph.yaml).
         ops_log: Parsed operations_log.yaml dict.
         findings: List to append finding dicts to (mutated in place).
     """
@@ -171,7 +192,7 @@ def _check_no_failed_or_stuck(ops_log, findings):
 
 
 # ---------------------------------------------------------------------------
-# Check 3: Territory counting for base_rate_increase operations
+# Check 3: Territory counting for array6-multiply operations
 # ---------------------------------------------------------------------------
 
 def _find_function_bounds(lines, function_name):
@@ -285,14 +306,14 @@ def _load_snapshot_lines(filepath, snapshots_dir):
 
 
 def _check_territory_completeness(operations, ops_log, snapshots_dir, findings):
-    """For base_rate_increase operations, verify all territories were updated.
+    """For array6-multiply operations (strategy_hint), verify all territories were updated.
 
     Counts the number of numeric Case labels in the function from the pre-edit
     snapshot (ground truth), then compares to the number of changes actually
     recorded in the operations log.
 
     If the snapshot is unavailable, falls back to the target_lines count from
-    the op-*.yaml file (the Analyzer's best guess).
+    the intent_graph.yaml file (the Analyzer's best guess).
 
     Args:
         operations: dict mapping op_id -> op_spec.
@@ -309,8 +330,8 @@ def _check_territory_completeness(operations, ops_log, snapshots_dir, findings):
         if not op_spec:
             continue
 
-        # Only applies to base_rate_increase pattern
-        if op_spec.get("pattern") != "base_rate_increase":
+        # Only applies to array6-multiply strategy (base rate changes)
+        if op_spec.get("strategy_hint") != "array6-multiply":
             continue
 
         filepath = entry.get("file", "")
@@ -326,7 +347,7 @@ def _check_territory_completeness(operations, ops_log, snapshots_dir, findings):
                 snapshot_lines, function_name
             )
 
-        # Fallback: use target_lines count from op-*.yaml
+        # Fallback: use target_lines count from intent_graph.yaml
         if expected_count == 0:
             expected_count = len(op_spec.get("target_lines", []))
 
@@ -348,10 +369,10 @@ def _check_territory_completeness(operations, ops_log, snapshots_dir, findings):
 # ---------------------------------------------------------------------------
 
 def _check_factor_table_completeness(operations, ops_log, findings):
-    """For factor_table_change operations, verify all specified Case values
+    """For factor-table operations (strategy_hint), verify all specified Case values
     were updated.
 
-    The op-*.yaml for a factor_table_change lists target_lines, each with a
+    The intent spec for a factor-table change lists target_lines, each with a
     specific Case value context. The operations log should have a change entry
     for each target line.
 
@@ -369,16 +390,16 @@ def _check_factor_table_completeness(operations, ops_log, findings):
         if not op_spec:
             continue
 
-        if op_spec.get("pattern") != "factor_table_change":
+        if op_spec.get("strategy_hint") != "factor-table":
             continue
 
         filepath = entry.get("file", "")
         target_lines = op_spec.get("target_lines", [])
         actual_changes = entry.get("changes", [])
 
-        # Compare count of expected target lines to actual changes
-        if len(target_lines) > 0 and len(actual_changes) < len(target_lines):
-            # Build detail: which target lines were not addressed?
+        # Always check for missing targets — wrong-line edits may have
+        # matching counts but different line numbers (set difference).
+        if len(target_lines) > 0:
             changed_line_nums = {c.get("line") for c in actual_changes}
             missing_targets = [
                 t for t in target_lines
@@ -442,7 +463,7 @@ def _check_lob_completeness(manifest, change_spec, ops_log, findings):
 
     Args:
         manifest: Parsed manifest.yaml dict.
-        change_spec: Parsed change_spec.yaml dict (or None).
+        change_spec: Parsed change_requests.yaml dict (or None).
         ops_log: Parsed operations_log.yaml dict.
         findings: List to append finding dicts to.
     """
@@ -533,7 +554,7 @@ def _build_message(findings, operations, ops_log):
             if entry.get("status") != "COMPLETED":
                 continue
             op_spec = operations.get(entry.get("operation", ""))
-            if op_spec and op_spec.get("pattern") == "base_rate_increase":
+            if op_spec and op_spec.get("strategy_hint") == "array6-multiply":
                 territory_total += len(entry.get("changes", []))
 
         if territory_total > 0:
@@ -565,15 +586,16 @@ def validate(manifest_path: str) -> dict:
     """Validate that all expected changes were applied completely.
 
     Runs 5 completeness checks:
-      1. Every planned op-*.yaml has a log entry in operations_log.yaml.
+      1. Every planned intent (from intent_graph.yaml) has a log entry in
+         operations_log.yaml.
       2. No operations are FAILED, PENDING, or IN_PROGRESS.
-      3. For base_rate_increase: territory counts match snapshot ground truth.
-      4. For factor_table_change: all target Case values were updated.
+      3. For array6-multiply (strategy_hint): territory counts match snapshot ground truth.
+      4. For factor-table (strategy_hint): all target Case values were updated.
       5. For multi-LOB hab tickets: all LOBs have completed operations.
 
     Args:
         manifest_path: Absolute path to the workflow manifest.yaml file.
-                       Used to locate change_spec, operations, and
+                       Used to locate change_requests, operations, and
                        operations_log for completeness checking.
 
     Returns:
@@ -603,7 +625,7 @@ def validate(manifest_path: str) -> dict:
 
     findings = []
 
-    # Load planned operations from analysis/operations/op-*.yaml
+    # Load planned operations from intent_graph.yaml
     try:
         operations = _load_planned_operations(workstream_dir, findings=findings)
     except Exception as e:
@@ -614,18 +636,18 @@ def validate(manifest_path: str) -> dict:
                 "file": "",
                 "issue": "operations_load_error",
                 "operation": "",
-                "expected": "readable op-*.yaml files in analysis/operations/",
+                "expected": "readable intent_graph.yaml",
                 "actual": str(e),
             }],
             message=f"Validator crashed loading planned operations: {e}",
         )
 
-    # Load change_spec for LOB completeness check (optional)
+    # Load change_requests for LOB completeness check (optional)
     change_spec = None
-    change_spec_path = workstream_dir / "parsed" / "change_spec.yaml"
-    if change_spec_path.exists():
+    change_requests_path = workstream_dir / "parsed" / "change_requests.yaml"
+    if change_requests_path.exists():
         try:
-            change_spec = load_yaml(change_spec_path)
+            change_spec = load_yaml(change_requests_path)
         except Exception:
             pass  # Non-fatal; LOB check will use manifest only
 
@@ -653,7 +675,7 @@ def validate(manifest_path: str) -> dict:
             "actual": f"Check 2 crashed: {e}",
         })
 
-    # Check 3: Territory counting for base_rate_increase operations
+    # Check 3: Territory counting for array6-multiply operations
     try:
         _check_territory_completeness(operations, ops_log, snapshots_dir, findings)
     except Exception as e:

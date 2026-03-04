@@ -1,21 +1,21 @@
 # Pattern: alert_message
-# OPERATION-LEVEL pattern for the Logic Modifier (NOT a first-class SRD type).
+# OPERATION-LEVEL pattern for the Change Engine (NOT a first-class change request type).
 #
 # This is a SUBPATTERN of eligibility_rules. The Intake agent classifies
-# alert-related tickets as type "eligibility_rules" (the SRD type). The
-# Decomposer then creates individual operations with pattern "alert_message"
-# for the Logic Modifier to handle.
+# alert-related tickets as type "eligibility_rules" (the change request type). The
+# Decomposer then creates individual intents with pattern "alert_message"
+# for the Change Engine to handle.
 #
 # Classification hints below help the Intake agent RECOGNIZE alert language
 # within a ticket, which it then classifies as eligibility_rules.
-# Example: "Do Not Bind for Grade 3 risks" → SRD type: eligibility_rules,
-#          Decomposer operation pattern: alert_message.
+# Example: "Do Not Bind for Grade 3 risks" → CR type: eligibility_rules,
+#          Decomposer intent pattern: alert_message.
 
 name: alert_message
 description: "Insert AlertHab or system alert calls triggered by underwriting rules"
 complexity: COMPLEX
 agents:
-  - logic-modifier
+  - change-engine
 
 classification_hints:
   - "do not bind"

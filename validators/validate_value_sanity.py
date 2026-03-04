@@ -90,19 +90,25 @@ def validate(manifest_path: str) -> dict:
     config = ctx["config"]
 
     # Get threshold from config (default 50%)
-    threshold = 50
+    # Supports config.yaml: validation.value_sanity_threshold_percent
+    # Also accepts string values (e.g., "50") via float() coercion.
+    raw_threshold = 50.0
     if config:
-        threshold = config.get("validation", {}).get(
-            "value_sanity_threshold_percent", 50
+        raw_threshold = config.get("validation", {}).get(
+            "value_sanity_threshold_percent", 50.0
         )
+    try:
+        threshold = float(raw_threshold)
+    except (ValueError, TypeError):
+        threshold = 50.0
 
     findings = []
     all_pct_changes = []
     values_checked = 0
 
     for entry in ops_log.get("operations", []):
-        # Only check rate-modifier / orchestrator operations
-        if entry.get("agent") not in ("rate-modifier", "orchestrator"):
+        change_type = entry.get("change_type", "")
+        if change_type not in ("value_editing", "structure_insertion"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
