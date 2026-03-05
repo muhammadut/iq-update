@@ -127,6 +127,7 @@ workstream files. These six commands cover the full workflow.
 16. **Fresh context per command** -- each /iq-* command reads ALL state from disk, never from memory
 17. **NEVER use `sleep` to wait for anything** -- if an Agent tool call fails or an agent cannot be resumed, log the error and fall back to sequential execution. Do not retry in a sleep loop. Do not `sleep` between steps.
 18. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
+19. **Python-only for scripting** -- when generating YAML, parsing files, or processing data, ALWAYS use Python (with the `python_cmd` from config.yaml). NEVER use Perl, Ruby, Node, or other scripting languages. Python + PyYAML is the only verified runtime.
 
 ## Province Codes
 
