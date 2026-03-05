@@ -32,7 +32,10 @@ Execute IN ORDER. If any fails, STOP and report.
 
 ### Check 1: Plugin Installed
 
-Verify `.iq-update/CLAUDE.md` exists. If missing: `"ERROR: .iq-update/ plugin not installed."`
+Read `plugin_root` from `.iq-workstreams/config.yaml` and verify `{plugin_root}/CLAUDE.md` exists.
+If config.yaml doesn't exist, fall back to `.iq-update/CLAUDE.md`. If neither found:
+`"ERROR: Plugin not installed. Run /iq-init first."`
+Use `plugin_root` for ALL `.iq-update/` paths in this skill (reviewer.md, semantic-verifier.md, validators).
 
 ### Check 2: Config Exists
 

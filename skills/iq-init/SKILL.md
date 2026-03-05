@@ -71,13 +71,27 @@ the whole init because one province is malformed).
 ### Step 0: Validate Preconditions
 
 1. Determine the carrier root directory. Use the current working directory.
-2. Check that `.iq-update/` exists (the plugin itself must be installed):
-   - Look for `.iq-update/CLAUDE.md` as the indicator
-   - If missing, STOP and tell the developer:
-     ```
-     ERROR: The .iq-update/ plugin is not installed in this folder.
-     Please install the IQ Rate Update Plugin first, then run /iq-init.
-     ```
+2. **Discover the plugin root** — the plugin may be installed locally OR via marketplace:
+
+   **Search order:**
+   a. Check `{carrier_root}/.iq-update/CLAUDE.md` (local development install)
+   b. If not found, scan for marketplace cache: look for a directory matching
+      `~/.claude/plugins/cache/*/iq-update/*/CLAUDE.md` (use Glob tool)
+   c. If neither found, STOP:
+      ```
+      ERROR: The .iq-update/ plugin is not installed.
+      Install via Claude Code marketplace or copy .iq-update/ to this folder.
+      ```
+
+   **Persist the result** as `plugin_root` in config.yaml (see template below).
+   Report what was found:
+   ```
+   Plugin root:  ✓ {path}  [local | marketplace]
+   ```
+
+   **IMPORTANT:** Throughout this skill and all agent specs, `.iq-update/` is shorthand
+   for `{plugin_root}/`. Always resolve paths using the discovered plugin root, NOT
+   by assuming `.iq-update/` exists in the carrier root.
 3. Check if `.iq-workstreams/config.yaml` already exists:
    - If YES: this is a RE-INIT (merge mode). Note this for Step 4.
    - If NO: this is a FRESH INIT.
@@ -414,6 +428,13 @@ _meta:
 carrier_name: "{Detected carrier name, e.g., Portage Mutual}"
 carrier_prefix: "{Detected prefix, e.g., PORT}"
 root_path: "{Absolute path to carrier folder}"
+
+# -- Plugin Location ----------------------------------------------------------
+# Discovered by /iq-init Step 0. All .iq-update/ references resolve to this path.
+# Local install: "{carrier_root}/.iq-update"
+# Marketplace:   "~/.claude/plugins/cache/iq-update-marketplace/iq-update/0.1.0"
+plugin_root: "{Absolute path to the plugin directory}"
+plugin_install_type: "{local | marketplace}"
 
 # -- Python Environment ------------------------------------------------------
 # Discovered by /iq-init preflight check. Used by all downstream skills

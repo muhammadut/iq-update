@@ -25,10 +25,12 @@ Execute IN ORDER. If any fails, STOP and report.
 
 ### Check 1: Plugin Installed
 
-Verify `.iq-update/CLAUDE.md` exists. If missing:
+Read `plugin_root` from `.iq-workstreams/config.yaml` and verify `{plugin_root}/CLAUDE.md` exists.
+If config.yaml doesn't exist, fall back to `.iq-update/CLAUDE.md`. If neither found:
 ```
-ERROR: .iq-update/ plugin not installed. Install the IQ Rate Update Plugin first.
+ERROR: Plugin not installed. Run /iq-init first.
 ```
+Use `plugin_root` for ALL `.iq-update/` paths in this skill.
 
 ### Check 2: Config Exists
 

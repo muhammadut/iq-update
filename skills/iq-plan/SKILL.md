@@ -27,13 +27,17 @@ STOP and report the issue to the developer.
 
 ### Check 1: Plugin Installed
 
-Verify that `.iq-update/CLAUDE.md` exists in the carrier root directory.
+Read `plugin_root` from `.iq-workstreams/config.yaml` and verify `{plugin_root}/CLAUDE.md` exists.
+If config.yaml doesn't exist yet, fall back to checking `.iq-update/CLAUDE.md` in the carrier root.
 
-- If missing, STOP:
+- If neither found, STOP:
   ```
-  ERROR: The .iq-update/ plugin is not installed in this folder.
-  Please install the IQ Rate Update Plugin first, then run /iq-plan.
+  ERROR: The .iq-update/ plugin is not installed. Run /iq-init first.
   ```
+
+**IMPORTANT:** Use `plugin_root` from config.yaml for ALL `.iq-update/` paths throughout
+this skill (agents, validators, patterns, fetch-ticket.sh). On marketplace installs,
+`.iq-update/` does not exist in the carrier root — the plugin lives in the cache directory.
 
 ### Check 2: Config Exists (/iq-init Has Been Run)
 

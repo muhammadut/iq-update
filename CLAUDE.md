@@ -12,6 +12,20 @@ files) are discovered at runtime via `/iq-init` and stored in `config.yaml`. The
 plugin assumes the developer points it at a manufactured rating folder -- it does
 not distinguish between manufactured and direct rating lines of business.
 
+## Plugin Path Resolution
+
+This plugin can be installed two ways:
+- **Local development:** `.iq-update/` folder exists directly in the carrier root
+- **Marketplace install:** Plugin files live in the Claude Code plugin cache
+  (e.g., `~/.claude/plugins/cache/iq-update-marketplace/iq-update/0.1.0/`)
+
+**CRITICAL:** Whenever you see `.iq-update/` in any instruction (agent specs, validators,
+patterns, fetch-ticket.sh), resolve it using `plugin_root` from `.iq-workstreams/config.yaml`.
+On marketplace installs, `plugin_root` points to the cache directory. On local installs,
+it points to `{carrier_root}/.iq-update`. If config.yaml doesn't exist yet (first /iq-init),
+check BOTH locations: first `{carrier_root}/.iq-update/CLAUDE.md`, then scan
+`~/.claude/plugins/cache/` for an `iq-update` directory containing `CLAUDE.md`.
+
 ## How This Codebase Works
 
 - Each province has LOB folders (Home, Auto, Condo, etc.) with dated version subfolders
