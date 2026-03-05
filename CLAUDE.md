@@ -125,6 +125,8 @@ workstream files. These six commands cover the full workflow.
 14. **Bottom-to-top execution** within each file (highest line number first) to prevent line-number drift
 15. **Show, don't guess** -- present all candidates to developer, never silently pick one
 16. **Fresh context per command** -- each /iq-* command reads ALL state from disk, never from memory
+17. **NEVER use `sleep` to wait for anything** -- if an Agent tool call fails or an agent cannot be resumed, log the error and fall back to sequential execution. Do not retry in a sleep loop. Do not `sleep` between steps.
+18. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
 
 ## Province Codes
 

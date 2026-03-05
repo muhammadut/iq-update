@@ -63,6 +63,11 @@ When the developer types `/iq-init`, execute these steps IN ORDER. If any step f
 report the error and continue to the next step (Snyk-style resilience -- never crash
 the whole init because one province is malformed).
 
+**EXECUTION GUARDRAILS:**
+- Do NOT spawn sub-agents for /iq-init steps. Execute all steps sequentially in the current context.
+- Do NOT use `sleep` for any reason. If a tool call fails, log the error and move to the next step.
+- Do NOT retry failed operations in a loop. Try once, report the result, move on.
+
 ### Step 0: Validate Preconditions
 
 1. Determine the carrier root directory. Use the current working directory.
