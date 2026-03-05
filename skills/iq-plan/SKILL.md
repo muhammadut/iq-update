@@ -25,19 +25,20 @@ and `/iq-review` respectively.
 Execute these checks IN ORDER before doing anything else. If any check fails,
 STOP and report the issue to the developer.
 
-### Check 1: Plugin Installed
+### Check 1: Discover Plugin Root
 
-Read `plugin_root` from `.iq-workstreams/config.yaml` and verify `{plugin_root}/CLAUDE.md` exists.
-If config.yaml doesn't exist yet, fall back to checking `.iq-update/CLAUDE.md` in the carrier root.
+Find the plugin directory using this fallback chain (stop at first success):
+1. Read `plugin_root` from `.iq-workstreams/config.yaml` → verify `{plugin_root}/CLAUDE.md` exists
+2. Check `{carrier_root}/.iq-update/CLAUDE.md` (local development install)
+3. Scan marketplace cache: `Glob("~/.claude/plugins/cache/*/iq-update/*/CLAUDE.md")` — use the match's parent directory
 
-- If neither found, STOP:
-  ```
-  ERROR: The .iq-update/ plugin is not installed. Run /iq-init first.
-  ```
+If ALL three fail, STOP: `"ERROR: Plugin not found. Install via marketplace or run /iq-init."`
 
-**IMPORTANT:** Use `plugin_root` from config.yaml for ALL `.iq-update/` paths throughout
-this skill (agents, validators, patterns, fetch-ticket.sh). On marketplace installs,
-`.iq-update/` does not exist in the carrier root — the plugin lives in the cache directory.
+Store the discovered path as `plugin_root` for the rest of this command.
+
+**IMPORTANT:** Use `plugin_root` for ALL `.iq-update/` paths throughout this skill
+(agents, validators, patterns, fetch-ticket.sh). On marketplace installs, `.iq-update/`
+does NOT exist in the carrier root — the plugin lives in the cache directory.
 
 ### Check 2: Config Exists (/iq-init Has Been Run)
 

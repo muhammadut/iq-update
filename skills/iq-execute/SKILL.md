@@ -31,13 +31,14 @@ context from workstream files — zero knowledge of what happened during /iq-pla
 
 Execute IN ORDER. If any fails, STOP.
 
-### Check 1: Plugin Installed
+### Check 1: Discover Plugin Root
 
-Read `plugin_root` from `.iq-workstreams/config.yaml` and verify `{plugin_root}/CLAUDE.md` exists.
-If config.yaml doesn't exist, fall back to `.iq-update/CLAUDE.md`. If neither found:
-```
-ERROR: Plugin not installed. Run /iq-init first.
-```
+Find the plugin directory using this fallback chain (stop at first success):
+1. Read `plugin_root` from `.iq-workstreams/config.yaml` → verify `{plugin_root}/CLAUDE.md` exists
+2. Check `{carrier_root}/.iq-update/CLAUDE.md` (local development install)
+3. Scan marketplace cache: `Glob("~/.claude/plugins/cache/*/iq-update/*/CLAUDE.md")`
+
+If ALL three fail, STOP: `"ERROR: Plugin not found. Install via marketplace or run /iq-init."`
 Use `plugin_root` for ALL `.iq-update/` paths in this skill (change-engine specs, validators).
 
 ### Check 2: Config Exists
