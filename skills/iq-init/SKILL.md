@@ -67,6 +67,10 @@ the whole init because one province is malformed).
 - Do NOT spawn sub-agents for /iq-init steps. Execute all steps sequentially in the current context.
 - Do NOT use `sleep` for any reason. If a tool call fails, log the error and move to the next step.
 - Do NOT retry failed operations in a loop. Try once, report the result, move on.
+- **Large file writes** (pattern-library.yaml, codebase-profile.yaml) MUST use Python + PyYAML.
+  NEVER attempt to write these files via the Write tool — they exceed the 32K output token limit
+  on any carrier with more than a few provinces. Use `{python_cmd}` from config.yaml to run a
+  Python script that reads source files, extracts data, and calls `yaml.dump()` to write the file.
 
 ### Step 0: Validate Preconditions
 
