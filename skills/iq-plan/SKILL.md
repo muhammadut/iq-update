@@ -302,10 +302,10 @@ Ticket reference? You can:
    - `DEVOPS-24778` -> key: `devops-24778`
    - `DevOps 24778` -> key: `24778`, raw ref preserved as-is
 2. **Auto-fetch attempt (numeric IDs only):**
-   If the key is purely numeric AND both `fetch-ticket.sh` and `.env` exist in
-   the carrier root, attempt auto-fetch:
+   If the key is purely numeric AND both `.iq-update/fetch-ticket.sh` and `.iq-update/.env`
+   exist (check the PLUGIN folder, not carrier root), attempt auto-fetch:
    ```bash
-   cd "{carrier_root}" && source .env && bash fetch-ticket.sh {key} 2>&1
+   cd "{carrier_root}" && source .iq-update/.env && bash .iq-update/fetch-ticket.sh {key} 2>&1
    ```
    - **On success:** Read `workitem-{key}-full/llm-context-brief.md` as the
      change description. Set `ticket.auto_fetched: true`. Extract a short
