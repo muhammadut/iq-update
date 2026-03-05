@@ -25,7 +25,7 @@ not distinguish between manufactured and direct rating lines of business.
 ### Repository Layout
 
 ```
-E:/intelli-new/Cssi.Net/Portage Mutual/
+{carrier_root}/
   {Province}/
     {LOB}/                          <- Line of business (Home, Auto, Condo, etc.)
       {YYYYMMDD}/                   <- Version folder (effective date)

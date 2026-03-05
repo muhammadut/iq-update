@@ -180,6 +180,14 @@ for item_group in root.findall(f"{ns}ItemGroup"):
                 code_files.append(resolved)
 ```
 
+```
+CRITICAL — WINDOWS PATH SAFETY:
+- NEVER use sed, awk, or bash string manipulation for file path operations
+- ALWAYS use Python os.path.normpath() and os.path.join() for path resolution
+- ALWAYS use Python xml.etree.ElementTree for .vbproj parsing (never regex)
+- To check if a file exists, use: python -c "import os; print(os.path.exists('...'))"
+```
+
 2.2. Categorize shared code files by type:
 
 ```

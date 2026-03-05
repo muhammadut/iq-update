@@ -94,105 +94,109 @@ the whole init because one province is malformed).
    This prevents every downstream skill from re-discovering the Python path.
 
    ```bash
-   # Other dependencies
+   # Other dependencies — discover full paths
+   bash_path=$(which bash 2>/dev/null)
    bash --version 2>/dev/null
+   jq_path=$(which jq 2>/dev/null)
    jq --version 2>/dev/null
+   curl_path=$(which curl 2>/dev/null)
    curl --version 2>/dev/null
    ```
+
+   **If `jq` is missing**, attempt automatic installation before giving up:
+   1. Check if `winget` is available (`winget --version 2>/dev/null`)
+   2. If yes → tell the developer: "jq is required for ticket fetching. Installing via winget..."
+      → run `winget install jqlang.jq --accept-source-agreements --accept-package-agreements`
+   3. If winget unavailable → try `choco install jq -y`
+   4. If neither package manager is available → show download link:
+      `https://jqlang.github.io/jq/download/`
+   5. After any install attempt → re-check `jq --version 2>/dev/null` and capture the path
 
    Report results clearly:
    ```
    Dependency check:
      python   ✓ (3.11.4) — using: C:\Users\...\python.exe
-     bash     ✓ (5.2.15)
-     jq       ✗ MISSING — install from https://jqlang.github.io/jq/download/
-     curl     ✓ (8.4.0)
+     bash     ✓ (5.2.15) — using: /usr/bin/bash
+     jq       ✓ (1.7.1)  — using: /usr/bin/jq        [or: ✗ MISSING — install manually]
+     curl     ✓ (8.4.0)  — using: /usr/bin/curl
    ```
+
+   **Persist discovered tool paths** to config.yaml alongside `python_cmd` (see template below).
+   Record the full path for each tool, or `null` if not found after install attempts.
 
    **Missing python:** STOP — validators require Python with PyYAML.
    **Missing bash/jq/curl:** WARN — fetch-ticket.sh won't work, but the rest of the
    plugin functions fine. Continue with a warning.
 
-5. **Azure DevOps connection check (`.env` file).**
+5. **Azure DevOps connection check (`.env` file) — auto-populate flow.**
    The `fetch-ticket.sh` script requires Azure DevOps credentials stored in a `.env`
-   file. Check for this file early so the developer knows whether automatic ticket
-   fetching will work.
+   file. This step auto-creates the file with sensible defaults so the developer only
+   needs to paste their PAT.
 
    **Search order** — check both locations, use the first found:
    1. `{carrier_root}/.iq-update/.env`
    2. `{carrier_root}/.env`
 
-   **If `.env` is found:**
-   - Read the file and check whether `ADO_PAT` is set to a non-empty value
-     (look for a line matching `ADO_PAT=` followed by a non-empty string).
-   - If `ADO_PAT` has a value, report success and continue:
-     ```
-     Azure DevOps:  ✓ .env found, ADO_PAT is configured
-     ```
-   - If `ADO_PAT` is missing or empty, treat as "not configured" (fall through
-     to the guidance below).
+   **If `.env` is found AND `ADO_PAT` has a non-empty value:**
+   Report success and continue:
+   ```
+   Azure DevOps:  ✓ .env found, ADO_PAT is configured
+   ```
 
-   **If `.env` is missing OR `ADO_PAT` is empty:**
-   Display the following setup guide, then ask the developer how to proceed:
+   **If `.env` is found BUT `ADO_PAT` is empty or missing:**
+   Skip to the PAT prompt below (Step 5c).
 
+   **If `.env` is missing entirely:**
+
+   5a. **Auto-create** `.iq-update/.env` with pre-filled defaults:
+   ```
+   ADO_ORG=rivalitinc
+   ADO_PROJECT=Rival Insurance Technology
+   ADO_USE_VSCOM=1
+   ADO_PAT=
+   ```
+
+   5b. **Verify `.gitignore`** — check that `.env` is listed in `.iq-update/.gitignore`.
+   If it is NOT listed, add it automatically and inform the developer:
+   ```
+   NOTE: Added .env to .iq-update/.gitignore to prevent accidental secret exposure.
+   ```
+
+   5c. **Prompt for PAT** — ask the developer:
    ```
    ═══════════════════════════════════════════════════════
-     Azure DevOps Connection Setup
+     Azure DevOps PAT Setup
    ═══════════════════════════════════════════════════════
 
-   To fetch tickets automatically, this plugin needs an Azure DevOps
-   Personal Access Token (PAT).
+   To fetch tickets automatically, this plugin needs a Personal Access Token.
 
-   Step 1: Generate a PAT
-     → Go to: https://dev.azure.com/{your-org}/_usersettings/tokens
+   Generate one at: https://rivalitinc.visualstudio.com/_usersettings/tokens
      → Click "New Token"
      → Name: "IQ Update Plugin"
      → Scopes: Work Items (Read)
      → Expiration: 90 days (or custom)
      → Click "Create" and copy the token
 
-   Step 2: Create .env file
-     Create a file at: .iq-update/.env
-     With these contents:
-
-       ADO_PAT=your-token-here
-       ADO_ORG=your-org-name
-       ADO_PROJECT=your-project-name
-       ADO_USE_VSCOM=true
-
-     Notes:
-     - ADO_PAT: Your Personal Access Token (required)
-     - ADO_ORG: Your Azure DevOps organization name (required)
-     - ADO_PROJECT: Your Azure DevOps project name (required)
-     - ADO_USE_VSCOM: Set to "true" for {org}.visualstudio.com URLs,
-       omit for dev.azure.com URLs (optional, default: dev.azure.com)
-
-     Optional variables (rarely needed):
-     - ADO_BASE_URL: Full base URL override (e.g., https://custom-host/org)
-     - ADO_OUT_DIR: Output directory for fetched tickets (default: current dir)
-
+   Paste your Azure DevOps Personal Access Token:
    ═══════════════════════════════════════════════════════
    ```
 
-   After showing the guide, ask the developer:
+   Wait for the developer to paste their PAT value.
+
+   5d. **Write the PAT** into the `.env` file (replace the empty `ADO_PAT=` line with
+   `ADO_PAT={pasted_value}`). Confirm:
    ```
-   Would you like to:
-     (a) Continue /iq-init without ticket fetching (you can set up .env later)
-     (b) Pause here so you can create .env first, then re-run /iq-init
+   Azure DevOps:  ✓ PAT saved to .iq-update/.env
    ```
 
-   If the developer chooses (a): log a warning and continue to the next step:
+   5e. **If developer declines** (says "skip", "later", etc.):
    ```
-   Azure DevOps:  ⚠ .env not configured — /iq-plan will require manual ticket paste
+   Azure DevOps:  ⚠ .env created but ADO_PAT is empty — /iq-plan will require manual ticket paste
    ```
-   If the developer chooses (b): STOP and let them set up the file.
+   Continue to the next step.
 
-   **IMPORTANT:** The `.env` file contains secrets (the PAT). Verify that `.env` is
-   listed in `.iq-update/.gitignore`. If it is NOT listed, add it automatically and
-   inform the developer:
-   ```
-   NOTE: Added .env to .iq-update/.gitignore to prevent accidental secret exposure.
-   ```
+   **IMPORTANT:** The `.env` file contains secrets (the PAT). The `.gitignore` check
+   in Step 5b is mandatory — never skip it.
 
 6. Check for province-like directories to confirm this is a TBW carrier folder:
    - Look for at least ONE directory matching a known province name (see the province
@@ -410,6 +414,13 @@ root_path: "{Absolute path to carrier folder}"
 # Discovered by /iq-init preflight check. Used by all downstream skills
 # to run validators. Cached here so each command doesn't re-discover.
 python_cmd: "{Full path to working python executable, e.g., C:/Users/.../python.exe}"
+
+# -- Tool Paths ---------------------------------------------------------------
+# Discovered by /iq-init preflight check. null = not found after install attempts.
+tool_paths:
+  jq: "{Full path to jq, e.g., /usr/bin/jq, or null}"
+  bash: "{Full path to bash, e.g., /usr/bin/bash, or null}"
+  curl: "{Full path to curl, e.g., /usr/bin/curl, or null}"
 
 # -- Province Definitions -----------------------------------------------------
 # Each province has: code, full folder name, hab_code, LOBs, and SHARDCLASS presence.
