@@ -69,7 +69,9 @@ active workstream. It works in three modes:
 
 ### Step 0: Load Context
 
-1. Check if `.iq-workstreams/config.yaml` exists. If yes, load carrier metadata
+1. Read `.iq-workstreams/paths.md` if it exists — this gives you `plugin_root`,
+   `carrier_root`, `python_cmd`, and all resolved paths. Use these for the session.
+   Then check if `.iq-workstreams/config.yaml` exists. If yes, load carrier metadata
    (provinces, LOBs, naming patterns, codebase root).
 
 2. Check if `.iq-workstreams/pattern-library.yaml` exists. If yes, load it for

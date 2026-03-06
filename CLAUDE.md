@@ -12,19 +12,18 @@ files) are discovered at runtime via `/iq-init` and stored in `config.yaml`. The
 plugin assumes the developer points it at a manufactured rating folder -- it does
 not distinguish between manufactured and direct rating lines of business.
 
-## Plugin Path Resolution
+## Plugin Path Resolution — MANDATORY FIRST STEP
 
-This plugin can be installed two ways:
-- **Local development:** `.iq-update/` folder exists directly in the carrier root
-- **Marketplace install:** Plugin files live in the Claude Code plugin cache
-  (e.g., `~/.claude/plugins/cache/iq-update-marketplace/iq-update/0.1.0/`)
+**Every `/iq-*` command (except `/iq-init`) MUST read `.iq-workstreams/paths.md` as its
+very first action.** This file contains all absolute paths — plugin root, agent specs,
+validators, Python command, tool paths. No discovery, no globbing, no fallback chains.
+Just read the file.
 
-**CRITICAL:** Whenever you see `.iq-update/` in any instruction (agent specs, validators,
-patterns, fetch-ticket.sh), resolve it using `plugin_root` from `.iq-workstreams/config.yaml`.
-On marketplace installs, `plugin_root` points to the cache directory. On local installs,
-it points to `{carrier_root}/.iq-update`. If config.yaml doesn't exist yet (first /iq-init),
-check BOTH locations: first `{carrier_root}/.iq-update/CLAUDE.md`, then scan
-`~/.claude/plugins/cache/` for an `iq-update` directory containing `CLAUDE.md`.
+If `.iq-workstreams/paths.md` does not exist, tell the developer: `"Run /iq-init first."`
+
+Whenever you see `.iq-update/` in any instruction (agent specs, validators, patterns),
+replace it with the `plugin_root` value from `paths.md`. All paths in `paths.md` are
+absolute and fully resolved — use them directly with the Read tool.
 
 ## How This Codebase Works
 

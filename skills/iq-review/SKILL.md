@@ -30,15 +30,14 @@ files ARE the memory.
 
 Execute IN ORDER. If any fails, STOP and report.
 
-### Check 1: Discover Plugin Root
+### Check 1: Read paths.md (MANDATORY FIRST STEP)
 
-Find the plugin directory using this fallback chain (stop at first success):
-1. Read `plugin_root` from `.iq-workstreams/config.yaml` → verify `{plugin_root}/CLAUDE.md` exists
-2. Check `{carrier_root}/.iq-update/CLAUDE.md` (local development install)
-3. Scan marketplace cache: `Glob("~/.claude/plugins/cache/*/iq-update/*/CLAUDE.md")`
+Read `.iq-workstreams/paths.md`. This file contains all absolute paths you need:
+`plugin_root`, `carrier_root`, `python_cmd`, agent spec paths, validator paths, etc.
 
-If ALL three fail, STOP: `"ERROR: Plugin not found. Install via marketplace or run /iq-init."`
-Use `plugin_root` for ALL `.iq-update/` paths in this skill (reviewer.md, semantic-verifier.md, validators).
+If `paths.md` does not exist, STOP: `"ERROR: Run /iq-init first to initialize the plugin."`
+
+Use the paths from this file for the entire command. Replace `.iq-update/` with `plugin_root`.
 
 ### Check 2: Config Exists
 

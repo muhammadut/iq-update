@@ -209,8 +209,8 @@ If any of these are missing, STOP and report:
 1.1. The input arrives in one of these ways:
    - **Conversational:** The developer types or pastes the changes directly into the chat
    - **File-based:** The developer says "I pasted it in input/" — read `.iq-workstreams/changes/{workstream}/input/source.md`
-   - **ADO ticket:** If the workstream key is numeric AND `.iq-update/fetch-ticket.sh` + `.iq-update/.env` exist,
-     the orchestrator may have already fetched the ticket. Check for
+   - **ADO ticket:** If the workstream key is numeric AND the orchestrator has already fetched the ticket
+     (using fetch-ticket.sh + .env from paths resolved by the orchestrator). Check for
      `input/workitem-{id}-full/llm-context-brief.md` or `llm-context.md`
    - **Structured document:** PDF, Excel, or markdown with tables of values
    - **Image attachments:** Screenshots, scanned rate tables, annotated diagrams.

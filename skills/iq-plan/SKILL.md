@@ -25,20 +25,16 @@ and `/iq-review` respectively.
 Execute these checks IN ORDER before doing anything else. If any check fails,
 STOP and report the issue to the developer.
 
-### Check 1: Discover Plugin Root
+### Check 1: Read paths.md (MANDATORY FIRST STEP)
 
-Find the plugin directory using this fallback chain (stop at first success):
-1. Read `plugin_root` from `.iq-workstreams/config.yaml` → verify `{plugin_root}/CLAUDE.md` exists
-2. Check `{carrier_root}/.iq-update/CLAUDE.md` (local development install)
-3. Scan marketplace cache: `Glob("~/.claude/plugins/cache/*/iq-update/*/CLAUDE.md")` — use the match's parent directory
+Read `.iq-workstreams/paths.md`. This file contains all absolute paths you need:
+`plugin_root`, `carrier_root`, `python_cmd`, agent spec paths, validator paths, etc.
 
-If ALL three fail, STOP: `"ERROR: Plugin not found. Install via marketplace or run /iq-init."`
+If `paths.md` does not exist, STOP: `"ERROR: Run /iq-init first to initialize the plugin."`
 
-Store the discovered path as `plugin_root` for the rest of this command.
-
-**IMPORTANT:** Use `plugin_root` for ALL `.iq-update/` paths throughout this skill
-(agents, validators, patterns, fetch-ticket.sh). On marketplace installs, `.iq-update/`
-does NOT exist in the carrier root — the plugin lives in the cache directory.
+**Use the paths from this file for the entire command.** Whenever this skill says
+`.iq-update/agents/...` or `.iq-update/validators/...`, replace `.iq-update/` with
+the `plugin_root` value from paths.md. All paths are absolute — use them directly.
 
 ### Check 2: Config Exists (/iq-init Has Been Run)
 
@@ -307,10 +303,10 @@ Ticket reference? You can:
    - `DEVOPS-24778` -> key: `devops-24778`
    - `DevOps 24778` -> key: `24778`, raw ref preserved as-is
 2. **Auto-fetch attempt (numeric IDs only):**
-   If the key is purely numeric AND both `.iq-update/fetch-ticket.sh` and `.iq-update/.env`
-   exist (check the PLUGIN folder, not carrier root), attempt auto-fetch:
+   If the key is purely numeric, read `paths.md` to get `plugin_root` and `env_file`.
+   Check that `{plugin_root}/fetch-ticket.sh` and `{env_file}` both exist, then auto-fetch:
    ```bash
-   cd "{carrier_root}" && source .iq-update/.env && bash .iq-update/fetch-ticket.sh {key} 2>&1
+   cd "{carrier_root}" && source "{env_file}" && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
    ```
    - **On success:** Read `workitem-{key}-full/llm-context-brief.md` as the
      change description. Set `ticket.auto_fetched: true`. Extract a short
