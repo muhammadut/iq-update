@@ -119,9 +119,28 @@ the whole init because one province is malformed).
 
    ```bash
    # Find Python (try each, use first success)
+   # 1. Try standard commands
+   # 2. Try conda envs under user's AppData (Windows anaconda/miniconda)
    for cmd in python python3 "py -3"; do
      ver=$($cmd --version 2>&1) && echo "PYTHON_FOUND:$cmd:$ver" && break
    done
+   # If not found, probe conda environments
+   if ! echo "$ver" 2>/dev/null | grep -q "Python"; then
+     for base_dir in \
+       "$USERPROFILE/AppData/Local/anaconda3/envs" \
+       "$USERPROFILE/AppData/Local/miniconda3/envs" \
+       "$USERPROFILE/anaconda3/envs" \
+       "$USERPROFILE/miniconda3/envs"; do
+       if [ -d "$base_dir" ]; then
+         for env_dir in "$base_dir"/*/; do
+           candidate="$env_dir/python.exe"
+           if [ -f "$candidate" ]; then
+             ver=$("$candidate" --version 2>&1) && echo "PYTHON_FOUND:$candidate:$ver" && break 2
+           fi
+         done
+       fi
+     done
+   fi
    # Find other tools
    bash_path=$(which bash 2>/dev/null) && echo "BASH:$bash_path:$(bash --version 2>&1 | head -1)"
    jq_path=$(which jq 2>/dev/null) && echo "JQ:$jq_path:$(jq --version 2>&1)"
