@@ -26,7 +26,10 @@ file is referenced in the .vbproj, which may be the OLD dated file.
 **Proper fix:** Discovery agent must check: "Does the .vbproj reference a file with the
 OLD date?" If yes, the plan MUST include a copy step. This must be a hard requirement in
 the Planner, not just a suggestion.
-**Status:** [ ] Not fixed
+**Status:** [x] Fixed — Three-layer defense: (1) Old-date .vbproj warning surfaced early
+for all workflow types, (2) Pre-Gate-1 validation checks files_to_copy.yaml exists when
+old-dated files detected — blocks Gate 1 and re-runs Analyzer→Decomposer→Planner if
+missing, (3) state: "PLANNED" deferred until after validation passes (crash-safe).
 
 ### C3: Sub-agents lose context and improvise
 **Impact:** Perl scripts, wrong paths, sleep loops, stuck agents
@@ -35,7 +38,9 @@ config.yaml. They improvise with whatever tools they find (Perl, sed, etc.)
 **Proper fix:** Eliminate sub-agents in /iq-init entirely (already done). For /iq-plan
 and /iq-execute, capsule briefs must include the full plugin_root path and python_cmd
 so workers never need to discover anything.
-**Status:** [x] Partially fixed (guardrails added but not tested)
+**Status:** [x] Fixed — Agent prompt template now passes plugin_root, python_cmd, tool
+paths, and explicit "no sed/Perl/sleep" guardrails. Reference table uses {plugin_root}
+instead of hardcoded .iq-update/. All 5 agent launch descriptions updated.
 
 ---
 
@@ -98,13 +103,15 @@ This directory always exists after /iq-init regardless of install type.
 
 ---
 
-## Fix Priority Order
+## Fix Priority Order (historical — all completed)
 
-1. **C1 + H1: paths.md file** — This alone fixes 60% of the friction
-2. **C2: Copy-first enforcement** — Prevents data corruption
-3. **H2: Init speed** — Python scripts for heavy scanning
-4. **H3: .env location** — Move to .iq-workstreams/
-5. **C3: Sub-agent stability** — Already partially addressed
+1. **C1 + H1: paths.md file** — [x] Done
+2. **C2: Copy-first enforcement** — [x] Done (3-layer defense)
+3. **H2: Init speed** — [x] Done (init_scan.py, 30s)
+4. **H3: .env location** — [x] Done
+5. **C3: Sub-agent stability** — [x] Done (agent prompt template)
+
+**Remaining:** M3 (hardcoded "rivalitinc" in .env defaults) — low priority
 
 ---
 

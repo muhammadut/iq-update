@@ -176,11 +176,16 @@ Options:
 
 ### On Resume: Dirty File Detection
 
-When the developer chooses to resume, perform hash verification:
+When the developer chooses to resume, perform hash verification **only if
+`execution/file_hashes.yaml` exists.** This file is created by the Planner
+(during /iq-plan) — it does not exist for CREATED or early ANALYZING states.
+If the file does not exist, skip hash verification entirely and proceed to
+state-based continuation.
 
 ```
-1. Read execution/file_hashes.yaml from the workflow directory
-2. For each file listed:
+1. If execution/file_hashes.yaml does not exist: SKIP to state-based continuation
+2. Read execution/file_hashes.yaml from the workflow directory
+3. For each file listed:
    a. Compute current SHA256 hash of the file on disk
    b. Compare against the stored hash
 3. Classify results:
@@ -319,6 +324,23 @@ Ticket reference? You can:
 
      Use this as the change description? [Y/n]
      ```
+     **CARRIER MISMATCH CHECK:** Before proceeding, compare the ticket content
+     against `carrier_name` from config.yaml. Look for carrier names in the ticket
+     title and body (e.g., "Portage Mutual", "Intact", "Wawanesa", "SGI", etc.).
+     - If the ticket mentions a DIFFERENT carrier than `carrier_name`: WARN:
+       ```
+       WARNING: This ticket mentions "{detected_carrier}" but you are working
+       in the {carrier_name} folder. Are you sure this is the right ticket?
+
+       Type "yes" to continue or "no" to enter a different ticket.
+       ```
+     - If the ticket does NOT mention any carrier name: NOTE (non-blocking):
+       ```
+       NOTE: No carrier name found in the ticket. This workspace is configured
+       for {carrier_name}. Proceeding — just confirm this ticket is for {carrier_name}.
+       ```
+     - If the ticket mentions `carrier_name`: proceed silently.
+
      If yes: store the brief content as the raw input, **skip Step 4.2**.
      If no: proceed to Step 4.2 for manual input.
    - **On failure:** Warn and continue normally:
@@ -593,6 +615,26 @@ Based on the validated folders, determine the workflow type:
 - Tell the developer: "This folder already has changes from a previous session.
   I'll work against the CURRENT file state."
 
+**OLD-DATE .vbproj CHECK (ALL WORKFLOWS):**
+For ALL workflow types (not just Workflow 2), parse the .vbproj and check each
+`<Compile Include>` reference to a Code/ file. Extract the 8-digit date from each
+filename. If ANY referenced Code/ file has a date OLDER than the target version
+folder date, this means IQWiz created the folder but Code/ file copies were never
+made. This is expected for Workflow 1 (fresh IQWiz shell) and possible for
+Workflow 2 (partial previous session) and Workflow 3 (multi-folder hab). Warn:
+
+```
+WARNING: .vbproj references OLD-dated Code/ files:
+  {old_file} (date: {old_date}) -- target date: {target_date}
+  {old_file2} ...
+
+These files need new dated copies before edits can be applied.
+The Analyzer will generate files_to_copy.yaml for this.
+```
+
+This is informational only — the Analyzer handles the actual copy list. But surfacing
+it early gives the developer visibility into what the pipeline will do.
+
 **Workflow 3 -- Multi-Folder Habitational:**
 - 2 or more folders selected
 - All folders share a common province and effective date (typical for hab tickets)
@@ -767,7 +809,7 @@ agents through a pipeline: it launches each agent as a **separate process**,
 relays developer questions, collects results, and presents the plan at Gate 1.
 
 Agents are NOT executed inline. Each agent is a self-contained process that
-reads its own `.md` instruction file from `.iq-update/agents/`, reads input
+reads its own `.md` instruction file from `{plugin_root}/agents/`, reads input
 files from the workstream folder, executes its logic autonomously, and writes
 output files back to the workstream folder. The orchestrator's job is
 **coordination, not execution**.
@@ -864,13 +906,19 @@ Task(
 
 **Standard agent prompt template:**
 
+**CRITICAL:** All `{...}` placeholders below MUST be replaced with actual absolute
+paths from `paths.md` (read in Check 1). NEVER use `.iq-update/` literally — it
+does not exist on marketplace installs.
+
 ```
 You are the {Agent} agent for the IQ Rate Update Plugin.
 
-CARRIER ROOT: {root_path}
-WORKSTREAM: .iq-workstreams/changes/{workstream-name}/
+CARRIER ROOT: {carrier_root}
+PLUGIN ROOT: {plugin_root}
+WORKSTREAM: {carrier_root}/.iq-workstreams/changes/{workstream-name}/
+PYTHON: {python_cmd}
 
-Read your full instructions from: .iq-update/agents/{agent}.md
+Read your full instructions from: {plugin_root}/agents/{agent}.md
 Follow ALL steps in that file. Your instructions are complete and
 self-contained.
 
@@ -881,11 +929,20 @@ OUTPUT FILES:
   {list — varies by agent, see each Step below}
 
 ALSO READ:
-  .iq-workstreams/config.yaml
+  {carrier_root}/.iq-workstreams/config.yaml
+
+TOOL PATHS:
+  Python: {python_cmd}
+  Validators: {plugin_root}/validators/
+  Patterns: {plugin_root}/patterns/
 
 {mode-specific developer interaction protocol — see below}
 
 IMPORTANT: Do NOT update manifest.yaml — the orchestrator handles that.
+IMPORTANT: For file path operations, use Python (os.path). For XML parsing,
+use Python (xml.etree.ElementTree). NEVER use sed, awk, or Perl.
+IMPORTANT: NEVER use sleep or retry loops. If a step fails, log the error
+and continue to the next step.
 ```
 
 **Team mode — add to prompt:**
@@ -955,7 +1012,7 @@ Input:  input/source.md, .iq-workstreams/config.yaml
 Output: parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml
 ```
 
-The Intake agent reads `.iq-update/agents/intake.md` and autonomously:
+The Intake agent reads `{plugin_root}/agents/intake.md` and autonomously:
 - Parses the input into structured change requests (CRs)
 - Understands any ticket format (ADO, Jira, plain text, PDF, Excel)
 - Detects DAT-file-based rate changes (hab dwelling base rates)
@@ -1012,7 +1069,7 @@ Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
 Output: analysis/code_discovery.yaml
 ```
 
-The Discovery agent reads `.iq-update/agents/discovery.md` and autonomously:
+The Discovery agent reads `{plugin_root}/agents/discovery.md` and autonomously:
 - Reads CalcMain.vb and traces the full calculation flow
 - Reads the primary shared code files (mod_Common, mod_Algorithms, etc.)
 - Matches each change request to its exact target function by reading actual code
@@ -1071,7 +1128,7 @@ Output: analysis/analyzer_output/ (function understanding blocks, target mapping
         analysis/files_to_copy.yaml, analysis/blast_radius.md
 ```
 
-The Analyzer agent reads `.iq-update/agents/analyzer.md` and autonomously:
+The Analyzer agent reads `{plugin_root}/agents/analyzer.md` and autonomously:
 - Reads actual VB.NET source files to find exact function locations
 - Identifies function boundaries, Array6 calls, Select Case blocks
 - Builds Function Understanding Blocks (FUBs) with branch trees, hazards, context
@@ -1154,7 +1211,7 @@ Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
 Output: analysis/intent_graph.yaml
 ```
 
-The Decomposer agent reads `.iq-update/agents/decomposer.md` and autonomously:
+The Decomposer agent reads `{plugin_root}/agents/decomposer.md` and autonomously:
 - Breaks each change request into intents grounded in discovered code
 - Uses Analyzer output to map intents to verified target regions
 - Builds the intent graph with dependencies and open questions
@@ -1190,7 +1247,7 @@ Output: plan/execution_plan.md, plan/execution_order.yaml,
         execution/file_hashes.yaml
 ```
 
-The Planner agent reads `.iq-update/agents/planner.md` and autonomously:
+The Planner agent reads `{plugin_root}/agents/planner.md` and autonomously:
 - Orders operations bottom-to-top within each file (prevents line drift)
 - Groups operations into readable phases with dependency ordering
 - Computes risk level (LOW/MEDIUM/HIGH)
@@ -1200,15 +1257,47 @@ The Planner has NO developer interaction — it is fully automated.
 
 **After the agent completes:**
 
-1. Update manifest:
-   - `state: "PLANNED"`
+1. Update manifest (NOTE: do NOT set `state: "PLANNED"` yet — that happens after
+   the pre-Gate-1 validation in step 4):
    - `phase_status.planner.status: "completed"`
    - `phase_status.planner.summary: "{N} phases, {risk} risk"`
    - `updated_at: "{now}"`
 
 2. In team mode: TeamDelete() to clean up the analysis team.
 
-3. Read `plan/execution_plan.md` and present it to the developer at Gate 1.
+3. **PRE-GATE-1 VALIDATION — Copy-First Check:**
+
+   Before presenting the plan, the orchestrator MUST verify that file copies are
+   accounted for. This catches the C2 bug (edits applied to old-dated files):
+
+   a. Parse each target .vbproj (from footprint) and extract all `<Compile Include>`
+      Code/ file references with their 8-digit dates.
+   b. If ANY Code/ file reference has a date older than the target version folder date,
+      check that `analysis/files_to_copy.yaml` exists and covers that file.
+      The `files_to_copy.yaml` schema has entries with `source` (old-dated path) and
+      `target` (new-dated path) — verify the old-dated file appears as a `source`.
+   c. If old-dated files are referenced but `files_to_copy.yaml` is missing or
+      incomplete, **STOP — do not present Gate 1**:
+      ```
+      ERROR: .vbproj references old-dated Code/ files but no copy plan exists:
+        {file} (date: {old_date}, target: {target_date})
+
+      The Analyzer should have created analysis/files_to_copy.yaml.
+      Re-running analysis pipeline to fix this...
+      ```
+      Then re-run the **Analyzer → Decomposer → Planner** pipeline (all three agents,
+      not just the Analyzer) with the Analyzer receiving an additional prompt:
+      `"CRITICAL: .vbproj references old-dated files. You MUST produce files_to_copy.yaml."`
+      The Decomposer and Planner must re-run because their outputs (intent_graph.yaml,
+      execution_plan.md) were built on the incomplete Analyzer output and are now stale.
+      After re-run, re-validate. If still missing after 2 re-runs (i.e., the Analyzer
+      has now run 3 times total), present the error to the developer and ask how to proceed.
+   d. If all Code/ file dates match the target date (or files_to_copy.yaml is
+      complete), proceed to step 4.
+
+4. Validation passed. Update manifest: `state: "PLANNED"`, `updated_at: "{now}"`.
+
+5. Read `plan/execution_plan.md` and present it to the developer at Gate 1.
 
 **Present the execution plan to the developer (GATE 1):**
 
@@ -1320,8 +1409,8 @@ fix the value in the YAML," STOP — use the structured update loop below.
    ┌─────────────────────────────────────────────────────────┐
    │ Correction Type    │ Re-run From     │ Example          │
    ├────────────────────┼─────────────────┼──────────────────┤
-   │ value              │ Planner only    │ "Territory 1     │
-   │ (rate/factor wrong)│                 │  should be .0935"│
+   │ value              │ Decomposer →    │ "Territory 1     │
+   │ (rate/factor wrong)│ Planner         │  should be .0935"│
    ├────────────────────┼─────────────────┼──────────────────┤
    │ target             │ Analyzer →      │ "Wrong function, │
    │ (wrong file/func)  │ Decomposer →    │  it's in SetDed" │
@@ -1395,8 +1484,6 @@ affect Farm?", "what does line 350 look like?"):
 
 ---
 
----
-
 ## 7. Partial Approval Logic
 
 When the developer approves some CRs and rejects others at Gate 1, the
@@ -1432,7 +1519,9 @@ orchestrator must validate dependencies before proceeding.
    c. Mark approved CRs as APPROVED in manifest
    d. Mark rejected CRs as DEFERRED in manifest
    e. Set state: PLANNED
-   f. Tell developer:
+   f. Set phase_status.gate_1.status: "approved"
+   g. Set phase_status.gate_1.summary: "Partial approval: {N} CRs approved, {M} deferred"
+   h. Tell developer:
       "Plan approved for CR(s): {approved list}.
        CR(s) deferred: {deferred list}.
        You can /clear and run /iq-execute to apply the approved changes.
@@ -1846,8 +1935,8 @@ error_log: []
 
 Special states:
   DISCARDED        -- developer cancelled at any point
-  GATE_1_REJECTED  -- developer rejected plan at Gate 1 (re-run /iq-plan)
-  GATE_2_REJECTED  -- developer rejected changes at Gate 2 (re-enters /iq-execute)
+  GATE_1_REJECTED  -- RESERVED (not currently produced — Gate 1 rejection uses revision loop at PLANNED)
+  GATE_2_REJECTED  -- RESERVED (not currently produced — Gate 2 rejection uses rework at VALIDATING or back to PLANNED)
 ```
 
 **Valid state transitions:**
@@ -2124,11 +2213,11 @@ and edge cases. The orchestrator does NOT read these files — the agents read t
 
 | Agent | File | When Called | What It Produces |
 |-------|------|-------------|-----------------|
-| Intake | `.iq-update/agents/intake.md` | Step 1 | `parsed/change_requests.yaml`, `parsed/requests/cr-NNN.yaml` |
-| Discovery | `.iq-update/agents/discovery.md` | Step 1.5 | `analysis/code_discovery.yaml` |
-| Analyzer | `.iq-update/agents/analyzer.md` | Step 2 | `analysis/analyzer_output/`, `analysis/blast_radius.md`, `analysis/files_to_copy.yaml` |
-| Decomposer | `.iq-update/agents/decomposer.md` | Step 3 | `analysis/intent_graph.yaml` |
-| Planner | `.iq-update/agents/planner.md` | Step 4 | `plan/execution_plan.md`, `plan/execution_order.yaml`, `execution/file_hashes.yaml` |
+| Intake | `{plugin_root}/agents/intake.md` | Step 1 | `parsed/change_requests.yaml`, `parsed/requests/cr-NNN.yaml` |
+| Discovery | `{plugin_root}/agents/discovery.md` | Step 1.5 | `analysis/code_discovery.yaml` |
+| Analyzer | `{plugin_root}/agents/analyzer.md` | Step 2 | `analysis/analyzer_output/`, `analysis/blast_radius.md`, `analysis/files_to_copy.yaml` |
+| Decomposer | `{plugin_root}/agents/decomposer.md` | Step 3 | `analysis/intent_graph.yaml` |
+| Planner | `{plugin_root}/agents/planner.md` | Step 4 | `plan/execution_plan.md`, `plan/execution_order.yaml`, `execution/file_hashes.yaml` |
 
 The Change Engine is launched by `/iq-execute`.
 Review agent (Reviewer) is launched by `/iq-review`.

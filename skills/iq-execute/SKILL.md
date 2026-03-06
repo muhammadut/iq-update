@@ -67,10 +67,13 @@ Read the selected manifest.yaml fully:
    If not: STOP, tell developer to run /iq-plan to approve first.
 3. **Required files must exist:**
    - `plan/execution_order.yaml`
-   - `analysis/files_to_copy.yaml`
    - `analysis/intent_graph.yaml`
    - `execution/file_hashes.yaml`
    If any missing: STOP, tell developer to run /iq-plan to regenerate.
+
+   **Optional file:** `analysis/files_to_copy.yaml` — may not exist when no file
+   copies are needed (e.g., Workflow 2 where copies were already made). If absent,
+   skip the file-copy phase entirely.
 
 If all pass, proceed to Section 3.
 
@@ -489,10 +492,11 @@ capsule_id: "mod-{sanitized-filename}"
 capsule_type: "change-engine"
 phase: "modifications"
 agent_type: "change-engine"
-spec_modules:                                  # from Step 4.3
-  - "change-engine/core.md"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"  # relative to codebase_root
 file_hash: "{current hash from file_hashes.yaml}"
+codebase_root: "{carrier_root}"                  # absolute path, from paths.md
+spec_modules:                                    # from Step 4.3
+  - "change-engine/core.md"
 depends_on_capsules: []                          # capsule IDs that must complete first
 config_snapshot:                                 # carrier-specific safety constraints
   carrier_prefix: "PORT"
@@ -500,20 +504,36 @@ config_snapshot:                                 # carrier-specific safety const
     - "Code/PORTCommonHeat.vb"
 intents:
   - id: "intent-001"
-    description: "Multiply base rates by 1.05"
+    title: "Multiply base rates by 1.05"        # human-readable description
+    description: "Multiply each numeric arg by 1.05, banker round"
+    capability: "value_editing"
     function: "GetBasePremium_Home"
-    anchor: "Case 1 : varRates = Array6(512.59, 28.73"
-    what_to_change: "All Array6 rate value arguments"
-    how: "Multiply each numeric arg by 1.05, banker round"
+    function_line_start: 412
+    function_line_end: 489
+    target_lines:
+      - line: 430
+        content: "Case 1 : varRates = Array6(512.59, 28.73"
+    parameters:
+      factor: 1.05
+      rounding: "banker"
     strategy_hint: null
+    confidence: 0.95
     tier: 1
   - id: "intent-002"
-    description: "Multiply base rates by 1.05"
+    title: "Multiply base rates by 1.05"
+    description: "Multiply each numeric arg by 1.05, banker round"
+    capability: "value_editing"
     function: "GetBasePremium_Home"
-    anchor: "Case 2 : varRates = Array6(489.22"
-    what_to_change: "All Array6 rate value arguments"
-    how: "Multiply each numeric arg by 1.05, banker round"
+    function_line_start: 412
+    function_line_end: 489
+    target_lines:
+      - line: 445
+        content: "Case 2 : varRates = Array6(489.22"
+    parameters:
+      factor: 1.05
+      rounding: "banker"
     strategy_hint: null
+    confidence: 0.95
     tier: 1
   # ... intents in bottom-to-top order
 output_file: "execution/results/result-{capsule-id}.yaml"
@@ -530,11 +550,12 @@ capsule_id: "mod-{sanitized-filename}"
 capsule_type: "change-engine"
 phase: "modifications"
 agent_type: "change-engine"
+target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
+file_hash: "{current hash from file_hashes.yaml}"
+codebase_root: "{carrier_root}"
 spec_modules:
   - "change-engine/core.md"
   - "change-engine/strategies.md"
-file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-file_hash: "{current hash from file_hashes.yaml}"
 depends_on_capsules: []
 config_snapshot:
   carrier_prefix: "PORT"
@@ -542,12 +563,19 @@ config_snapshot:
     - "Code/PORTCommonHeat.vb"
 intents:
   - id: "intent-003"
-    description: "Add Elite Comp Case block"
+    title: "Add Elite Comp Case block"
+    description: "Add Case \"ELITECOMP\" before Case Else"
+    capability: "structure_insertion"
     function: "GetRateTableID"
-    anchor: "Inside: Select Case strCoverageType"
-    what_to_change: "Insert new Case block for ELITECOMP"
-    how: "Add Case \"ELITECOMP\" before Case Else"
+    function_line_start: 405
+    function_line_end: 486
+    insertion_point:
+      after_line: 438
+      context: "Case \"COMPREHENSIVE\""
+    parameters:
+      case_value: "\"ELITECOMP\""
     strategy_hint: "case_block_insertion"
+    confidence: 0.9
     tier: 2
     fub:                                        # From Analyzer (via Step 4.3b)
       function: "GetRateTableID"
@@ -592,15 +620,21 @@ success_criteria:
 #### Tier 3 Capsule (adds peer function bodies + cross-file context)
 
 ```yaml
-# Same base as Tier 2, plus:
+# Same base as Tier 2 (target_file, codebase_root, etc.), plus:
 intents:
   - id: "intent-006"
-    description: "Add new coverage type premium calculation"
+    title: "Add new coverage type premium calculation"
+    description: "Insert new Case block with premium Array6 values"
+    capability: "structure_insertion"
     function: "GetLiabilityBundlePremiums"
-    anchor: "Inside: Select Case strCoverageType"
-    what_to_change: "Insert new Case block with premium Array6 values"
-    how: null  # Developer will specify
+    function_line_start: 4012
+    function_line_end: 4104
+    insertion_point:
+      after_line: 4095
+      context: "Case \"COMPREHENSIVE\""
+    parameters: {}
     strategy_hint: "case_block_insertion"
+    confidence: 0.8
     tier: 3
     fub: { ... }                                # Same as Tier 2
     canonical_patterns: [...]                   # Same as Tier 2
@@ -770,12 +804,18 @@ Read `execution/capsules/capsule-file-copy.yaml`.
 ```
 You are the file-copy worker for the IQ Rate Update Plugin.
 
-CARRIER ROOT: {root_path}
-WORKSTREAM: .iq-workstreams/changes/{workstream-name}/
+CARRIER ROOT: {carrier_root}
+PLUGIN ROOT: {plugin_root}
+WORKSTREAM: {carrier_root}/.iq-workstreams/changes/{workstream-name}/
+PYTHON: {python_cmd}
 
 TASK: Copy Code/ files to new dated versions and update .vbproj references.
 
-READ YOUR CAPSULE: .iq-workstreams/changes/{workstream-name}/execution/capsules/capsule-file-copy.yaml
+READ YOUR CAPSULE: {carrier_root}/.iq-workstreams/changes/{workstream-name}/execution/capsules/capsule-file-copy.yaml
+
+IMPORTANT: For file path operations, use Python (os.path). For XML parsing,
+use Python (xml.etree.ElementTree). NEVER use sed, awk, or Perl.
+IMPORTANT: NEVER use sleep or retry loops.
 It contains the exact list of files to copy and .vbproj references to update.
 
 RULES:
@@ -788,6 +828,9 @@ RULES:
   - Process shared modules FIRST, then LOB-specific files
   - NEVER modify file content — only copy and rename
   - NEVER modify old dated files
+  - SNAPSHOT every .vbproj BEFORE modifying it (path-encoded name, same scheme as
+    Change Engine snapshots). Rollback and review depend on these snapshots.
+  - Create execution/snapshots/ directory if it doesn't exist (os.makedirs)
 
 OUTPUT: Write results using ATOMIC WRITE PROTOCOL:
   1. Write to {output_file}.tmp
@@ -888,16 +931,23 @@ Read the capsule to get spec_modules. Build the worker prompt:
 ```
 You are a Change Engine worker for the IQ Rate Update Plugin.
 
-CARRIER ROOT: {root_path}
-WORKSTREAM: .iq-workstreams/changes/{workstream-name}/
+CARRIER ROOT: {carrier_root}
+PLUGIN ROOT: {plugin_root}
+WORKSTREAM: {carrier_root}/.iq-workstreams/changes/{workstream-name}/
 
 YOUR CAPSULE: {capsule_file_path}
 Read it first — it contains your file, intents, and success criteria.
 
 YOUR INSTRUCTIONS (read in this order):
-  1. .iq-update/agents/change-engine/core.md         (universal rules)
+  1. {plugin_root}/agents/change-engine/core.md         (universal rules)
 {if strategies.md in spec_modules:}
-  2. .iq-update/agents/change-engine/strategies.md    (reference examples for common patterns)
+  2. {plugin_root}/agents/change-engine/strategies.md    (reference examples for common patterns)
+
+PYTHON: {python_cmd}
+
+IMPORTANT: For file path operations, use Python (os.path). For XML parsing,
+use Python (xml.etree.ElementTree). NEVER use sed, awk, or Perl.
+IMPORTANT: NEVER use sleep or retry loops.
 
 EXECUTION PROTOCOL:
   1. Read your capsule for the target file, intents list, and config_snapshot
@@ -918,26 +968,29 @@ EXECUTION PROTOCOL:
      c. Rename {output_file}.tmp -> {output_file}
      This prevents partial/corrupt results if the session is interrupted.
 
-OUTPUT SCHEMA:
+OUTPUT SCHEMA (must match change-engine/core.md output contract):
   capsule_id: "{id}"
-  status: "COMPLETED"              # COMPLETED | PARTIAL | FAILED | TOCTOU_FAILURE
-  target_file: "{relative path}"   # explicit file path for audit trail
-  file_hash_before: "{hash}"       # hash at start of work (from capsule)
-  file_hash_after: "{new_hash}"    # hash after modifications
+  target_file: "{relative path}"
+  file_hash_after: "{new_hash}"
   intents:
     - intent_id: "{id}"
-      status: "APPLIED"            # APPLIED | SKIPPED | FAILED
-      function: "{function_name}"
-      before: "{original line or null}"
-      after: "{modified line or null}"
-      line_number: {N}
-      values_changed: {N}          # count of numeric values changed
-      lines_added: {N}             # count of lines inserted
-      notes: ""
+      status: "success"            # success | failed | skipped | needs_review
+      edits_applied:
+        - edit_type: "replace"     # replace | insert
+          old_string: "{original}"
+          new_string: "{modified}"
+          line: {N}
+          description: "{context}"
+      summary:
+        values_changed: {N}
+        lines_added: {N}
+        lines_modified: {N}
+        lines_removed: {N}
+      verification: "{brief verification note}"
+      warnings: []
+  started_at: "{timestamp}"
+  completed_at: "{timestamp}"
   errors: []                       # structured error objects (see below)
-  warnings: []
-  next_actor: "orchestrator"
-  next_action: "read result, update checkpoint, proceed to next capsule"
 
 ERROR OBJECT SCHEMA (for failed/toctou):
   errors:
@@ -981,26 +1034,29 @@ Agent(name: "worker-{capsule_id}", subagent_type: "general-purpose", prompt: <ab
 1. Read the result file at the path specified in the capsule
    - If file does not exist: worker crashed before writing. Treat as "FAILED".
    - If file exists but is unparseable YAML: treat as "FAILED", delete corrupt file.
-   - Validate required fields: capsule_id, status, target_file
-   - Validate intents array present
+   - Validate required fields: capsule_id, target_file, intents array
 
-2. Check status:
-   - "COMPLETED": all ops applied successfully
-   - "PARTIAL": some ops applied, some failed
-   - "FAILED": worker could not complete
-   - "TOCTOU_FAILURE": file changed since plan — CRITICAL
+2. Derive capsule-level status from per-intent statuses:
+   - ALL intents "success": capsule COMPLETED
+   - SOME "success" + SOME "failed": capsule PARTIAL
+   - ALL intents "failed": capsule FAILED
+   - Any TOCTOU error in errors[]: capsule TOCTOU_FAILURE
+   (Change Engine uses lowercase per-intent: success/failed/skipped/needs_review.
+    Orchestrator derives capsule status from these.)
 
 3. For COMPLETED/PARTIAL:
    - Update execution/file_hashes.yaml with file_hash_after from result
    - Transform worker result into operations_log.yaml format:
      For each intent in result.intents:
        Map to the rich schema expected by /iq-review:
-       - Copy: intent_id -> operation, status, target_file -> file, capability -> change_type
-       - Copy: function, before, after, line_number -> changes[].line
+       - Copy: intent_id → operation
+       - Map status: "success" → "COMPLETED", "failed" → "FAILED",
+                     "skipped" → "SKIPPED", "needs_review" → "NEEDS_REVIEW"
+       - Copy: target_file → file, edits_applied[], summary
+       - Add: capability from intent_graph.yaml → change_type
        - Add: description from intent_graph.yaml
-       - Add: summary.lines_changed, values_changed, change_range
      Append the transformed entries to execution/operations_log.yaml
-   **Status values MUST be UPPERCASE** (`COMPLETED`, `FAILED`, `SKIPPED`) — the Python validators require uppercase.
+   **Operations log status values MUST be UPPERCASE** — the Python validators require uppercase.
    - Update CR intent statuses in manifest
    - ATOMIC CHECKPOINT UPDATE:
      a. Write checkpoint to execution/checkpoint.yaml.tmp
@@ -1059,7 +1115,7 @@ Changes complete: {N} intents applied across {M} files.
 
 ## 7. Completion (State: EXECUTED)
 
-### Step 8.1: Final Checkpoint
+### Step 7.1: Final Checkpoint
 
 ```yaml
 phase: "COMPLETED"
@@ -1068,7 +1124,7 @@ current_capsule: null
 next_action: "none — execution complete"
 ```
 
-### Step 8.2: Update Manifest
+### Step 7.2: Update Manifest
 
 ```yaml
 state: "EXECUTED"
@@ -1078,7 +1134,7 @@ phase_status:
   change_engine: {status: "COMPLETED", summary: "{N} intents completed, {N} failed"}
 ```
 
-### Step 8.3: Present Summary
+### Step 7.3: Present Summary
 
 ```
 ===========================================================================
@@ -1211,16 +1267,24 @@ Use `replace_all` if multiple references exist.
 Use **path-encoded** snapshot names to prevent basename collisions across directories.
 Replace path separators with `__` and append `.snapshot`:
 
-```bash
+```python
 # Path-encode: "MB/Code/mod_Common_MBHab20260301.vb" -> "MB__Code__mod_Common_MBHab20260301.vb"
-SAFE_NAME=$(echo "{relative_path}" | sed 's|[/\\]|__|g')
+import os, shutil
+safe_name = relative_path.replace('/', '__').replace('\\', '__')
+snapshot_path = os.path.join(workstream, 'execution', 'snapshots', safe_name + '.snapshot')
+
+# Create snapshots/ directory if needed:
+os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
 
 # Create (only if not exists):
-ls "{workstream}/execution/snapshots/${SAFE_NAME}.snapshot" 2>/dev/null || \
-  cp "{target}" "{workstream}/execution/snapshots/${SAFE_NAME}.snapshot"
+if not os.path.exists(snapshot_path):
+    shutil.copy2(target_path, snapshot_path)
+
 # Restore:
-cp "{workstream}/execution/snapshots/${SAFE_NAME}.snapshot" "{original_path}"
+shutil.copy2(snapshot_path, original_path)
 ```
+
+**NEVER use sed or bash string manipulation for path encoding.** Use Python only.
 
 **Do NOT use basename-only** — files like `mod_Common.vb` in different province
 directories would collide.

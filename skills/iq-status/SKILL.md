@@ -121,8 +121,7 @@ If nothing archived, skip this message silently.
 Classify each workstream:
 
 **In-flight** (needs developer action):
-- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING,
-  GATE_1_REJECTED, GATE_2_REJECTED
+- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING
 
 **Terminal** (no action needed):
 - COMPLETED, DISCARDED
@@ -139,8 +138,10 @@ For each in-flight workstream, derive the next action from state:
 | EXECUTING | Run /iq-execute (will resume) |
 | EXECUTED | Run /iq-review |
 | VALIDATING | Run /iq-review (will resume) |
-| GATE_1_REJECTED | Run /iq-plan (revise and re-plan) |
-| GATE_2_REJECTED | Run /iq-execute (re-apply changes) |
+
+Note: GATE_1_REJECTED and GATE_2_REJECTED are reserved states not currently
+produced by any command. Gate rejections use revision loops (PLANNED) or
+rework paths (VALIDATING → PLANNED) instead.
 
 ### Step 3.5: Detect Staleness
 

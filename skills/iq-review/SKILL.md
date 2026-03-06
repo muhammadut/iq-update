@@ -22,7 +22,8 @@ files ARE the memory.
 **Trigger:** Slash command `/iq-review`
 
 **State transition:** `EXECUTED` --> `VALIDATING` --> `COMPLETED`
-                                              `--> `GATE_2_REJECTED` (if developer rejects at Gate 2)
+                                              `--> `VALIDATING` (minor rework loop)
+                                              `--> `PLANNED` (complex rework — back to /iq-execute)
 
 ---
 
@@ -77,8 +78,20 @@ If any missing: `"ERROR: Missing {file}. Run /iq-execute if needed."`
 
 ### Check 6: Verify Modified Files on Disk
 
-Read `execution/file_hashes.yaml`. Confirm every listed file exists on disk.
-If any missing: show which files, offer to check execution log or abort.
+Read `execution/file_hashes.yaml`. For each listed file:
+1. Confirm the file exists on disk. If missing: show which files, offer to
+   check execution log or abort.
+2. Compute current SHA256 hash and compare against stored `hash_after` value.
+   If any mismatch: warn the developer — someone modified the file between
+   `/iq-execute` and `/iq-review`:
+   ```
+   WARNING: {N} file(s) changed since execution:
+     {filename}: expected {stored_hash}, current {actual_hash}
+   Options:
+     1. Show diff (snapshot vs current)
+     2. Continue anyway (review current state)
+     3. Restore from snapshot and re-run /iq-execute
+   ```
 
 ---
 
@@ -154,20 +167,34 @@ Agent(name: "{agent}-agent", subagent_type: "general-purpose", prompt: <below>)
 ```
 
 **Standard prompt template:**
+
+**CRITICAL:** All `{...}` placeholders below MUST be replaced with actual absolute
+paths from `paths.md` (read in Check 1). NEVER use `.iq-update/` literally — it
+does not exist on marketplace installs.
+
 ```
 You are the {Agent} agent for the IQ Rate Update Plugin review phase.
 
-CARRIER ROOT: {root_path}
-WORKSTREAM: .iq-workstreams/changes/{workstream-name}/
+CARRIER ROOT: {carrier_root}
+PLUGIN ROOT: {plugin_root}
+WORKSTREAM: {carrier_root}/.iq-workstreams/changes/{workstream-name}/
+PYTHON: {python_cmd}
 
-Read the reviewer agent spec from: .iq-update/agents/reviewer.md
+Read the reviewer agent spec from: {plugin_root}/agents/reviewer.md
 Use it as reference for validator definitions and output schemas.
 
 {agent-specific instructions}
 
-ALSO READ: .iq-workstreams/config.yaml, manifest.yaml
+ALSO READ: {carrier_root}/.iq-workstreams/config.yaml, manifest.yaml
+
+TOOL PATHS:
+  Python: {python_cmd}
+  Validators: {plugin_root}/validators/
 
 IMPORTANT: Do NOT update manifest.yaml -- the orchestrator handles that.
+IMPORTANT: For file path operations, use Python (os.path). For XML parsing,
+use Python (xml.etree.ElementTree). NEVER use sed, awk, or Perl.
+IMPORTANT: NEVER use sleep or retry loops.
 ```
 
 **Team mode -- append:**
@@ -286,13 +313,14 @@ showing arithmetic checks (for value edits) and structural checks (for insertion
 
 **Input:** analysis/intent_graph.yaml, analysis/analyzer_output/cr-NNN-analysis.yaml,
 execution/operations_log.yaml, execution/snapshots/*.snapshot, plan/execution_order.yaml,
-parsed/requests/cr-NNN.yaml, all modified source files.
+parsed/requests/cr-NNN.yaml, verification/corrections.yaml (if exists — from validator
+self-corrections), all modified source files.
 
 **Output:** verification/semantic_verification.yaml, verification/semantic_report.md
 
 **Agent-specific instructions (included in agent prompt):**
 ```
-Read the semantic verifier agent spec from: .iq-update/agents/semantic-verifier.md
+Read the semantic verifier agent spec from: {plugin_root}/agents/semantic-verifier.md
 Follow ALL steps in that spec.
 
 For each intent in intent_graph.yaml:
@@ -305,6 +333,10 @@ For each intent in intent_graph.yaml:
   3. Produce reasoning chain with MATCH or MISMATCH verdict
   4. Write results to verification/semantic_verification.yaml
   5. Write human-readable report to verification/semantic_report.md
+
+If verification/corrections.yaml exists, read it first. These are self-corrections
+applied by the validator agent. Account for corrected lines when comparing
+before/after state — do NOT flag them as mismatches.
 
 IMPORTANT: You are READ-ONLY except for your output files. Do NOT modify
 any source code, snapshots, or plan files.
@@ -426,8 +458,13 @@ Multiple files, shifted line numbers, scope change, or re-analysis needed:
 ```
 "This requires re-planning. Saving rework notes to manifest."
 1. Set state: PLANNED with rework_notes
-2. Developer runs /iq-execute (reads rework_notes)
-3. Developer runs /iq-review again
+2. Delete stale execution artifacts to prevent /iq-execute from resuming old work:
+   - Delete execution/checkpoint.yaml
+   - Delete execution/capsules/*.yaml
+   - Delete execution/results/*.yaml
+   (Keep execution/snapshots/ — those are the pre-edit backups)
+3. Developer runs /iq-execute (reads rework_notes, rebuilds capsules fresh)
+4. Developer runs /iq-review again
 ```
 
 Manifest update on complex rework:
