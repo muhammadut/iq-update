@@ -115,37 +115,44 @@ the whole init because one province is malformed).
    - If YES: this is a RE-INIT (merge mode). Note this for Step 4.
    - If NO: this is a FRESH INIT.
 
-5. **Preflight dependency checks.** Discover all tools in ONE combined bash call:
+5. **Preflight dependency checks.** Find Python by running this SINGLE bash command.
+   **CRITICAL: Run this EXACT command. Do NOT improvise your own discovery.**
 
    ```bash
-   # Find Python (try each, use first success)
-   # 1. Try standard commands
-   # 2. Try conda envs under user's AppData (Windows anaconda/miniconda)
-   for cmd in python python3 "py -3"; do
-     ver=$($cmd --version 2>&1) && echo "PYTHON_FOUND:$cmd:$ver" && break
+   # Try these candidates IN ORDER — use the first one that works.
+   # Do NOT stop at the Windows Store stub (it returns exit code 49).
+   for cmd in \
+     python \
+     python3 \
+     "py -3" \
+     "$USERPROFILE/AppData/Local/anaconda3/envs/rival_plugin/python.exe" \
+     "$USERPROFILE/AppData/Local/anaconda3/envs/base/python.exe" \
+     "$USERPROFILE/AppData/Local/anaconda3/python.exe" \
+     "$USERPROFILE/AppData/Local/miniconda3/envs/rival_plugin/python.exe" \
+     "$USERPROFILE/AppData/Local/miniconda3/python.exe" \
+     "$USERPROFILE/anaconda3/python.exe" \
+     "/c/ProgramData/anaconda3/python.exe" \
+     "/c/Python311/python.exe" \
+     "/c/Python312/python.exe" \
+     "/c/Python313/python.exe"; do
+     ver=$("$cmd" --version 2>&1)
+     if [ $? -eq 0 ] && echo "$ver" | grep -q "Python 3"; then
+       echo "PYTHON_FOUND:$cmd:$ver"
+       break
+     fi
    done
-   # If not found, probe conda environments
-   if ! echo "$ver" 2>/dev/null | grep -q "Python"; then
-     for base_dir in \
-       "$USERPROFILE/AppData/Local/anaconda3/envs" \
-       "$USERPROFILE/AppData/Local/miniconda3/envs" \
-       "$USERPROFILE/anaconda3/envs" \
-       "$USERPROFILE/miniconda3/envs"; do
-       if [ -d "$base_dir" ]; then
-         for env_dir in "$base_dir"/*/; do
-           candidate="$env_dir/python.exe"
-           if [ -f "$candidate" ]; then
-             ver=$("$candidate" --version 2>&1) && echo "PYTHON_FOUND:$candidate:$ver" && break 2
-           fi
-         done
-       fi
-     done
-   fi
    # Find other tools
    bash_path=$(which bash 2>/dev/null) && echo "BASH:$bash_path:$(bash --version 2>&1 | head -1)"
    jq_path=$(which jq 2>/dev/null) && echo "JQ:$jq_path:$(jq --version 2>&1)"
    curl_path=$(which curl 2>/dev/null) && echo "CURL:$curl_path:$(curl --version 2>&1 | head -1)"
    ```
+
+   **If no PYTHON_FOUND line in output**, also try listing conda envs dynamically:
+   ```bash
+   ls "$USERPROFILE/AppData/Local/anaconda3/envs"/*/python.exe 2>/dev/null
+   ls "$USERPROFILE/AppData/Local/miniconda3/envs"/*/python.exe 2>/dev/null
+   ```
+   Try each result with `--version`. Use the first that returns "Python 3".
 
    Parse the output to get all paths in one tool call instead of 10+ sequential calls.
    Then verify PyYAML: `{python_cmd} -c "import yaml; print(yaml.__version__)"`.
