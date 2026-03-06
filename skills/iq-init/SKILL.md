@@ -506,7 +506,7 @@ tool_paths:
 # NOTE: No version folders listed here -- agents discover versions from .vbproj at runtime.
 
 provinces:
-  {PROV_CODE}:
+  {PROV_CODE}:                       # IMPORTANT: Quote "ON" → YAML parses ON/OFF/YES/NO as booleans
     name: "{Full province name}"
     folder: "{Exact directory name}"
     hab_code: "{ProvCode}Hab"
@@ -693,7 +693,6 @@ map but simpler (regex + grep, no PageRank needed at this codebase scale).
   Skipped pattern library + codebase profile (--quick mode).
   Run /iq-init --refresh later to build them.
   ```
-- If `--skip-patterns` flag is passed, skip this step entirely
 - If `pattern-library.yaml` already exists AND is less than 30 days old AND this is
   a RE-INIT (not fresh), print a note and skip:
   ```
@@ -1316,8 +1315,9 @@ must be accurate.
 
 ## Design Decisions
 
-1. **Zero prompts.** The folder structure is convention-based and fully scannable.
-   There is nothing to ask the user. This follows the Terraform init model.
+1. **Minimal prompts.** The folder structure is convention-based and fully scannable.
+   Only the .env setup (ADO org/project/PAT) requires developer input — all codebase
+   scanning is automatic. This follows the Terraform init model.
 
 2. **Merge on re-run.** Never overwrite, never destroy. Add new, flag missing,
    update lists. This follows the principle of least surprise.

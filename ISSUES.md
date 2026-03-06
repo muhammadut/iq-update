@@ -60,7 +60,9 @@ one at a time instead of using Python scripts.
 3. Codebase Profile: Use a Python script for CalcOption parsing
 4. Re-init fast path: If config.yaml exists and folder structure hasn't changed, skip scan
 5. `/iq-init --quick` flag: Only write config.yaml, skip pattern library + codebase profile
-**Status:** [ ] Not fixed
+**Status:** [x] Fixed — init_scan.py ships with plugin. Scans 1,031 files in ~30 seconds.
+Three bugs fixed during real-carrier testing: YAML boolean trap (ON→True), CalcOption
+qualified constants regex, next-line function lookup.
 
 ### H3: .env search path looks in carrier root
 **Impact:** .env not found on marketplace installs
