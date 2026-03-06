@@ -32,9 +32,11 @@ None. Everything is auto-detected from the carrier folder structure.
 |-------|--------|----------|-------------|
 | Carrier folder | Current working directory | YES | Must be a TBW carrier folder (contains province-named subdirectories) |
 
-No required arguments. Optional: `/iq-init --refresh` to force rebuild of
-pattern-library.yaml and codebase-profile.yaml even if they already exist.
-Without `--refresh`, existing artifacts are kept and only missing ones are created.
+No required arguments. Optional flags:
+- `/iq-init --refresh` — Force rebuild of pattern-library.yaml and codebase-profile.yaml
+- `/iq-init --quick` — Skip pattern library + codebase profile entirely (config.yaml + paths.md only, ~3-5 minutes instead of ~8)
+
+Without flags, existing artifacts are kept and only missing ones are created.
 
 ## Outputs
 
@@ -97,68 +99,60 @@ the whole init because one province is malformed).
    **IMPORTANT:** Throughout this skill and all agent specs, `.iq-update/` is shorthand
    for `{plugin_root}/`. Always resolve paths using the discovered plugin root, NOT
    by assuming `.iq-update/` exists in the carrier root.
-3. Check if `.iq-workstreams/config.yaml` already exists:
+
+3. **Quick carrier folder validation (fail-fast).** Check for province-like directories
+   BEFORE spending time on dependency checks. Look for at least ONE directory matching
+   a known province name (Alberta, Ontario, Saskatchewan, etc.). If none found, STOP:
+   ```
+   ERROR: This does not appear to be a TBW carrier folder.
+   Expected province directories (e.g., Alberta/, Ontario/) but found none.
+   Current directory: {cwd}
+   ```
+   This check takes <5 seconds. If it fails, the developer knows immediately instead
+   of waiting 3 minutes for dependency probing first.
+
+4. Check if `.iq-workstreams/config.yaml` already exists:
    - If YES: this is a RE-INIT (merge mode). Note this for Step 4.
    - If NO: this is a FRESH INIT.
-4. **Preflight dependency checks.** Verify required tools are available:
 
-   **Python discovery (try in order, use first that succeeds):**
-   ```bash
-   # 1. Check config.yaml for cached python_cmd (from previous /iq-init)
-   # 2. Try: python --version 2>/dev/null
-   # 3. Try: python3 --version 2>/dev/null
-   # 4. Try: py -3 --version 2>/dev/null          # Windows Python Launcher
-   # 5. Try: conda run -n rival_plugin python --version 2>/dev/null  # Conda env
-   ```
-   Once found, verify PyYAML is installed: `{python_cmd} -c "import yaml; print(yaml.__version__)"`.
-   If PyYAML is missing, WARN — the plugin will work for `/iq-plan` but `/iq-execute`
-   and `/iq-review` will STOP because validators require PyYAML. Install it early.
-
-   **Persist the discovered Python command** to config.yaml as `python_cmd` (see template below).
-   This prevents every downstream skill from re-discovering the Python path.
+5. **Preflight dependency checks.** Discover all tools in ONE combined bash call:
 
    ```bash
-   # Other dependencies — discover full paths
-   bash_path=$(which bash 2>/dev/null)
-   bash --version 2>/dev/null
-   jq_path=$(which jq 2>/dev/null)
-   jq --version 2>/dev/null
-   curl_path=$(which curl 2>/dev/null)
-   curl --version 2>/dev/null
+   # Find Python (try each, use first success)
+   for cmd in python python3 "py -3"; do
+     ver=$($cmd --version 2>&1) && echo "PYTHON_FOUND:$cmd:$ver" && break
+   done
+   # Find other tools
+   bash_path=$(which bash 2>/dev/null) && echo "BASH:$bash_path:$(bash --version 2>&1 | head -1)"
+   jq_path=$(which jq 2>/dev/null) && echo "JQ:$jq_path:$(jq --version 2>&1)"
+   curl_path=$(which curl 2>/dev/null) && echo "CURL:$curl_path:$(curl --version 2>&1 | head -1)"
    ```
 
-   **If `jq` is missing**, attempt automatic installation before giving up:
-   1. Check if `winget` is available (`winget --version 2>/dev/null`)
-   2. If yes → tell the developer: "jq is required for ticket fetching. Installing via winget..."
-      → run `winget install jqlang.jq --accept-source-agreements --accept-package-agreements`
-   3. If winget unavailable → try `choco install jq -y`
-   4. If neither package manager is available → show download link:
-      `https://jqlang.github.io/jq/download/`
-   5. After any install attempt → re-check `jq --version 2>/dev/null` and capture the path
+   Parse the output to get all paths in one tool call instead of 10+ sequential calls.
+   Then verify PyYAML: `{python_cmd} -c "import yaml; print(yaml.__version__)"`.
 
-   Report results clearly:
+   **If `jq` is missing**, attempt automatic installation:
+   1. Try `winget install jqlang.jq --accept-source-agreements --accept-package-agreements`
+   2. If winget unavailable → try `choco install jq -y`
+   3. If neither → show link: `https://jqlang.github.io/jq/download/`
+   4. After install attempt → re-check `jq --version`
+
+   Report results:
    ```
    Dependency check:
      python   ✓ (3.11.4) — using: C:\Users\...\python.exe
      bash     ✓ (5.2.15) — using: /usr/bin/bash
-     jq       ✓ (1.7.1)  — using: /usr/bin/jq        [or: ✗ MISSING — install manually]
+     jq       ✓ (1.7.1)  — using: /usr/bin/jq
      curl     ✓ (8.4.0)  — using: /usr/bin/curl
    ```
 
-   **Persist discovered tool paths** to config.yaml alongside `python_cmd` (see template below).
-   Record the full path for each tool, or `null` if not found after install attempts.
+   **Missing python:** STOP — validators and init_scan.py require Python with PyYAML.
+   **Missing bash/jq/curl:** WARN — fetch-ticket.sh won't work, but plugin functions fine.
 
-   **Missing python:** STOP — validators require Python with PyYAML.
-   **Missing bash/jq/curl:** WARN — fetch-ticket.sh won't work, but the rest of the
-   plugin functions fine. Continue with a warning.
-
-5. **Azure DevOps connection check (`.env` file) — auto-populate flow.**
-   The `fetch-ticket.sh` script requires Azure DevOps credentials stored in a `.env`
-   file. This step auto-creates the file with sensible defaults so the developer only
-   needs to paste their PAT.
+6. **Azure DevOps connection check (`.env` file) — auto-populate flow.**
 
    **Search order** — check these locations, use the first found:
-   1. `{carrier_root}/.iq-workstreams/.env` (preferred — workspace directory, always exists)
+   1. `{carrier_root}/.iq-workstreams/.env` (preferred — workspace directory)
    2. `{carrier_root}/.iq-update/.env` (legacy — local dev installs only)
    3. `{carrier_root}/.env` (legacy fallback)
 
@@ -169,25 +163,35 @@ the whole init because one province is malformed).
    ```
 
    **If `.env` is found BUT `ADO_PAT` is empty or missing:**
-   Skip to the PAT prompt below (Step 5c).
+   Skip to the PAT prompt below (Step 6c).
 
    **If `.env` is missing entirely:**
 
-   5a. **Auto-create** `.iq-workstreams/.env` with pre-filled defaults:
+   6a. **Prompt for org** — ask the developer:
    ```
-   ADO_ORG=rivalitinc
-   ADO_PROJECT=Rival Insurance Technology
+   What is your Azure DevOps organization name? (default: rivalitinc)
+   ```
+   If they press Enter or say "default", use `rivalitinc`.
+   Then ask:
+   ```
+   What is your Azure DevOps project name? (default: Rival Insurance Technology)
+   ```
+   If they press Enter or say "default", use `Rival Insurance Technology`.
+
+   6b. **Auto-create** `.iq-workstreams/.env`:
+   ```
+   ADO_ORG={org_from_6a}
+   ADO_PROJECT={project_from_6a}
    ADO_USE_VSCOM=1
    ADO_PAT=
    ```
 
-   5b. **Verify `.gitignore`** — check that `.env` and `.iq-workstreams/` are in the project's `.gitignore`.
-   If it is NOT listed, add it automatically and inform the developer:
-   ```
-   NOTE: Added .env to .iq-update/.gitignore to prevent accidental secret exposure.
-   ```
+   6c. **Verify secrets are not exposed:**
+   - If `{carrier_root}/.git` exists → check `.gitignore` includes `.iq-workstreams/`
+   - If `{carrier_root}/.svn` exists → print: `NOTE: SVN project — ensure .iq-workstreams/ is in svn:ignore`
+   - If neither → skip silently
 
-   5c. **Prompt for PAT** — ask the developer:
+   6d. **Prompt for PAT** — ask the developer:
    ```
    ═══════════════════════════════════════════════════════
      Azure DevOps PAT Setup
@@ -195,43 +199,28 @@ the whole init because one province is malformed).
 
    To fetch tickets automatically, this plugin needs a Personal Access Token.
 
-   Generate one at: https://rivalitinc.visualstudio.com/_usersettings/tokens
+   Generate one at: https://{ADO_ORG}.visualstudio.com/_usersettings/tokens
      → Click "New Token"
      → Name: "IQ Update Plugin"
      → Scopes: Work Items (Read)
      → Expiration: 90 days (or custom)
      → Click "Create" and copy the token
 
-   Paste your Azure DevOps Personal Access Token:
+   Paste your Azure DevOps Personal Access Token (or type "skip"):
    ═══════════════════════════════════════════════════════
    ```
 
    Wait for the developer to paste their PAT value.
 
-   5d. **Write the PAT** into the `.env` file (replace the empty `ADO_PAT=` line with
-   `ADO_PAT={pasted_value}`). Confirm:
+   6e. **Write the PAT** into the `.env` file. Confirm:
    ```
    Azure DevOps:  ✓ PAT saved to .iq-workstreams/.env
    ```
 
-   5e. **If developer declines** (says "skip", "later", etc.):
+   6f. **If developer declines** (says "skip", "later", etc.):
    ```
    Azure DevOps:  ⚠ .env created but ADO_PAT is empty — /iq-plan will require manual ticket paste
    ```
-   Continue to the next step.
-
-   **IMPORTANT:** The `.env` file contains secrets (the PAT). The `.gitignore` check
-   in Step 5b is mandatory — never skip it.
-
-6. Check for province-like directories to confirm this is a TBW carrier folder:
-   - Look for at least ONE directory matching a known province name (see the province
-     lookup table below)
-   - If no province directories found, STOP and tell the developer:
-     ```
-     ERROR: This does not appear to be a TBW carrier folder.
-     Expected province directories (e.g., Alberta/, Ontario/, Saskatchewan/) but found none.
-     Current directory: {cwd}
-     ```
 
 ### Step 0.9: Write paths.md (CRITICAL — enables all downstream commands)
 
@@ -279,6 +268,10 @@ validators_dir: {plugin_root}/validators
 ## Patterns
 patterns_dir: {plugin_root}/patterns
 
+## Scripts
+fetch_ticket: {plugin_root}/fetch-ticket.sh
+init_scan: {plugin_root}/init_scan.py
+
 ## Workspace
 config_yaml: {carrier_root}/.iq-workstreams/config.yaml
 workstreams_dir: {carrier_root}/.iq-workstreams
@@ -312,25 +305,18 @@ List all directories in the carrier root. Classify each one:
 | Prince Edward Island | PE | PEHab |
 | Saskatchewan | SK | SKHab |
 
-**Skip List** (known non-province directories -- silently skip):
-- `.iq-update`
-- `.iq-workstreams`
-- `.build`
-- `.claude`
-- `.svn`
-- `.git`
-- `Hub`
-- `Code`
-- `knowledge`
-- `Shared Files for Nodes`
+**Skip List** (known non-province directories and files -- silently skip):
+- `.iq-update`, `.iq-workstreams`, `.build`, `.claude`, `.svn`, `.git`
+- `Hub`, `Code`, `knowledge`, `Shared Files for Nodes`
 - Any directory starting with `.`
+- Any directory matching `workitem-*` (ticket fetch output)
+- Any files (not directories) — `.md`, `.sh`, `.json`, etc.
+- `reviews`, `legacy-agents`, `update_plugin_test_case`, `codex-reviews`
+- `archive`, `node_modules`, `bin`, `obj`, `packages`
 
-**Unrecognized directories**: If a top-level directory is NOT in the province table
-and NOT in the skip list, record a warning:
-```
-WARNING: Unrecognized directory: {name} (skipped)
-```
-Continue scanning -- do not crash.
+**Unrecognized directories**: Only warn for directories that LOOK like they could be
+misspelled province names (fuzzy match against province table). Everything else is
+silently skipped. This keeps the init summary clean.
 
 For each province directory found, record:
 - `folder`: the exact directory name (e.g., "British Columbia")
@@ -702,12 +688,53 @@ dead-code detection and canonical pattern discovery. Analogous to Aider's reposi
 map but simpler (regex + grep, no PageRank needed at this codebase scale).
 
 **Skip conditions:**
+- If `--quick` flag is passed, skip Steps 6-6.9 entirely. Print:
+  ```
+  Skipped pattern library + codebase profile (--quick mode).
+  Run /iq-init --refresh later to build them.
+  ```
 - If `--skip-patterns` flag is passed, skip this step entirely
 - If `pattern-library.yaml` already exists AND is less than 30 days old AND this is
   a RE-INIT (not fresh), print a note and skip:
   ```
   NOTE: Pattern Library exists and is {N} days old. Use /iq-init --refresh to rebuild.
   ```
+
+#### 6.0 RUN init_scan.py (REPLACES manual Steps 6.1-6.9)
+
+**This is the ONLY way to build the pattern library and codebase profile.**
+Do NOT manually scan files with Grep/Read. Do NOT write Python scripts on the fly.
+The plugin ships with `init_scan.py` — use it.
+
+Run the pre-built Python scanner script:
+```bash
+"{python_cmd}" "{plugin_root}/init_scan.py" \
+  --carrier-root "{carrier_root}" \
+  --config "{config_yaml}" \
+  --output-dir "{workstreams_dir}"
+```
+
+If you only want the pattern library (skip dispatch tables, vehicle types, glossary):
+```bash
+"{python_cmd}" "{plugin_root}/init_scan.py" \
+  --carrier-root "{carrier_root}" \
+  --config "{config_yaml}" \
+  --output-dir "{workstreams_dir}" \
+  --skip-profile
+```
+
+The script prints progress to stdout. When it finishes, read its summary output and
+report the results to the developer. **Expected runtime: 15-60 seconds** (not minutes).
+
+If the script fails (non-zero exit code), report the error and continue —
+the pattern library and codebase profile are optional (agents degrade gracefully without them).
+
+After init_scan.py completes, continue to Step 6.9 (summary) below.
+
+---
+
+**REFERENCE ONLY — the sections below (6.1-6.8) document what init_scan.py does internally.
+Do NOT execute these steps manually. They are kept for documentation purposes.**
 
 #### 6.1 SCAN — Extract Function Definitions
 

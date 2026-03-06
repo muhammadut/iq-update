@@ -11,6 +11,8 @@
     "patterns/",
     "validators/",
     "CLAUDE.md",
-    "fetch-ticket.sh"
+    "fetch-ticket.sh",
+    "init_scan.py",
+    "ISSUES.md"
   ]
 }
