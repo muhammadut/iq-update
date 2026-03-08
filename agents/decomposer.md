@@ -76,6 +76,8 @@ id: "cr-NNN"
 title: "Increase liability premiums by 3%"
 description: "All liability bundle premiums should increase by 3% across all territories"
 source_text: "Increase all liability premiums by 3%"
+source_location: "comment by John Smith on 2026-01-15"  # Where in the ticket this came from
+evidence_refs: ["ticket description item 2", "att-03"]   # References to screenshots/attachments
 
 extracted:                              # Concrete values from the ticket text
   percentage: 3.0                       # Optional
@@ -221,6 +223,13 @@ intents:
     confidence: 0.95
     open_questions: []
 
+    # Evidence traceability (carried from CR)
+    source_text: "Increase all liability premiums by 3%"    # From CR source_text
+    source_location: "ticket description item 4"            # From CR source_location
+    evidence_refs: ["ticket description item 4"]            # References to evidence
+    assumptions: []                                          # Assumptions made during decomposition
+    done_when: "All Array6 rate values multiplied by 1.03"  # Verification criteria
+
     # Analyzer-enriched fields (passed through from analyzer_output)
     source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
     target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
@@ -253,6 +262,13 @@ intents:
     depends_on: []
     confidence: 0.95
     open_questions: []
+
+    # Evidence traceability (carried from CR)
+    source_text: "Change $5000 deductible factor from -0.20 to -0.22"
+    source_location: "ticket description item 2"
+    evidence_refs: ["ticket description item 2"]
+    assumptions: []
+    done_when: "Case 5000 dblDedDiscount changed from -0.2 to -0.22"
 
     source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
     target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
@@ -786,6 +802,16 @@ def build_intent(intent_id, cr, func_name, analyzer_data, match_source,
         "confidence": confidence,
         "open_questions": [],
 
+        # Evidence traceability (carried from CR)
+        # These fields maintain the chain from ticket -> CR -> intent so that
+        # the Planner and Reviewer can trace every code change back to its
+        # business justification.
+        "source_text": cr.get("source_text", cr.get("title", "")),
+        "source_location": cr.get("source_location", ""),
+        "evidence_refs": cr.get("evidence_refs", []),
+        "assumptions": [],  # Populated below if Decomposer makes assumptions
+        "done_when": build_done_when(cr, capability, func_name, extracted),
+
         # Analyzer pass-through fields
         "source_file": analyzer_data.get("source_file"),
         "target_file": analyzer_data.get("target_file"),
@@ -869,7 +895,41 @@ def compute_confidence(match_source, analyzer_data, cr):
         base = max(base - 0.10, 0.30)
 
     return round(base, 2)
+
+
+def build_done_when(cr, capability, func_name, extracted):
+    """Build a human-readable verification criteria string for the intent.
+
+    The done_when field tells the Reviewer exactly what to check to confirm
+    the change was applied correctly.
+    """
+    if capability == "value_editing":
+        if extracted.get("factor"):
+            return f"All rate values in {func_name} multiplied by {extracted['factor']}"
+        elif extracted.get("old_value") is not None and extracted.get("new_value") is not None:
+            return f"{func_name}: value changed from {extracted['old_value']} to {extracted['new_value']}"
+        else:
+            return f"Values in {func_name} updated per CR specification"
+
+    elif capability == "structure_insertion":
+        return f"New code block inserted in {func_name} as specified"
+
+    elif capability == "file_creation":
+        return f"New file created with required content"
+
+    else:
+        return f"Change applied to {func_name} per CR specification"
 ```
+
+**Recording assumptions:** When the Decomposer makes a decision that is not
+explicitly stated in the CR, it MUST record it in the intent's `assumptions`
+list. Examples:
+- `"CR says 'all liability premiums' -- interpreting as GetLiabilityBundlePremiums only (not Extension)"`
+- `"CR does not specify rounding -- using auto (match existing pattern)"`
+- `"Applying to all territories (CR says 'increase' without territory restriction)"`
+
+These assumptions flow through to the Planner's execution plan and the Reviewer's
+validation checklist, so the developer can catch incorrect interpretations at Gate 1.
 
 #### 8.4 Intent ID Assignment
 

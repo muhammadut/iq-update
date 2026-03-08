@@ -266,11 +266,12 @@ Read manifest.yaml -> phase_status section
 **Fallback (if phase_status is missing or incomplete):** determine sub-state from artifacts:
 
 ```
-If parsed/change_requests.yaml does NOT exist  -> resume at Intake
-If analysis/code_discovery.yaml does NOT exist -> resume at Discovery
-If analysis/blast_radius.md does NOT exist     -> resume at Analyzer
-If analysis/intent_graph.yaml does NOT exist   -> resume at Decomposer
-If plan/execution_plan.md does NOT exist       -> resume at Planner
+If parsed/ticket_understanding.md does NOT exist -> resume at Intake (Step 0: comprehension)
+If parsed/change_requests.yaml does NOT exist    -> resume at Intake (Step 1: CR extraction)
+If analysis/code_discovery.yaml does NOT exist   -> resume at Discovery
+If analysis/blast_radius.md does NOT exist       -> resume at Analyzer
+If analysis/intent_graph.yaml does NOT exist     -> resume at Decomposer
+If plan/execution_plan.md does NOT exist         -> resume at Planner
 ```
 
 **For EXECUTING state, determine sub-state from operations log:**
@@ -313,14 +314,23 @@ Ticket reference? You can:
    ```bash
    cd "{carrier_root}" && source "{env_file}" && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
    ```
-   - **On success:** Read `workitem-{key}-full/llm-context-brief.md` as the
-     change description. Set `ticket.auto_fetched: true`. Extract a short
-     description from the ticket title (strip "Portage", province names,
-     "Effective {date}", common suffixes — keep 2-4 key words).
+   - **On success:** Read `workitem-{key}-full/llm-context.md` (the FULL version
+     with ALL comments, not the brief) as the change description. Set
+     `ticket.auto_fetched: true`. Extract a short description from the ticket
+     title (strip "Portage", province names, "Effective {date}", common
+     suffixes — keep 2-4 key words).
+
+     **IMPORTANT:** Use `llm-context.md` (full), NOT `llm-context-brief.md`.
+     The brief only has the first 3 comments and strips screenshots. Comments
+     frequently contain corrections, clarifications, and the actual rate values
+     that the description omits. The Intake agent needs ALL of this to understand
+     the ticket correctly.
+
      Show the developer:
      ```
      Fetched ticket {key}: {title}
      Auto-generated description: {short_description}
+     Ticket has {N} comments and {M} attachments — all will be analyzed.
 
      Use this as the change description? [Y/n]
      ```
@@ -341,7 +351,7 @@ Ticket reference? You can:
        ```
      - If the ticket mentions `carrier_name`: proceed silently.
 
-     If yes: store the brief content as the raw input, **skip Step 4.2**.
+     If yes: store the full context as the raw input, **skip Step 4.2**.
      If no: proceed to Step 4.2 for manual input.
    - **On failure:** Warn and continue normally:
      ```
@@ -395,10 +405,11 @@ mkdir -p ".iq-workstreams/changes/{workstream-name}"
 
 ### Step 4.2: Gather Change Description
 
-**If auto-fetched in Step 4.1:** This step is skipped. The brief from
-`workitem-{key}-full/llm-context-brief.md` is already stored as the raw input.
-The full ticket data (all comments, attachments) remains available at
-`workitem-{key}-full/` if Intake needs to reference it.
+**If auto-fetched in Step 4.1:** This step is skipped. The full context from
+`workitem-{key}-full/llm-context.md` (ALL comments, ALL metadata) is stored as
+the raw input. The full ticket data directory (including downloaded attachments
+and images) is copied to the workstream in Step 4.7 for the Intake agent's
+Deep Ticket Comprehension step (Step 0).
 
 **Otherwise,** ask the developer to describe the changes:
 
@@ -817,15 +828,27 @@ output files back to the workstream folder. The orchestrator's job is
 ```
 Pipeline flow:
 
-  Steps 1-5 (launched as sub-agents or team):
-    Intake -> Discovery -> Analyzer -> Decomposer -> Planner
-                                                      |
-                                                [GATE 1: developer approves plan]
-                                                      |
-                                                state: PLANNED -- /iq-plan ends here
-                                                      |
+  Step 1: Intake
+    Step 0: Deep Ticket Comprehension (reads ALL comments, ALL images)
+            |
+      [CHECKPOINT: developer confirms ticket understanding]
+            |
+    Steps 1-6: CR extraction from confirmed understanding
+            |
+  Step 1.5: Discovery -> Step 2: Analyzer -> Step 3: Decomposer -> Step 4: Planner
+                                                                       |
+                                                                 [GATE 1: developer approves plan]
+                                                                       |
+                                                                 state: PLANNED -- /iq-plan ends here
+                                                                       |
   (Execution and review handled by /iq-execute and /iq-review respectively)
 ```
+
+**Two developer checkpoints in /iq-plan:**
+1. **Ticket Understanding Checkpoint** (after Intake Step 0) — "Do I understand
+   the ticket correctly?" — catches misunderstandings BEFORE the pipeline runs
+2. **Gate 1** (after Planner) — "Is the execution plan correct?" — catches
+   implementation errors BEFORE files are modified
 
 ### Execution Modes
 
@@ -973,7 +996,7 @@ ON COMPLETION:
 
 ---
 
-### Step 1: INTAKE
+### Step 1: INTAKE (with Ticket Understanding Checkpoint)
 
 **Manifest update:** Set `state: "ANALYZING"`, `phase_status.intake.status: "in_progress"`,
 `updated_at: "{now}"`
@@ -1002,18 +1025,43 @@ Save the raw input to `input/source.md`:
 
 **Auto-fetched tickets with attachments:** If `fetch-ticket.sh` downloaded ticket
 attachments (images, PDFs), they are already in `input/ticket-data/`. The Intake
-agent will scan for image files and read them to extract any rate values or context.
+agent will read the FULL `llm-context.md` (all comments), scan for image files,
+and read them to extract rate values or context.
 
 **Launch the Intake agent** using the Agent Launch Protocol above:
 
 ```
 Agent:  intake
-Input:  input/source.md, .iq-workstreams/config.yaml
-Output: parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml
+Input:  input/source.md, input/ticket-data/ (if exists),
+        .iq-workstreams/config.yaml
+Output: parsed/ticket_understanding.md,
+        parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml
+```
+
+**IMPORTANT — Intake agent prompt addition for auto-fetched tickets:**
+When the ticket was auto-fetched, add this to the agent prompt:
+
+```
+TICKET DATA: Full ticket data is at {workstream}/input/ticket-data/
+  - llm-context.md: Full ticket with ALL comments (use this, NOT the brief)
+  - llm-context.json: Structured data (comments, attachments metadata)
+  - attachments/: Downloaded images and files
+
+You MUST run Step 0 (Deep Ticket Comprehension) FIRST:
+  1. Read llm-context.md for the full description and ALL comments
+  2. Read EVERY image in attachments/ using the Read tool (multimodal)
+  3. Synthesize a ticket understanding document
+  4. Present it to the developer for confirmation
+  5. ONLY THEN proceed to CR extraction
+
+The developer expects to see your understanding of the ticket BEFORE
+you start extracting change requests. This is the most critical step.
 ```
 
 The Intake agent reads `{plugin_root}/agents/intake.md` and autonomously:
-- Parses the input into structured change requests (CRs)
+- **FIRST:** Reads the full ticket (all comments, all images) and presents a
+  comprehensive ticket understanding for developer confirmation (Step 0)
+- **THEN:** Parses the confirmed understanding into structured change requests (CRs)
 - Understands any ticket format (ADO, Jira, plain text, PDF, Excel)
 - Detects DAT-file-based rate changes (hab dwelling base rates)
 - Detects rounding mode (multiply+round vs explicit values)
@@ -1021,14 +1069,32 @@ The Intake agent reads `{plugin_root}/agents/intake.md` and autonomously:
 
 **After the agent completes:**
 
-1. Read `parsed/change_requests.yaml` to get the parsed results.
-
-2. Show the developer what was parsed:
+1. **FIRST: Present the Ticket Understanding.** Read `parsed/ticket_understanding.md`
+   and show the developer:
 
    ```
-   Parsed {N} change request(s):
+   TICKET UNDERSTANDING
+   =====================
+
+   {Full content of parsed/ticket_understanding.md}
+
+   =====================
+   Does this match your understanding?
+   ```
+
+   **Wait for developer confirmation.** If the developer says the understanding is
+   wrong, feed corrections back to the Intake agent prompt and re-run Step 0.
+   Do NOT proceed to CR review until understanding is confirmed.
+
+2. **THEN: Show the parsed CRs.** Read `parsed/change_requests.yaml`:
+
+   ```
+   Based on the confirmed understanding, I extracted {N} change request(s):
+
      CR-001: {title} ({complexity})
+            → Source: {evidence trail from ticket}
      CR-002: {title} ({complexity})
+            → Source: {evidence trail from ticket}
      ...
    ```
 
@@ -1044,7 +1110,7 @@ The Intake agent reads `{plugin_root}/agents/intake.md` and autonomously:
    - `change_requests:` with each CR ID and status `PENDING`
    - `ticket_ref:` if extracted from input
    - `phase_status.intake.status: "completed"`
-   - `phase_status.intake.summary: "{N} CRs parsed"`
+   - `phase_status.intake.summary: "Understanding confirmed, {N} CRs parsed"`
    - `updated_at: "{now}"`
    - Append any developer Q&A to `developer_decisions`
 

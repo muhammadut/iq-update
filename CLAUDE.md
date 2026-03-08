@@ -131,16 +131,17 @@ workstream files. These six commands cover the full workflow.
 7. **SHARDCLASS/** (or **SharedClass/** in Nova Scotia) exists alongside Code/ for hab helper classes -- include in blast radius scans
 8. **Preserve exact VB.NET formatting** (indentation, spacing, line endings)
 9. **Skip commented lines** (starting with `'`) -- never modify commented-out code
-10. **Two approval gates:** Gate 1 (/iq-plan) BEFORE editing, Gate 2 (/iq-review) AFTER validation
-11. **Save per-file snapshots** before editing -- restore on validator failure
-12. **Hash-check files before writing** -- abort if file changed since plan approval (TOCTOU protection)
-13. **SVN is the version control** -- the plugin does not manage system-level rollback
-14. **Bottom-to-top execution** within each file (highest line number first) to prevent line-number drift
-15. **Show, don't guess** -- present all candidates to developer, never silently pick one
-16. **Fresh context per command** -- each /iq-* command reads ALL state from disk, never from memory
-17. **NEVER use `sleep` to wait for anything** -- if an Agent tool call fails or an agent cannot be resumed, log the error and fall back to sequential execution. Do not retry in a sleep loop. Do not `sleep` between steps.
-18. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
-19. **Python-only for scripting** -- when generating YAML, parsing files, or processing data, ALWAYS use Python (with the `python_cmd` from config.yaml). NEVER use Perl, Ruby, Node, or other scripting languages. Python + PyYAML is the only verified runtime.
+10. **Understand before acting:** Intake MUST present a ticket understanding to the developer and get confirmation BEFORE extracting change requests. Read ALL comments and ALL image attachments. Comments often contain corrections, clarifications, and the actual values.
+11. **Two approval gates + understanding checkpoint:** Ticket understanding (Intake Step 0) BEFORE CR extraction, Gate 1 (/iq-plan) BEFORE editing, Gate 2 (/iq-review) AFTER validation
+12. **Save per-file snapshots** before editing -- restore on validator failure
+13. **Hash-check files before writing** -- abort if file changed since plan approval (TOCTOU protection)
+14. **SVN is the version control** -- the plugin does not manage system-level rollback
+15. **Bottom-to-top execution** within each file (highest line number first) to prevent line-number drift
+16. **Show, don't guess** -- present all candidates to developer, never silently pick one
+17. **Fresh context per command** -- each /iq-* command reads ALL state from disk, never from memory
+18. **NEVER use `sleep` to wait for anything** -- if an Agent tool call fails or an agent cannot be resumed, log the error and fall back to sequential execution. Do not retry in a sleep loop. Do not `sleep` between steps.
+19. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
+20. **Python-only for scripting** -- when generating YAML, parsing files, or processing data, ALWAYS use Python (with the `python_cmd` from config.yaml). NEVER use Perl, Ruby, Node, or other scripting languages. Python + PyYAML is the only verified runtime.
 
 ## Province Codes
 
@@ -187,7 +188,7 @@ workstream files. These six commands cover the full workflow.
   changes/
     {workflow-id}/                   <- One folder per ticket (created by /iq-plan)
       manifest.yaml                  <- State machine + all tracking data
-      input/, parsed/                <- Intake artifacts (parsed/requests/cr-NNN.yaml)
+      input/, parsed/                <- Intake artifacts (ticket_understanding.md, cr-NNN.yaml)
       analysis/                      <- Discovery + Analyzer + Decomposer artifacts (from /iq-plan)
         code_discovery.yaml          <- CalcMain flow + CR→function mapping (from Discovery)
         intent_graph.yaml            <- Intents with target regions + dependencies (from Decomposer)
@@ -209,7 +210,7 @@ workstream files. These six commands cover the full workflow.
 ## Agent Pipeline
 
 ```
-/iq-plan:    Intake -> Discovery -> Analyzer -> Decomposer -> Planner -> [GATE 1]
+/iq-plan:    Intake(Comprehension -> [UNDERSTANDING CHECK] -> CR Extraction) -> Discovery -> Analyzer -> Decomposer -> Planner -> [GATE 1]
 /iq-execute: Build Capsules -> [File-Copy Worker] -> [Change Engine Workers...] -> [EXECUTED]
 /iq-review:  Validator -> Diff -> Semantic Verifier -> Report -> [GATE 2] -> DONE
 ```

@@ -103,6 +103,12 @@ intents:
     depends_on: []                             # List of intent IDs this depends on
     confidence: 0.95                           # 0.0 to 1.0
     open_questions: []                         # Questions needing developer input
+    # -- Evidence traceability (carried from CR) --
+    source_text: "Change $5000 deductible factor from -0.20 to -0.22"
+    source_location: "ticket description item 2"
+    evidence_refs: ["ticket description item 2"]
+    assumptions: []
+    done_when: "Case 5000 dblDedDiscount changed from -0.2 to -0.22"
     # -- Analyzer-enriched fields --
     source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
     target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
@@ -136,6 +142,13 @@ intents:
     open_questions:
       - "Ticket specifies $50K tier but no premium amount. What value?"
       - "Insert before or after existing $25K case?"
+    # -- Evidence traceability (carried from CR) --
+    source_text: "Add $50,000 sewer backup coverage tier"
+    source_location: "ticket description item 3"
+    evidence_refs: ["ticket description item 3"]
+    assumptions: ["Premium amount not specified -- open question"]
+    done_when: "New Case 50000 block inserted in GetSewerBackupPremium"
+    # -- Analyzer-enriched fields --
     source_file: "Saskatchewan/Code/mod_Common_SKHab20250901.vb"
     target_file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
     needs_copy: true
@@ -199,6 +212,16 @@ enrichments. The Planner reads ALL intents. Key fields used by the Planner:
 | `open_questions` | list | Questions needing developer input (for Q&A step) |
 | `strategy_hint` | string or null | Optional hint for Change Engine; used by Planner for before/after display |
 | `parameters` | dict | Pattern-specific parameters (for before/after) |
+
+**Evidence traceability fields (carried from CR by Decomposer):**
+
+| Field | Type | Purpose for Planner |
+|-------|------|-------------------|
+| `source_text` | string | Original ticket text for this change (for evidence in plan) |
+| `source_location` | string | Where in ticket this came from (for evidence in plan) |
+| `evidence_refs` | list | References to screenshots/attachments (for evidence in plan) |
+| `assumptions` | list | Assumptions made during decomposition (for risks section) |
+| `done_when` | string | Verification criteria (for validation section in plan) |
 
 **Analyzer-enriched fields (value_editing intents):**
 
@@ -276,6 +299,24 @@ Human-readable blast radius report. The Planner reads this for:
 - Reverse lookup results (to include in plan notes)
 - Flagged items (to surface warnings in the plan)
 
+### parsed/ticket_understanding.md (from Intake -- confirmed by developer)
+
+The Planner reads this file to understand the business context behind the changes.
+This file has been confirmed by the developer -- it represents the agreed-upon
+understanding of what the ticket is asking for.
+
+The Planner uses this to:
+- Include a business-context summary at the top of the execution plan
+- Connect each plan phase back to the ticket evidence
+- Detect if the code plan has drifted from the business intent
+
+### parsed/change_requests.yaml (from Intake)
+
+The Planner reads this for:
+- `source_text` and `source_location` per CR (evidence trail)
+- `extracted` values (the concrete numbers the developer confirmed)
+- `ambiguity_flag` and `ambiguity_note` (unresolved items)
+
 ### Actual source files (on disk)
 
 The Planner reads the actual VB.NET source files referenced by `source_file` in each
@@ -290,89 +331,94 @@ intent to:
 
 ### plan/execution_plan.md
 
-Human-readable plan for developer approval at Gate 1. Two formats depending on
-complexity.
+Human-readable plan for developer approval at Gate 1. The plan is organized by
+Change Request so the developer can trace every code change back to its business
+justification. Two formats depending on complexity: SIMPLE (thin wrapper) and
+COMPLEX (full structure). Both use the CR-organized format below.
 
-#### SIMPLE format (1-2 intents, single file, LOW or MEDIUM risk)
-
-```markdown
-EXECUTION PLAN: {province_name} {LOB(s)} {effective_date}
-====================================================
-
-Summary: {N} change(s), {N} file(s), {N} value edits, {risk} risk
-
-FILE COPIES:
-  {source_filename} -> {target_filename}
-    .vbproj updates: {N} file(s)
-
-Phase 1: {title} ({intent_id}) [{capability}]
-  File: {target_file}
-  Function: {function_name}()
-  Action: {description}
-
-  Before -> After ({context_label}):
-    {old_line}
-    {new_line}
-                        {per-value % change annotations}
-
-  Impact: {N} territories x {N} values = {N total} changes
-  All changes: {min%} to {max%} (rounding variation)
-
-Approve this plan? Say "approve" to proceed or tell me what to change.
-```
-
-#### COMPLEX format (3+ intents, multiple files, or HIGH risk)
+#### Plan structure (both formats)
 
 ```markdown
-EXECUTION PLAN: {province_name} {LOB(s)} {effective_date}
-====================================================
+# EXECUTION PLAN: {Province} {LOB(s)} {Date}
 
-Summary: {N} intents across {N} files, {risk} risk
-LOBs affected: {comma-separated list}
-Shared module: {filename} (if applicable)
+## Confirmed Ticket Understanding
+{One-paragraph restatement from parsed/ticket_understanding.md}
+Latest clarifications: {any corrections from developer}
+Non-goals: {what this ticket is NOT doing}
 
-OUT OF SCOPE (flagged, not executed):
-  CR-{NNN}: {title} -- {reason}
+## Decisions Applied
+{List of developer decisions from manifest.yaml developer_decisions}
 
-FILE COPIES:
-  {source_filename} -> {target_filename}
-    Shared by: {LOB list}
-    .vbproj updates: {N} file(s)
+## Blocking Questions
+{Empty if plan is approvable. Listed here if plan is DRAFT.}
 
-  {source_filename} -> {target_filename}
-    Used by: {LOB}
-    .vbproj updates: {N} file(s)
+## Plan By Change Request
 
-Phase 1: {title} ({intent_id}) [{capability}]
-  File: {target_file}
-  {details depending on intent type -- see below}
+### CR-001: {title}
+**What the ticket is asking:** {from ticket understanding, not just the CR title}
+**Evidence:** {source_text, source_location, screenshot references}
+**Implementation:**
+  Phase {N}: {intent title}
+    File: {filepath}
+    Function: {function}
+    Action: {description}
+    Before -> After: {preview with per-value % annotations}
+**Validation:** {done_when criteria from intent}
+**Risks/Assumptions:** {any assumptions from intent, risk flags}
 
-Phase 2: {title} ({intent_id}) [{capability}, depends on Phase {N}]
-  File: {target_file}
-  {details}
+### CR-002: ...
 
-... (all phases)
+## Out of Scope
+{CRs marked out of scope with reasons -- omit section if none}
 
-IMPACT SUMMARY:
-  Total value changes: {N}
-  Total files modified: {N}
-  Total .vbproj updates: {N}
-  Risk level: {risk} -- {reason}
+## Execution Order
+{Phase ordering with dependency explanation}
 
-CONTEXT TIERS:
+## Impact Summary
+- Files to copy: {N}
+- Files to modify: {N}
+- .vbproj updates: {N}
+- Shared module blast radius: {LOBs affected}
+- Value change range: {min%} to {max%}
+- Risk level: {risk} -- {reasons}
+
+## Context Tiers
   Tier 1 (value substitution):  {N} intents
   Tier 2 (logic with patterns): {N} intents
   Tier 3 (full context):        {N} intents
 
-WARNINGS:
-  {any warnings from analysis or risk computation}
+## Warnings
+{any warnings from analysis or risk computation -- omit section if none}
 
-PARTIAL APPROVAL CONSTRAINTS:
-  {if any inter-CR dependencies exist, show them here}
-  {otherwise omit this section}
+## Partial Approval Constraints
+{if any inter-CR dependencies exist, show them here -- omit section if none}
 
-Approve this plan? Say "approve" to proceed or tell me what to change.
+## Approval
+Approving this plan means you agree with BOTH:
+1. The business interpretation (what we're changing and why)
+2. The code implementation (how we're making the changes)
+
+Approve, reject, or ask questions.
 ```
+
+#### SIMPLE format differences (1-2 intents, single file, LOW or MEDIUM risk)
+
+For simple plans, the structure above is used but sections are condensed:
+- "Confirmed Ticket Understanding" may be a single sentence
+- "Decisions Applied" is omitted if no decisions were needed
+- "Execution Order" is omitted (single phase needs no ordering explanation)
+- All before/after entries are shown (no truncation)
+- "Context Tiers" and "Warnings" are omitted if empty
+
+#### COMPLEX format differences (3+ intents, multiple files, or HIGH risk)
+
+For complex plans, the full structure is used with:
+- Complete "Confirmed Ticket Understanding" paragraph
+- All CR sections with full evidence and implementation detail
+- For intents with more than 10 before/after entries, show first 2 and a
+  summary: "(showing 2 of N -- all follow same pattern)"
+- Full "Execution Order" with dependency graph explanation
+- Full "Impact Summary" with all metrics
 
 #### Phase detail formats by capability type
 
@@ -451,6 +497,7 @@ Machine-readable plan consumed by /iq-execute.
 planner_version: "2.0"
 generated_at: "2026-02-27T11:00:00"            # ISO 8601 timestamp
 workflow_id: "20260101-SK-Hab-rate-update"      # From manifest.yaml
+plan_status: "approved"                         # "approved" | "draft" (draft = blocking questions remain)
 
 # Summary metrics
 total_phases: 5                                 # Number of execution phases
@@ -630,11 +677,20 @@ Before starting, confirm the following exist and are readable:
 4. The `analysis/files_to_copy.yaml` (from Analyzer)
 5. The `analysis/blast_radius.md` (from Analyzer)
 6. The `.iq-workstreams/config.yaml` (for naming patterns and hab flags)
+7. The `parsed/ticket_understanding.md` (from Intake -- confirmed by developer)
+8. The `parsed/change_requests.yaml` (from Intake -- CR evidence and extracted values)
 
-If any of these are missing, STOP and report:
+If items 1-6 are missing, STOP and report:
 ```
 [Planner] Cannot proceed -- missing required file: {path}
           Was the Decomposer completed? Check manifest.yaml for decomposer.status = "completed".
+```
+
+If items 7-8 are missing, log a warning and proceed -- the plan will omit business
+context sections but can still generate the code-level execution plan:
+```
+[Planner] WARNING: Missing {path} -- plan will not include business context sections.
+          The Intake agent should have produced these files. Check manifest.yaml for intake.status.
 ```
 
 ### Step 1: Load Context
@@ -667,7 +723,30 @@ If any of these are missing, STOP and report:
    - `files` (list -- each with source, target, source_hash, target_exists,
      shared_by, intents_in_file, vbproj_updates)
 
-1.5. Build the **plan context** object:
+1.5. Read `parsed/ticket_understanding.md` (if it exists). Store the full text
+   as `ticket_understanding`. This is the developer-confirmed business context.
+   Extract:
+   - The one-paragraph summary of what the ticket is asking for
+   - Any non-goals or scope limitations
+   - Any corrections the developer made during Intake confirmation
+
+1.6. Read `parsed/change_requests.yaml` (if it exists). Build a CR lookup map:
+
+```python
+cr_map = {}
+for cr in change_requests.get("requests", []):
+    cr_map[cr["id"]] = {
+        "title": cr.get("title", ""),
+        "source_text": cr.get("source_text", ""),
+        "source_location": cr.get("source_location", ""),
+        "evidence_refs": cr.get("evidence_refs", []),
+        "extracted": cr.get("extracted", {}),
+        "ambiguity_flag": cr.get("ambiguity_flag", False),
+        "ambiguity_note": cr.get("ambiguity_note", ""),
+    }
+```
+
+1.7. Build the **plan context** object:
 
 ```
 PLAN CONTEXT
@@ -901,26 +980,124 @@ for decision in decisions:
         intent['confidence'] = min(intent['confidence'] + 0.2, 1.0)
 ```
 
-3.5.6. Verify all open questions are resolved:
+3.5.6. Classify remaining open questions as BLOCKING or NON-BLOCKING:
 
 ```python
+BLOCKING_CATEGORIES = {
+    "missing_value",        # Missing values required for code changes (e.g., "what premium for $50K tier?")
+    "ambiguous_scope",      # Ambiguous scope (e.g., "which territories?")
+    "conflicting_reqs",     # Conflicting requirements between CRs
+    "missing_insertion",    # Missing insertion points for new code
+}
+
+NON_BLOCKING_CATEGORIES = {
+    "style_preference",     # Style preferences (e.g., variable naming)
+    "optimization_choice",  # Optimization choices
+    "optional_enhancement", # Optional enhancements beyond the CR scope
+}
+
+def classify_question(question_text, intent):
+    """Classify an open question as blocking or non-blocking.
+
+    BLOCKING questions (must be resolved before Gate 1):
+    - Missing values required for code changes (e.g., "what premium for $50K tier?")
+    - Ambiguous scope (e.g., "which territories?")
+    - Conflicting requirements
+    - Missing insertion points for new code
+
+    NON-BLOCKING questions (noted but don't stop the plan):
+    - Style preferences
+    - Optimization choices
+    - Optional enhancements
+    """
+    q_lower = question_text.lower()
+
+    # Missing value indicators
+    if any(kw in q_lower for kw in ["what value", "what premium", "what amount",
+                                     "not specified", "no premium", "missing"]):
+        return "blocking", "missing_value"
+
+    # Ambiguous scope indicators
+    if any(kw in q_lower for kw in ["which territories", "which lobs",
+                                     "which function", "which version"]):
+        return "blocking", "ambiguous_scope"
+
+    # Conflict indicators
+    if any(kw in q_lower for kw in ["conflict", "contradicts", "both"]):
+        return "blocking", "conflicting_reqs"
+
+    # Missing insertion point
+    if any(kw in q_lower for kw in ["where to insert", "insert before or after",
+                                     "insertion point"]):
+        return "blocking", "missing_insertion"
+
+    # If intent has null required parameters, it's blocking
+    params = intent.get("parameters", {})
+    if intent["capability"] == "structure_insertion":
+        if params.get("premium") is None and "premium" in q_lower:
+            return "blocking", "missing_value"
+
+    # Default: non-blocking (style/preference questions)
+    return "non-blocking", "style_preference"
+
+
 remaining = {
     intent_id: info
     for intent_id, info in questions_by_intent.items()
     if intent_map[intent_id].get('open_questions')
 }
-if remaining:
-    # Some questions unanswered -- warn but don't block
-    print("[Planner] WARNING: {len(remaining)} intent(s) still have open questions.")
-    print("          Plan will proceed with lower confidence for these intents.")
-else:
+
+blocking_questions = []
+non_blocking_questions = []
+
+for intent_id, info in remaining.items():
+    intent = intent_map[intent_id]
+    for q in intent.get('open_questions', []):
+        classification, category = classify_question(q, intent)
+        entry = {
+            "intent_id": intent_id,
+            "intent_title": intent["title"],
+            "question": q,
+            "category": category,
+        }
+        if classification == "blocking":
+            blocking_questions.append(entry)
+        else:
+            non_blocking_questions.append(entry)
+
+if blocking_questions:
+    print(f"[Planner] BLOCKING: {len(blocking_questions)} question(s) must be resolved before Gate 1.")
+    for bq in blocking_questions:
+        print(f"          - [{bq['category']}] {bq['intent_title']}: {bq['question']}")
+if non_blocking_questions:
+    print(f"[Planner] NON-BLOCKING: {len(non_blocking_questions)} question(s) noted (will not stop plan).")
+if not remaining:
     print("[Planner] All open questions resolved. Proceeding with plan generation.")
 ```
 
-3.5.7. Log completion:
+3.5.7. **BLOCKING QUESTION GATE:** If ANY blocking questions remain unresolved
+after the Q&A step, the Planner MUST:
+
+1. Mark the plan as `DRAFT - DECISIONS REQUIRED`
+2. List all blocking questions at the TOP of execution_plan.md
+3. Set a field `plan_status: "draft"` in execution_order.yaml
+4. The orchestrator in /iq-plan MUST NOT present a draft plan as approvable at Gate 1
+
+```python
+plan_is_draft = len(blocking_questions) > 0
+
+if plan_is_draft:
+    print("[Planner] Plan will be generated as DRAFT -- blocking questions prevent approval.")
+    print("          Developer must answer blocking questions, then re-run /iq-plan.")
+```
+
+3.5.8. Log completion:
 ```
 [Planner] Q&A step complete: {N} questions answered across {M} intents.
+          Blocking questions remaining: {len(blocking_questions)}
+          Non-blocking questions noted: {len(non_blocking_questions)}
           Developer decisions saved to plan/developer_decisions.yaml
+          Plan status: {"DRAFT - DECISIONS REQUIRED" if plan_is_draft else "READY"}
 ```
 
 ### Step 4: Build Dependency DAG
@@ -1693,99 +1870,145 @@ use_simple = (
 )
 ```
 
-10.2. Write the plan header:
+10.2. Write the plan title and draft banner (if applicable):
 
 ```python
 plan_lines = []
 
 # Title
-if use_simple:
-    lob_str = lobs[0] if len(lobs) == 1 else f"{lobs[0]} (+ {len(lobs) - 1} LOBs)"
-else:
-    lob_str = "Habitational" if all(is_hab(l) for l in lobs) else ", ".join(lobs)
-
-plan_lines.append(f"EXECUTION PLAN: {province_name} {lob_str} {effective_date}")
-plan_lines.append("=" * len(plan_lines[0]))
+lob_str = "Habitational" if all(is_hab(l) for l in lobs) else ", ".join(lobs)
+plan_lines.append(f"# EXECUTION PLAN: {province_name} {lob_str} {effective_date}")
 plan_lines.append("")
 
-# Summary line
-if use_simple:
-    plan_lines.append(
-        f"Summary: {total_intents} change(s), {len(unique_files)} file(s), "
-        f"{total_value_changes} value edits, {risk_level} risk"
-    )
+# Draft banner (from Step 3.5.7 -- blocking questions prevent approval)
+if plan_is_draft:
+    plan_lines.append("> **DRAFT - DECISIONS REQUIRED**")
+    plan_lines.append("> This plan cannot be approved until all blocking questions are resolved.")
+    plan_lines.append("> Answer the questions in the Blocking Questions section below, then re-run /iq-plan.")
+    plan_lines.append("")
+```
+
+10.3. Write the "Confirmed Ticket Understanding" section:
+
+```python
+plan_lines.append("## Confirmed Ticket Understanding")
+if ticket_understanding:
+    # ticket_understanding is the full text from parsed/ticket_understanding.md
+    plan_lines.append(ticket_understanding.strip())
 else:
-    plan_lines.append(
-        f"Summary: {total_intents} intents across {len(unique_files)} files, "
-        f"{risk_level} risk"
-    )
-    plan_lines.append(f"LOBs affected: {', '.join(lobs)}")
-    shared_modules = [f for f in unique_files
-                      if any(intent['file_type'] == 'shared_module'
-                             for intent in intent_map.values() if intent['target_file'] == f)]
-    if shared_modules:
-        for sm in shared_modules:
-            plan_lines.append(f"Shared module: {sm.split('/')[-1]}")
+    plan_lines.append("*(ticket_understanding.md not available)*")
+
+# Include developer corrections from manifest if any
+developer_decisions = manifest.get("developer_decisions", [])
+if developer_decisions:
+    plan_lines.append("")
+    plan_lines.append(f"Latest clarifications: {len(developer_decisions)} decision(s) applied (see Decisions Applied below)")
+
+# Non-goals from ticket understanding (if parsed)
+# The Planner looks for a "Non-goals" or "Out of scope" section in ticket_understanding
+non_goals = extract_non_goals(ticket_understanding) if ticket_understanding else None
+if non_goals:
+    plan_lines.append(f"Non-goals: {non_goals}")
+plan_lines.append("")
 ```
 
-10.3. Write the OUT OF SCOPE section (if any):
+10.4. Write the "Decisions Applied" section:
 
 ```python
-if out_of_scope:
+if developer_decisions or decisions_from_qa:
+    plan_lines.append("## Decisions Applied")
+    for dd in developer_decisions:
+        plan_lines.append(f"- **Q:** {dd.get('question', 'N/A')} **A:** {dd.get('answer', 'N/A')}")
+    for dd in decisions_from_qa:
+        plan_lines.append(f"- **Q:** {dd['question']} **A:** {dd['answer']} (intent: {dd['intent']})")
     plan_lines.append("")
-    plan_lines.append("OUT OF SCOPE (flagged, not executed):")
-    for oos in out_of_scope:
-        plan_lines.append(f"  {oos['cr'].upper()}: {oos['title']}")
-        plan_lines.append(f"    Reason: {oos['reason']}")
+elif not use_simple:
+    plan_lines.append("## Decisions Applied")
+    plan_lines.append("No decisions required -- all values were explicit in the ticket.")
+    plan_lines.append("")
 ```
 
-10.4. Write the FILE COPIES section:
+10.5. Write the "Blocking Questions" section:
 
 ```python
-if files_to_copy:
-    plan_lines.append("")
-    plan_lines.append("FILE COPIES:")
-    for fc in files_to_copy:
-        src_name = fc['source'].split('/')[-1]
-        tgt_name = fc['target'].split('/')[-1]
-        plan_lines.append(f"  {src_name} -> {tgt_name}")
-        if fc.get('shared_by'):
-            plan_lines.append(f"    Shared by: {', '.join(fc['shared_by'])}")
-        else:
-            plan_lines.append(f"    Used by: {fc.get('used_by', 'single LOB')}")
-        plan_lines.append(f"    .vbproj updates: {len(fc['vbproj_updates'])} file(s)")
+plan_lines.append("## Blocking Questions")
+if blocking_questions:
+    for bq in blocking_questions:
+        plan_lines.append(
+            f"- **[{bq['category']}]** {bq['intent_title']} ({bq['intent_id']}): "
+            f"{bq['question']}"
+        )
 else:
-    plan_lines.append("")
-    plan_lines.append("FILE COPIES: None (target files already exist)")
+    plan_lines.append("None -- plan is ready for approval.")
+plan_lines.append("")
 ```
 
-10.5. Write each phase with before/after details:
+10.6. Write the "Plan By Change Request" section:
 
-For SIMPLE plans, show ALL before/after entries.
-For COMPLEX plans with more than 10 entries per intent, show the first 2
-entries and a summary line "(showing 2 of N -- all follow same pattern)".
+This is the core of the new plan format. Group intents by their parent CR and
+present each CR with its business context, evidence, implementation details,
+and validation criteria.
 
 ```python
-for phase in phases:
-    plan_lines.append("")
-    dep_str = ""
-    if phase['depends_on_phases']:
-        deps = ', '.join(str(p) for p in phase['depends_on_phases'])
-        dep_str = f", depends on Phase {deps}"
+plan_lines.append("## Plan By Change Request")
+plan_lines.append("")
 
-    intents_str = ', '.join(phase['intents'])
-    plan_lines.append(
-        f"Phase {phase['phase']}: {phase['title']} ({intents_str}) "
-        f"[{phase['capability']}{dep_str}]"
-    )
+# Group intents by CR
+intents_by_cr = {}
+for intent_id, intent in intent_map.items():
+    cr_id = intent['cr']
+    intents_by_cr.setdefault(cr_id, []).append(intent)
 
-    for intent_id in phase['intents']:
-        intent = intent_map[intent_id]
+# Sort CRs by ID for consistent ordering
+for cr_id in sorted(intents_by_cr.keys()):
+    cr_intents = intents_by_cr[cr_id]
+    cr_info = cr_map.get(cr_id, {})
+    cr_title = cr_intents[0]['title']  # Use first intent's title as fallback
 
-        plan_lines.append(f"  File: {intent['target_file']}")
+    plan_lines.append(f"### {cr_id.upper()}: {cr_info.get('title', cr_title)}")
+
+    # What the ticket is asking (from ticket understanding + CR context)
+    plan_lines.append(f"**What the ticket is asking:** {cr_info.get('source_text', cr_title)}")
+
+    # Evidence trail
+    evidence_parts = []
+    if cr_info.get('source_text'):
+        evidence_parts.append(f"Source: \"{cr_info['source_text']}\"")
+    if cr_info.get('source_location'):
+        evidence_parts.append(f"Location: {cr_info['source_location']}")
+    # Also check intent-level evidence_refs (carried from Decomposer)
+    all_refs = set()
+    for intent in cr_intents:
+        for ref in intent.get('evidence_refs', []):
+            all_refs.add(ref)
+    if all_refs:
+        evidence_parts.append(f"Refs: {', '.join(sorted(all_refs))}")
+    if evidence_parts:
+        plan_lines.append(f"**Evidence:** {'; '.join(evidence_parts)}")
+    else:
+        plan_lines.append("**Evidence:** *(no evidence trail available)*")
+
+    # Implementation details -- each intent as a phase
+    plan_lines.append("**Implementation:**")
+    for intent in cr_intents:
+        intent_id = intent['id']
+        # Find which phase this intent belongs to
+        intent_phase = None
+        for phase in phases:
+            if intent_id in phase['intents']:
+                intent_phase = phase['phase']
+                break
+
+        dep_str = ""
+        if intent.get('depends_on'):
+            dep_str = f" (depends on {', '.join(intent['depends_on'])})"
+
+        plan_lines.append(f"  Phase {intent_phase}: {intent['title']} ({intent_id}) [{intent['capability']}{dep_str}]")
+        plan_lines.append(f"    File: {intent['target_file']}")
         if intent.get('function'):
-            plan_lines.append(f"  Function: {intent['function']}()")
+            plan_lines.append(f"    Function: {intent['function']}()")
 
+        # Delegate to capability-specific detail writers
         if intent['capability'] == 'value_editing':
             write_value_editing_details(plan_lines, intent, use_simple)
         elif intent['capability'] in ('structure_insertion', 'file_creation'):
@@ -1793,64 +2016,167 @@ for phase in phases:
 
         # Show warnings for this intent
         if not intent.get('developer_confirmed', True):
-            plan_lines.append("")
-            plan_lines.append(f"  *** WARNING: Targets NOT confirmed by developer ***")
-            plan_lines.append(f"  *** Review before approving ***")
-
+            plan_lines.append(f"    *** WARNING: Targets NOT confirmed by developer ***")
         if intent.get('has_expressions'):
-            plan_lines.append("")
-            plan_lines.append(f"  *** NOTE: Array6 arguments contain arithmetic expressions ***")
-            plan_lines.append(f"  *** Expressions will be evaluated before modification ***")
+            plan_lines.append(f"    *** NOTE: Array6 arguments contain arithmetic expressions ***")
+
+    # Validation criteria (done_when from intents)
+    done_whens = [intent.get('done_when', '') for intent in cr_intents if intent.get('done_when')]
+    if done_whens:
+        plan_lines.append(f"**Validation:** {'; '.join(done_whens)}")
+    else:
+        plan_lines.append(f"**Validation:** Verify values match before/after previews above")
+
+    # Risks and assumptions
+    all_assumptions = []
+    for intent in cr_intents:
+        all_assumptions.extend(intent.get('assumptions', []))
+    risk_notes = []
+    if any(not intent.get('developer_confirmed', True) for intent in cr_intents):
+        risk_notes.append("Targets not confirmed by developer")
+    if any(intent.get('has_expressions') for intent in cr_intents):
+        risk_notes.append("Array6 arguments contain arithmetic expressions")
+    if cr_info.get('ambiguity_flag'):
+        risk_notes.append(f"Ambiguity: {cr_info.get('ambiguity_note', 'flagged')}")
+
+    combined = all_assumptions + risk_notes
+    if combined:
+        plan_lines.append(f"**Risks/Assumptions:** {'; '.join(combined)}")
+    else:
+        plan_lines.append(f"**Risks/Assumptions:** None identified")
+
+    plan_lines.append("")
 ```
 
-10.6. Write the impact summary and footer (COMPLEX format):
+10.7. Write the "Out of Scope" section (if any):
+
+```python
+if out_of_scope:
+    plan_lines.append("## Out of Scope")
+    for oos in out_of_scope:
+        plan_lines.append(f"- **{oos['cr'].upper()}:** {oos['title']}")
+        plan_lines.append(f"  Reason: {oos['reason']}")
+    plan_lines.append("")
+```
+
+10.8. Write the "Execution Order" section (COMPLEX only or when dependencies exist):
+
+```python
+has_dependencies = any(
+    intent.get('depends_on') for intent in intent_map.values()
+)
+
+if not use_simple or has_dependencies:
+    plan_lines.append("## Execution Order")
+
+    # File copies always first
+    if files_to_copy:
+        plan_lines.append("**Phase 0: File Copies**")
+        for fc in files_to_copy:
+            src_name = fc['source'].split('/')[-1]
+            tgt_name = fc['target'].split('/')[-1]
+            plan_lines.append(f"  {src_name} -> {tgt_name}")
+            if fc.get('shared_by'):
+                plan_lines.append(f"    Shared by: {', '.join(fc['shared_by'])}")
+            plan_lines.append(f"    .vbproj updates: {len(fc['vbproj_updates'])} file(s)")
+
+    # Phase ordering with rationale
+    for phase in phases:
+        intents_str = ', '.join(phase['intents'])
+        dep_str = ""
+        if phase.get('depends_on_phases'):
+            dep_str = f" -- depends on Phase(s) {', '.join(str(p) for p in phase['depends_on_phases'])}"
+        plan_lines.append(
+            f"**Phase {phase['phase']}:** {phase['title']} ({intents_str}){dep_str}"
+        )
+        plan_lines.append(f"  Rationale: {phase.get('rationale', 'N/A')}")
+    plan_lines.append("")
+elif files_to_copy:
+    # SIMPLE format: still show file copies compactly
+    plan_lines.append("## File Copies")
+    for fc in files_to_copy:
+        src_name = fc['source'].split('/')[-1]
+        tgt_name = fc['target'].split('/')[-1]
+        plan_lines.append(f"  {src_name} -> {tgt_name}")
+        if fc.get('shared_by'):
+            plan_lines.append(f"    Shared by: {', '.join(fc['shared_by'])}")
+        plan_lines.append(f"    .vbproj updates: {len(fc['vbproj_updates'])} file(s)")
+    plan_lines.append("")
+```
+
+10.9. Write the "Impact Summary" section:
+
+```python
+plan_lines.append("## Impact Summary")
+plan_lines.append(f"- Files to copy: {len(files_to_copy)}")
+plan_lines.append(f"- Files to modify: {len(unique_files)}")
+plan_lines.append(f"- .vbproj updates: {total_vbproj_updates}")
+shared_lobs = set()
+for fc in files_to_copy:
+    shared_lobs.update(fc.get('shared_by', []))
+if shared_lobs:
+    plan_lines.append(f"- Shared module blast radius: {', '.join(sorted(shared_lobs))}")
+if all_pct_changes:
+    plan_lines.append(f"- Value change range: {min_pct:+.1f}% to {max_pct:+.1f}%")
+plan_lines.append(f"- Risk level: {risk_level}")
+for reason in risk_reasons:
+    plan_lines.append(f"  - {reason}")
+plan_lines.append("")
+```
+
+10.10. Write the "Context Tiers" section (COMPLEX format only):
 
 ```python
 if not use_simple:
-    plan_lines.append("")
-    plan_lines.append("IMPACT SUMMARY:")
-    plan_lines.append(f"  Total value changes: {total_value_changes}")
-    plan_lines.append(f"  Total files modified: {len(unique_files)}")
-    plan_lines.append(f"  Total file copies: {len(files_to_copy)}")
-    plan_lines.append(f"  Total .vbproj updates: {total_vbproj_updates}")
-    plan_lines.append(f"  Risk level: {risk_level}")
-    for reason in risk_reasons:
-        plan_lines.append(f"    - {reason}")
-    if all_pct_changes:
-        plan_lines.append(f"  Value change range: {min_pct:+.1f}% to {max_pct:+.1f}%")
-
-    # Context tiers (from Step 9.5)
-    plan_lines.append("")
-    plan_lines.append("CONTEXT TIERS:")
+    plan_lines.append("## Context Tiers")
     plan_lines.append(f"  Tier 1 (value substitution):  {tier_distribution['tier_1']} intents")
     plan_lines.append(f"  Tier 2 (logic with patterns): {tier_distribution['tier_2']} intents")
     plan_lines.append(f"  Tier 3 (full context):        {tier_distribution['tier_3']} intents")
-
-    # Warnings section
-    warnings = collect_warnings(intent_map)
-    if warnings:
-        plan_lines.append("")
-        plan_lines.append("WARNINGS:")
-        for w in warnings:
-            plan_lines.append(f"  {w}")
-
-    # Partial approval constraints
-    if partial_approval_constraints:
-        plan_lines.append("")
-        plan_lines.append("PARTIAL APPROVAL CONSTRAINTS:")
-        plan_lines.append("  The following SRDs are coupled by dependencies:")
-        for pac in partial_approval_constraints:
-            plan_lines.append(
-                f"  - {pac['cr'].upper()} requires {pac['requires_cr'].upper()}: "
-                f"{pac['reason']}"
-            )
-        plan_lines.append("  Rejecting a required CR will also block the dependent CR.")
-
-plan_lines.append("")
-plan_lines.append("Approve this plan? Say \"approve\" to proceed or tell me what to change.")
+    plan_lines.append("")
 ```
 
-10.7. Write to `plan/execution_plan.md`:
+10.11. Write the "Warnings" section (if any):
+
+```python
+warnings = collect_warnings(intent_map)
+if warnings:
+    plan_lines.append("## Warnings")
+    for w in warnings:
+        plan_lines.append(f"- {w}")
+    plan_lines.append("")
+```
+
+10.12. Write the "Partial Approval Constraints" section (if any):
+
+```python
+if partial_approval_constraints:
+    plan_lines.append("## Partial Approval Constraints")
+    plan_lines.append("The following CRs are coupled by dependencies:")
+    for pac in partial_approval_constraints:
+        plan_lines.append(
+            f"- {pac['cr'].upper()} requires {pac['requires_cr'].upper()}: "
+            f"{pac['reason']}"
+        )
+    plan_lines.append("Rejecting a required CR will also block the dependent CR.")
+    plan_lines.append("")
+```
+
+10.13. Write the "Approval" footer:
+
+```python
+plan_lines.append("## Approval")
+if plan_is_draft:
+    plan_lines.append("**This plan is a DRAFT.** Blocking questions must be resolved before approval.")
+    plan_lines.append("Answer the blocking questions above, then re-run /iq-plan.")
+else:
+    plan_lines.append("Approving this plan means you agree with BOTH:")
+    plan_lines.append("1. The business interpretation (what we're changing and why)")
+    plan_lines.append("2. The code implementation (how we're making the changes)")
+    plan_lines.append("")
+    plan_lines.append("Approve, reject, or ask questions.")
+```
+
+10.14. Write to `plan/execution_plan.md`:
 
 ```python
 plan_dir = f"{workstream_path}/plan"
@@ -2000,6 +2326,7 @@ execution_order = {
     'planner_version': '2.0',
     'generated_at': now_iso8601(),
     'workflow_id': workflow_id,
+    'plan_status': 'draft' if plan_is_draft else 'approved',  # "draft" blocks Gate 1 approval
     'total_phases': len(phases),
     'total_intents': len(intent_map),
     'total_value_changes': total_value_changes,

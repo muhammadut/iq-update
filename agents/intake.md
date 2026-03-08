@@ -56,6 +56,17 @@ shared_modules:
 
 ## Output Schema
 
+### Ticket Understanding (from Step 0)
+
+```markdown
+# File: parsed/ticket_understanding.md
+# Human-readable ticket comprehension document.
+# Written BEFORE CR extraction. Confirmed by developer.
+# See Step 0.3 for full structure.
+```
+
+### Change Requests (from Steps 3-6)
+
 ```yaml
 # File: parsed/change_requests.yaml
 carrier: "Portage Mutual"
@@ -202,28 +213,218 @@ If any of these are missing, STOP and report:
          Was /iq-init run? Is the workstream set up via /iq-plan?
 ```
 
+### Step 0: Deep Ticket Comprehension (MANDATORY for ADO tickets)
+
+**Purpose:** Before extracting structured change requests, demonstrate a thorough
+understanding of the ticket. This step reads EVERYTHING — full description, ALL
+comments, ALL image attachments — and presents a human-readable understanding
+document for the developer to confirm. This catches misunderstandings BEFORE the
+pipeline wastes time extracting the wrong CRs.
+
+**When to run this step:**
+- **ADO tickets (auto-fetched):** ALWAYS run. The full ticket data is available.
+- **Pasted text / manual input:** Run a LIGHTER version (no comment/attachment
+  scanning, but still present the understanding for confirmation).
+
+#### Step 0.1: Gather ALL Ticket Content
+
+**For auto-fetched ADO tickets:**
+
+The orchestrator has copied the full ticket data to `input/ticket-data/`. Read the
+FULL context, not the brief:
+
+1. Read `input/ticket-data/llm-context.md` (contains ALL comments, not just first 3).
+   If this file does not exist, fall back to `input/ticket-data/llm-context-brief.md`.
+   If neither exists, fall back to `input/source.md` and skip to Step 0.1c.
+
+2. Read `input/ticket-data/llm-context.json` to get structured comment data and
+   attachment metadata. This gives you:
+   - `ticket.markdown` — full ticket description
+   - `ticket.reproStepsMarkdown` — repro steps (if present)
+   - `comments[]` — ALL comments, each with `.author`, `.createdDate`, `.markdown`
+   - `attachments[]` — list of downloaded attachments with `.localPath`
+
+3. **Read ALL image attachments:** Scan `input/ticket-data/attachments/` for image
+   files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.tiff`). For EACH image found,
+   use the Read tool to view the image. Claude Code is multimodal — it can see and
+   interpret screenshots, rate tables, annotated diagrams, and Excel/PDF screenshots.
+
+   For each image, extract:
+   - What the image shows (screenshot of a UI, rate table, error message, etc.)
+   - Any rate values, numbers, or data visible in the image
+   - Any annotations, highlights, or circled areas
+   - How this image relates to the ticket description
+
+   **Image interpretation is CRITICAL.** Actuarial tickets frequently include:
+   - Screenshots of rate comparison spreadsheets (old vs new values)
+   - Screenshots of the IntelliQuote UI showing incorrect behavior
+   - Scanned or photographed paper rate schedules
+   - Annotated screenshots highlighting what needs to change
+
+**For pasted text / manual input (Step 0.1c):**
+
+Read `input/source.md`. If `input/attachments/` has image files, read those too.
+
+#### Step 0.2: Synthesize Understanding
+
+Analyze ALL gathered content and produce a comprehensive understanding document.
+Think step-by-step about:
+
+1. **What is the ticket actually asking for?** Read the description AND the comments.
+   Comments often contain:
+   - Clarifications that change or refine the original description
+   - Corrections to values in the description
+   - Additional requirements added after the ticket was created
+   - Developer discussions that reveal the real intent behind vague descriptions
+   - Links to actuarial memos or rate filings with the actual numbers
+
+2. **What do the images/screenshots reveal?** Screenshots often contain the most
+   precise information — exact values, column headers, row labels that tell you
+   which functions and territories are affected.
+
+3. **What is the business context?** Why is this change being made? Regulatory
+   filing? Competitive adjustment? Bug fix? This context helps downstream agents
+   make better decisions about scope and approach.
+
+4. **What is the scope?** Which provinces, LOBs, effective dates are affected?
+   Sometimes the ticket description says one thing but comments narrow or expand
+   the scope.
+
+5. **Are there contradictions?** Description says X but a comment says Y. The
+   most RECENT comment or the most senior person's comment usually wins, but
+   flag contradictions for the developer.
+
+#### Step 0.3: Write Ticket Understanding Document
+
+Write `parsed/ticket_understanding.md` with this structure:
+
+```markdown
+# Ticket Understanding: {ticket_ref or "Ad-hoc Request"}
+
+## Problem Statement
+{2-4 sentences describing what the ticket is asking for, written in plain language.
+This should be understandable by someone who hasn't read the ticket.}
+
+## Evidence Summary
+
+### From Ticket Description
+{Key points extracted from the ticket description. Quote specific values,
+percentages, and dollar amounts directly from the text.}
+
+### From Comments ({N} total)
+{Key findings from reading ALL comments. Highlight:
+- Corrections or clarifications to the original description
+- Additional requirements not in the original description
+- Developer discussions that reveal intent
+- The most recent relevant comment (often has the final word)
+Quote specific comments with attribution: "John Smith (2026-01-15): ..."}
+
+### From Screenshots/Images ({N} found)
+{What each image shows and what data was extracted from it.
+For rate tables: list the extracted values.
+For UI screenshots: describe what the screenshot shows.
+If no images: "No image attachments found."}
+
+## Inferred Changes
+{Based on ALL evidence (description + comments + images), here is what
+I believe needs to change:
+
+1. **{Change description}** — {evidence source: "per ticket description" or
+   "per comment by X on date Y" or "per screenshot showing Z"}
+   - Specific values: {old → new, or percentage, or new values}
+   - Scope: {all territories / specific territories / specific LOBs}
+
+2. **{Change description}** — ...
+   ...
+}
+
+## Ambiguities & Open Questions
+{Things that are unclear or contradictory. Things the developer needs to
+clarify before we can proceed. If none: "None — the ticket is clear."}
+
+## Confidence Assessment
+{HIGH / MEDIUM / LOW}
+{Brief explanation of confidence level. HIGH = ticket is clear, values are
+explicit, no contradictions. MEDIUM = most things clear but some gaps.
+LOW = significant ambiguity or missing information.}
+```
+
+#### Step 0.4: Present Understanding to Developer
+
+Present the ticket understanding document to the developer:
+
+```
+[Intake] TICKET UNDERSTANDING
+=================================
+
+{Full content of parsed/ticket_understanding.md}
+
+=================================
+
+Does this match your understanding of the ticket?
+  - "yes" / "correct" → I'll proceed to extract structured change requests
+  - Tell me what I got wrong → I'll update my understanding
+  - "show me comment N" → I'll show you the full comment text
+```
+
+**Wait for developer confirmation.** The developer may:
+- **Confirm:** "yes" / "looks right" / "correct" → proceed to Step 1
+- **Correct:** "No, the ticket is actually about X" or "You missed the part
+  about Y" or "Comment 5 supersedes the description" → update the understanding
+  document, re-present, wait for confirmation again
+- **Add context:** "Also, the actuary mentioned Z in a meeting" → incorporate
+  and re-present
+- **Ask to see more:** "Show me all the comments" or "What does image 3 show?"
+  → display the requested content, return to confirmation prompt
+
+**CRITICAL:** Do NOT proceed to Step 1 until the developer confirms the
+understanding is correct. This is the most important checkpoint in the pipeline.
+
+#### Step 0.5: Save Confirmed Understanding
+
+Once the developer confirms:
+1. Update `parsed/ticket_understanding.md` with any corrections (mark as confirmed)
+2. Append `\n\n## Developer Confirmation\nConfirmed by developer at {timestamp}.\n`
+   and any corrections or additional context they provided.
+3. Proceed to Step 1 using the CONFIRMED understanding to guide CR extraction.
+
+**For subsequent steps:** When extracting CRs in Steps 3-4, reference the confirmed
+ticket understanding. If the understanding says "3% increase per comment by John"
+but the raw text says "5%", use the confirmed understanding (the developer agreed
+that 3% is correct).
+
+---
+
 ### Step 1: Receive and Record the Raw Input
 
 **Action:** Accept the developer's description of changes. Any format.
 
+**NOTE:** If Step 0 ran (ADO ticket), the raw input is already saved and the ticket
+understanding is confirmed. Step 1 ensures the raw input is recorded in `source.md`
+and extracts the ticket reference. For non-ADO inputs, this is where the raw text
+is first captured.
+
 1.1. The input arrives in one of these ways:
    - **Conversational:** The developer types or pastes the changes directly into the chat
    - **File-based:** The developer says "I pasted it in input/" — read `.iq-workstreams/changes/{workstream}/input/source.md`
-   - **ADO ticket:** If the workstream key is numeric AND the orchestrator has already fetched the ticket
-     (using fetch-ticket.sh + .env from paths resolved by the orchestrator). Check for
-     `input/workitem-{id}-full/llm-context-brief.md` or `llm-context.md`
+   - **ADO ticket:** If the workstream key is numeric AND the orchestrator has already
+     fetched the ticket, the full ticket data is at `input/ticket-data/`. Read
+     `input/ticket-data/llm-context.md` for the full context (all comments, all
+     metadata). Fall back to `input/ticket-data/llm-context-brief.md` if the full
+     version is unavailable.
    - **Structured document:** PDF, Excel, or markdown with tables of values
    - **Image attachments:** Screenshots, scanned rate tables, annotated diagrams.
      Claude Code is multimodal — use the Read tool on image files (PNG, JPG, etc.)
      to extract rate values, annotations, or visual context. Common in actuarial
      tickets where rate tables are shared as screenshots rather than structured data.
 
-1.2. **Check for image attachments:** Scan `input/attachments/` for image files
-     (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.tiff`). If found, Read each image
-     to extract any rate values, table data, or annotations. Incorporate extracted
-     information into the change request parsing. If an image contains a rate table,
-     treat the extracted values as structured input alongside the text description.
-     If an image is decorative or not relevant to rate changes, note it and move on.
+1.2. **Check for image attachments:** Scan `input/attachments/` AND
+     `input/ticket-data/attachments/` for image files (`.png`, `.jpg`, `.jpeg`,
+     `.gif`, `.bmp`, `.tiff`). If found, Read each image to extract any rate values,
+     table data, or annotations. Incorporate extracted information into the change
+     request parsing. If an image contains a rate table, treat the extracted values
+     as structured input alongside the text description. If an image is decorative
+     or not relevant to rate changes, note it and move on.
 
 1.3. Save the raw input text to `input/source.md` in the workflow directory. If the
      developer provided it conversationally, write it now. If it was already in
@@ -534,7 +735,8 @@ Set `ambiguity_flag: true` when:
 
 ### Step 5: Present the Parsed Results to the Developer
 
-**Action:** Show a formatted summary for confirmation.
+**Action:** Show a formatted summary for confirmation. Connect each CR back to the
+ticket understanding so the developer can see the traceability.
 
 5.1. Present in this format:
 
@@ -544,23 +746,35 @@ Set `ambiguity_flag: true` when:
   CR-001: "Increase liability premiums by 3%" (SIMPLE)
           → 3% multiplier across all territories
           → Glossary match: GetLiabilityBundlePremiums
+          → Source: {where this came from — e.g., "ticket description, item 2"
+            or "comment by John Smith on 2026-01-15" or "screenshot showing
+            rate comparison table"}
 
   CR-002: "Change $5000 deductible factor from -0.20 to -0.22" (SIMPLE)
           → Explicit old→new value replacement
+          → Source: {evidence trail}
 
   CR-003: "[DAT FILE] Increase dwelling base rates by 5%" (SIMPLE)
           *** OUT OF SCOPE: Hab dwelling base rates are in DAT files ***
+          → Source: {evidence trail}
 
   CR-004: "Add $50,000 sewer backup coverage tier" (MEDIUM)
           → Premium amount not specified — will ask during planning
+          → Source: {evidence trail}
           ⚠ ambiguity: missing premium value
 
   Totals: 4 requests (2 SIMPLE, 1 MEDIUM, 0 COMPLEX)
           1 DAT-file warning (CR-003)
           1 ambiguity (CR-004 — missing premium)
 
+  Traceability: All CRs trace back to the confirmed ticket understanding above.
   Does this look correct? I'll proceed to write the change spec.
 ```
+
+**Traceability rule:** Every CR MUST have a `source_location` that points back to
+the specific evidence in the ticket (description line, comment ID, image filename).
+If a CR cannot be traced to evidence, flag it as `confidence: low` and explain why
+you think this change is needed.
 
 5.2. **Wait for developer confirmation.** The developer may:
 - **Confirm:** "yes" / "looks good" → go to Step 6
@@ -600,7 +814,8 @@ change request), with the full per-request schema.
 ### Step 7: Report Completion
 
 ```
-[Intake] COMPLETE. Wrote {N} change requests to parsed/.
+[Intake] COMPLETE.
+         - ticket_understanding.md (confirmed by developer)
          - change_requests.yaml (master spec)
          - requests/cr-001.yaml through cr-{N}.yaml
          - {M} out-of-scope (DAT file)

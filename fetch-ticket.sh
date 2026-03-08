@@ -189,6 +189,7 @@ fetch_linked_workitems() {
 build_attachment_manifest() {
   local relation_manifest="${RAW_DIR}/relation-attachments.tsv"
   local comment_manifest="${RAW_DIR}/comment-attachments.tsv"
+  local description_manifest="${RAW_DIR}/description-attachments.tsv"
   local merged_manifest="$1"
 
   jq -r '
@@ -208,12 +209,37 @@ build_attachment_manifest() {
     .comments[]?.text // ""
     | gsub("&amp;"; "&")
     | scan("https://[^\"< ]+/_apis/wit/attachments/[^\"< ]+")
-    | ["comment", "embedded-attachment", (if contains("download=true") then . else . + (if contains("?") then "&" else "?" end) + "download=true" end)]
+    | ["comment_image", "embedded-attachment", (if contains("download=true") then . else . + (if contains("?") then "&" else "?" end) + "download=true" end)]
     | @tsv
   ' "${RAW_DIR}/comments.json" | tr -d '\r' | sort -u >"$comment_manifest"
 
-  if [ -s "$relation_manifest" ] && [ -s "$comment_manifest" ]; then
-    cat "$relation_manifest" "$comment_manifest" \
+  # Fix 1: Extract images embedded in Description and ReproSteps HTML fields
+  jq -r '
+    def extract_image_urls(field_name; source_label):
+      (.fields[field_name] // "")
+      | gsub("&amp;"; "&") as $html
+      | (
+          [ $html | scan("https://[^\"< ]+/_apis/wit/attachments/[^\"< ]+") ]
+          + [ $html | scan("src=\"(https://[^\"]+)\"") | .[0] ]
+        )
+      | map(select(. != null and length > 0 and test("https://")))
+      | unique
+      | .[]
+      | [source_label, "embedded-attachment", (if contains("download=true") then . else . + (if contains("?") then "&" else "?" end) + "download=true" end)]
+      | @tsv;
+
+    (extract_image_urls("System.Description"; "description_image")),
+    (extract_image_urls("Microsoft.VSTS.TCM.ReproSteps"; "repro_image"))
+  ' "${RAW_DIR}/workitem.json" | tr -d '\r' | sort -u >"$description_manifest"
+
+  # Merge all manifests with dedup by attachment GUID
+  local all_manifests=()
+  [ -s "$relation_manifest" ] && all_manifests+=("$relation_manifest")
+  [ -s "$comment_manifest" ] && all_manifests+=("$comment_manifest")
+  [ -s "$description_manifest" ] && all_manifests+=("$description_manifest")
+
+  if [ ${#all_manifests[@]} -gt 0 ]; then
+    cat "${all_manifests[@]}" \
       | awk -F'\t' '
           function attachment_key(url, key) {
             key = url
@@ -229,10 +255,6 @@ build_attachment_manifest() {
             }
           }
         ' >"$merged_manifest"
-  elif [ -s "$relation_manifest" ]; then
-    cp "$relation_manifest" "$merged_manifest"
-  elif [ -s "$comment_manifest" ]; then
-    cp "$comment_manifest" "$merged_manifest"
   else
     : >"$merged_manifest"
   fi
@@ -265,12 +287,21 @@ download_attachments() {
     local local_file="${index}-${local_name}"
     local local_path="${ATTACH_DIR}/${local_file}"
 
+    # Fix 2: Extract attachment_id (GUID) from the URL path
+    local attachment_id=""
+    attachment_id="$(printf '%s\n' "$url" | sed -nE 's#.*/_apis/wit/attachments/([0-9a-fA-F-]+).*#\1#p')"
+
+    # Fix 2: Map source to origin_kind
+    local origin_kind="$source"
+
     if curl -fSs -u ":$ADO_PAT" "$url" -o "$local_path"; then
       local size
       size="$(wc -c <"$local_path" | tr -d ' ')"
       jq -n \
         --argjson index "$index" \
         --arg source "$source" \
+        --arg origin_kind "$origin_kind" \
+        --arg attachment_id "$attachment_id" \
         --arg name "$display_name" \
         --arg downloadUrl "$url" \
         --arg localPath "attachments/${local_file}" \
@@ -279,6 +310,8 @@ download_attachments() {
         '{
           index: $index,
           source: $source,
+          origin_kind: $origin_kind,
+          attachment_id: $attachment_id,
           name: $name,
           downloadUrl: $downloadUrl,
           localPath: $localPath,
@@ -290,6 +323,8 @@ download_attachments() {
       jq -n \
         --argjson index "$index" \
         --arg source "$source" \
+        --arg origin_kind "$origin_kind" \
+        --arg attachment_id "$attachment_id" \
         --arg name "$display_name" \
         --arg downloadUrl "$url" \
         --arg localPath "" \
@@ -297,6 +332,8 @@ download_attachments() {
         '{
           index: $index,
           source: $source,
+          origin_kind: $origin_kind,
+          attachment_id: $attachment_id,
           name: $name,
           downloadUrl: $downloadUrl,
           localPath: $localPath,
@@ -351,6 +388,14 @@ build_llm_context() {
       | gsub("(?i)</i>"; "_")
       | gsub("(?i)<u[^>]*>"; "")
       | gsub("(?i)</u>"; "")
+      | gsub("(?i)<table[^>]*>"; "\n")
+      | gsub("(?i)</table>"; "\n")
+      | gsub("(?i)<tr[^>]*>"; "\n| ")
+      | gsub("(?i)</tr>"; " |")
+      | gsub("(?i)<t[dh][^>]*>"; " | ")
+      | gsub("(?i)</t[dh]>"; "")
+      | gsub("(?i)</?thead[^>]*>"; "")
+      | gsub("(?i)</?tbody[^>]*>"; "")
       | gsub("(?i)<[^>]+>"; "")
       | gsub("&nbsp;"; " ")
       | gsub("&amp;"; "&")
@@ -392,12 +437,14 @@ build_llm_context() {
       ),
       attachments: (
         [.attachments[]?
-          | select(.status == "downloaded")
           | {
             index: .index,
             name: .name,
             source: .source,
+            origin_kind: .origin_kind,
+            attachment_id: .attachment_id,
             localPath: .localPath,
+            status: .status,
             sizeBytes: .sizeBytes
           }
         ]
@@ -440,9 +487,14 @@ build_llm_context() {
         else (
           .attachments
           | map(
-              "- \(.name) (`\(.localPath)`; source: \(.source)"
-              + (if (.sizeBytes != null) then "; size: \(.sizeBytes) bytes" else "" end)
-              + ")"
+              if .status == "downloaded" then
+                "- \(.name) (`\(.localPath)`; origin: \(.origin_kind)"
+                + (if (.attachment_id != null and .attachment_id != "") then "; id: \(.attachment_id)" else "" end)
+                + (if (.sizeBytes != null) then "; size: \(.sizeBytes) bytes" else "" end)
+                + ")"
+              else
+                "- **[FAILED]** \(.name) (origin: \(.origin_kind); download failed)"
+              end
             )
           | join("\n")
         ) + "\n"
@@ -488,10 +540,22 @@ build_llm_brief() {
         if (.attachments | length) == 0
         then "_None_\n"
         else (
-          .attachments
-          | map("- \(.name) (`\(.localPath)`)")
-          | join("\n")
-        ) + "\n"
+          (.attachments | map(select(.status == "downloaded"))) as $ok
+          | (.attachments | map(select(.status != "downloaded"))) as $failed
+          | (
+              if ($ok | length) > 0 then
+                ($ok | map("- \(.name) (`\(.localPath)`)") | join("\n")) + "\n"
+              else ""
+              end
+            )
+          + (
+              if ($failed | length) > 0 then
+                "\n**Warning:** \($failed | length) attachment(s) failed to download:\n"
+                + ($failed | map("- **[FAILED]** \(.name)") | join("\n")) + "\n"
+              else ""
+              end
+            )
+        )
         end
       )
     + "\n---\n_Full ticket with all \(.comments | length) comments available in llm-context.md_\n"
