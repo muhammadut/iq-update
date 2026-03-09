@@ -1404,7 +1404,34 @@ The Planner has NO developer interaction — it is fully automated.
       After re-run, re-validate. If still missing after 2 re-runs (i.e., the Analyzer
       has now run 3 times total), present the error to the developer and ask how to proceed.
    d. If all Code/ file dates match the target date (or files_to_copy.yaml is
-      complete), proceed to step 4.
+      complete), proceed to step 3b.
+
+3b. **PRE-GATE-1 VALIDATION — Symbol Reference Check:**
+
+   Scan the Planner's output for any code snippets that introduce NEW symbol
+   references (constants, enums, `Cssi.ResourcesConstants.*` values) that don't
+   appear in the original code. This catches hallucinated API references before
+   the developer sees them.
+
+   a. Read `plan/execution_order.yaml`. For each intent that has action
+      descriptions or code snippets, extract any fully-qualified references
+      (e.g., `Cssi.ResourcesConstants.MappingCodes.DISCOUNT_ALLPERILS`,
+      `ResourcesConstants.*`, or all-caps constant names like `DISCOUNT_*`).
+   b. For each extracted symbol, check if it exists in the intent's source file
+      (the file being modified) using Grep. Also check `ResourceID.vb` files
+      in the target version folder.
+   c. If a symbol is NOT found anywhere in the codebase:
+      ```
+      WARNING: Unresolved symbol in plan — may be hallucinated:
+        {symbol_name} (in intent {intent_id})
+        Not found in source file or ResourceID.vb.
+        The Planner may have extrapolated this from a pattern in the file.
+
+      Review this carefully at Gate 1.
+      ```
+      Add the warning to `plan/execution_plan.md` in the Warnings section.
+      Do NOT block Gate 1 — the developer may confirm it's valid. But surface
+      it prominently.
 
 4. Validation passed. Update manifest: `state: "PLANNED"`, `updated_at: "{now}"`.
 

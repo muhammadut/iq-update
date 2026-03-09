@@ -3489,6 +3489,23 @@ Write no output files. The orchestrator must re-run the full pipeline.
     execution sequence.
 16. **Carry forward partial approval constraints:** Copy from intent_graph.yaml
     into execution_order.yaml and show in execution_plan.md.
+17. **NEVER invent API references.** Every function call, constant, enum value,
+    and `Cssi.ResourcesConstants.*` reference in plan output (action descriptions,
+    code snippets, before/after previews) MUST trace back to one of:
+    - An existing line in the source file (copy from discovered code)
+    - An explicit instruction from the intent/decomposer
+    - A value the developer provided in `developer_decisions`
+
+    If the Planner observes a pattern in the file (e.g., every `AddToArray` is
+    paired with `AddToDiscountArray`) and wants to replicate it for new code,
+    it MUST flag this as an `open_question` for the developer to confirm at
+    Gate 1 — NOT silently add it. Pattern extrapolation is a hallucination risk.
+
+    **Caller vs library responsibility:** When a library function is called
+    (e.g., `oIQCommon.AddPolicyTermToPPVCoverageArray`), do NOT assume the
+    caller needs to replicate behavior that the library handles internally.
+    If the original code did not have a matching caller-side call, the plan
+    should not add one.
 
 ---
 

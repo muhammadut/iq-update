@@ -952,6 +952,26 @@ Files in `config.yaml["cross_province_shared_files"]` (e.g., `Code/PORTCommonHea
 are shared across provinces. These are NEVER auto-modified — flag for developer
 review instead.
 
+### Rule 15: Never Apply Unverified Constants or API References
+
+Before applying any edit that introduces a new constant, enum value, or
+`Cssi.ResourcesConstants.*` reference (i.e., a symbol that does NOT appear in the
+`old_string` / before-code), the worker MUST verify the symbol exists in the
+codebase by grepping for it. If zero matches are found:
+
+1. Do NOT apply the edit
+2. Mark the intent result as `status: "needs_review"`
+3. Report: `"Unresolved symbol: {symbol_name} — not found in codebase. Skipping edit."`
+
+This prevents build-breaking errors from fabricated constants. The Planner or
+upstream agents may have hallucinated a symbol by pattern extrapolation (e.g.,
+observing `DISCOUNT_ANTITHEFTDEVICE` and inventing `DISCOUNT_ALLPERILS`).
+
+**What to grep for:** Extract any `Cssi.ResourcesConstants.MappingCodes.*` or
+fully-qualified enum references from the new code. Search the carrier root and
+Hub/ directory for each symbol. A valid symbol will appear in at least one
+`ResourceID.vb`, `Constants.vb`, or shared class file.
+
 ---
 
 ## SHARED HELPER FUNCTIONS
