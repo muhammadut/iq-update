@@ -513,8 +513,8 @@ build_llm_brief() {
     |
     # Strip base64 data URIs from markdown (they bloat context)
     def strip_base64:
-      gsub("!\\[image\\]\\(data:image/[^)]+\\)"; "[inline image removed]")
-      | gsub("!\\[image\\]\\(https://[^)]+\\)"; "[screenshot]");
+      gsub("!\\[[^\\]]*\\]\\(data:image/[^)]+\\)"; "[inline image removed]")
+      | gsub("!\\[[^\\]]*\\]\\(https://[^)]+\\)"; "[screenshot]");
 
     "# Work Item \(.ticket.id): \(.ticket.title)\n\n"
     + "- Type: \(.ticket.type)\n"
@@ -684,68 +684,73 @@ extract_and_strip_base64() {
     return 0
   fi
 
-  # Step 1: Extract each base64 image to a file using python.
-  # Produces: attachments/inline-1.png, inline-2.png, etc.
+  # Combined: Extract base64 images to files AND strip from markdown in one pass.
+  # Uses a non-greedy match up to the closing paren to avoid catastrophic backtracking
+  # on 50K+ character base64 strings.
   $pycmd -c "
 import re, base64, sys, os
 
-md = open(sys.argv[1], 'r', encoding='utf-8').read()
+md_file = sys.argv[1]
 attach_dir = sys.argv[2]
-sed_lines = []
-idx = 0
 
-for m in re.finditer(r'!\[([^\]]*)\]\((data:image/(png|jpe?g|gif|bmp|webp);base64,([A-Za-z0-9+/=\s]+))\)', md):
-    idx += 1
-    alt = m.group(1)
-    ext = m.group(3)
-    if ext == 'jpeg':
-        ext = 'jpg'
-    b64 = m.group(4).replace('\n','').replace('\r','').replace(' ','')
-    fname = f'inline-{idx}.{ext}'
-    fpath = os.path.join(attach_dir, fname)
-    try:
-        with open(fpath, 'wb') as f:
-            f.write(base64.b64decode(b64))
-        print(f'  Saved {fname} ({os.path.getsize(fpath)} bytes)')
-    except Exception as e:
-        print(f'  Failed to save {fname}: {e}', file=sys.stderr)
-
-print(f'Extracted {idx} inline image(s)')
-" "$md_file" "$attach_dir" 2>&1
-
-  # Step 2: Strip base64 from markdown -- replace with local path references
-  $pycmd -c "
-import re, sys
-
-md = open(sys.argv[1], 'r', encoding='utf-8').read()
+md = open(md_file, 'r', encoding='utf-8').read()
 idx = [0]
 
-def replace_match(m):
+# Match ![any alt](data:image/TYPE;base64,DATA) — use non-greedy .*? won't work
+# because ) could be in base64. Instead, match the data URI prefix, then grab
+# everything up to the LAST ) on the same logical token. Since base64 doesn't
+# contain ), we can safely use [^)]+ for the data portion.
+pattern = r'!\[([^\]]*)\]\(data:image/(png|jpe?g|gif|bmp|webp);base64,([^)]+)\)'
+
+def extract_and_replace(m):
     idx[0] += 1
     alt = m.group(1)
-    ext = m.group(3)
+    ext = m.group(2)
     if ext == 'jpeg':
         ext = 'jpg'
-    return f'![{alt}](attachments/inline-{idx[0]}.{ext})'
+    b64 = m.group(3).strip()
+    fname = f'inline-{idx[0]}.{ext}'
+    fpath = os.path.join(attach_dir, fname)
+    try:
+        raw = base64.b64decode(b64)
+        with open(fpath, 'wb') as f:
+            f.write(raw)
+        print(f'  Saved {fname} ({len(raw)} bytes)')
+    except Exception as e:
+        print(f'  WARNING: Failed to decode {fname}: {e}', file=sys.stderr)
+    return f'![{alt}](attachments/{fname})'
 
-result = re.sub(
-    r'!\[([^\]]*)\]\(data:image/(png|jpe?g|gif|bmp|webp);base64,[A-Za-z0-9+/=\s]+\)',
-    replace_match,
-    md
-)
-with open(sys.argv[1], 'w', encoding='utf-8') as f:
+result = re.sub(pattern, extract_and_replace, md)
+
+with open(md_file, 'w', encoding='utf-8') as f:
     f.write(result)
-" "$md_file"
 
-  # Step 3: Strip base64 from JSON too
+print(f'Extracted {idx[0]} inline image(s)')
+" "$md_file" "$attach_dir" 2>&1
+
+  # Step 2: Strip base64 from JSON too (jq operates on the structured data)
   if [ -f "$json_file" ]; then
-    jq '
-      def strip_base64:
-        gsub("!\\[(?<alt>[^\\]]*)\\]\\(data:image/[^)]+\\)"; "![\\(.alt)](see attachments/ for extracted images)");
-      .ticket.markdown |= strip_base64
-      | .ticket.reproStepsMarkdown |= (if . then strip_base64 else . end)
-      | .comments |= map(.markdown |= strip_base64)
-    ' "$json_file" > "${json_file}.tmp" && mv "${json_file}.tmp" "$json_file"
+    $pycmd -c "
+import re, json, sys
+
+jf = sys.argv[1]
+data = json.load(open(jf, 'r', encoding='utf-8'))
+pattern = r'!\[[^\]]*\]\(data:image/[^;]+;base64,[^)]+\)'
+replacement = '![image](see attachments/ for extracted images)'
+
+def strip(obj, keys):
+    for k in keys:
+        if k in obj and isinstance(obj[k], str):
+            obj[k] = re.sub(pattern, replacement, obj[k])
+
+strip(data.get('ticket', {}), ['markdown', 'reproStepsMarkdown'])
+for c in data.get('comments', []):
+    strip(c, ['markdown'])
+
+with open(jf, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+print('  Stripped base64 from JSON')
+" "$json_file" 2>&1
   fi
 }
 
