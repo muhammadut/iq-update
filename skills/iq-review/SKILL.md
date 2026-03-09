@@ -416,9 +416,31 @@ Semantic Verification:
 ```
 
 **Semantic reasoning preview:** After validators, show the semantic verifier's
-reasoning for any MISMATCH intents. For MATCH intents, show a compact summary:
-`"✓ {matched} intents verified (arithmetic + structural checks passed)"`
-`"Full reasoning: verification/semantic_report.md"`
+reasoning INLINE for the developer. For value_editing intents with MATCH verdicts,
+show the arithmetic proof chain so the developer can see the verification was real:
+
+```
+Semantic Verification (per-intent proof):
+  intent-001 (CR-001): Multiply liability premiums by 1.03
+    Territory 1: Array6(233, 274, ...) x 1.03 = Array6(240, 282, ...) -- MATCH
+    Territory 2: Array6(198, 233, ...) x 1.03 = Array6(204, 240, ...) -- MATCH
+    ... ({N} territories verified)
+
+  intent-002 (CR-002): Change $5000 deductible factor
+    Case 5000: -0.20 -> -0.22 -- MATCH (exact value replacement)
+```
+
+For structure_insertion intents, show placement confirmation:
+```
+  intent-003 (CR-003): Add $50K sewer backup tier
+    Inserted after Case 25000 block, before Case Else -- MATCH
+    New Case 50000 block: 5 lines added -- structure verified
+```
+
+For MISMATCH intents, show the full reasoning chain with the discrepancy highlighted.
+
+Only fall back to the compact `"Full reasoning: verification/semantic_report.md"`
+for plans with 10+ intents where inline display would be overwhelming.
 
 **Inline diff preview:** After semantic results, show a summary of key changes inline
 (not just in the file). Read `verification/changes.diff` and display the first
@@ -488,7 +510,10 @@ fresh /iq-plan, or continue (cycle N+1).
 
 ## 8. The Done Moment
 
-On developer approval at Gate 2, read `summary/change_summary.md` and present:
+On developer approval at Gate 2, read `summary/change_summary.md`,
+`plan/execution_plan.md` (for the Verification Strategy), and
+`verification/semantic_verification.yaml` (for per-intent results).
+Present the CR-linked completion checklist:
 
 ```
 ===========================================================================
@@ -507,6 +532,33 @@ On developer approval at Gate 2, read `summary/change_summary.md` and present:
  Validation: {N}/8 checks passed
 
 ---------------------------------------------------------------------------
+ Completion Checklist (per Change Request)
+---------------------------------------------------------------------------
+
+ CR-001: {title}
+   [AUTO] Array6 syntax verified -- arg counts preserved
+   [AUTO] {N} territories x {M} values = {total} changes applied
+   [AUTO] Values within {min%} to {max%} of target (rounding variation)
+   [AUTO] Semantic proof: old x {factor} = new -- MATCH for all territories
+   [DEV]  Build {project_name} in VS -- confirm compile
+   [DEV]  Run {Province} {LOB} quote -- verify {specific field} shows ~{expected%} change
+
+ CR-002: {title}
+   [AUTO] Value replacement verified: {old} -> {new}
+   [AUTO] Traceability: CR -> intent -> file:line confirmed
+   [DEV]  Build in VS -- confirm compile
+   [DEV]  Run quote with ${case_value} deductible -- verify discount shows {new_value}
+
+ {... one section per CR ...}
+
+ General:
+   [AUTO] No old files modified
+   [AUTO] No commented code modified
+   [AUTO] .vbproj integrity verified
+   [AUTO] Cross-LOB consistency verified
+   [DEV]  svn commit (use suggested message below)
+
+---------------------------------------------------------------------------
  Suggested SVN commit message:
 ---------------------------------------------------------------------------
 
@@ -519,15 +571,20 @@ On developer approval at Gate 2, read `summary/change_summary.md` and present:
  Files modified:
    - {list}
 
----------------------------------------------------------------------------
- Next steps:
----------------------------------------------------------------------------
-   1. Build {project_name(s)} in Visual Studio
-   2. Test a few {Province_Name} {LOB} quotes in TBW
-   3. svn commit (use the suggested commit message above)
-
 ===========================================================================
 ```
+
+**Building the checklist:** For each CR in `change_requests.yaml`, look up the
+corresponding intents in `semantic_verification.yaml`. For each intent:
+- If `verdict == "MATCH"` and capability is `value_editing`: show the automated
+  arithmetic proof as `[AUTO]` with the factor and territory count.
+- If `verdict == "MATCH"` and capability is `structure_insertion`: show placement
+  confirmation as `[AUTO]`.
+- Always add `[DEV]` items from the Verification Strategy section of the plan.
+
+The `[AUTO]` vs `[DEV]` prefix makes it immediately clear what was machine-verified
+vs what still needs human verification. The developer can use this as a literal
+checklist for their testing round before committing.
 
 Project names: strip `.vbproj` extension from manifest `target_folders` entries.
 

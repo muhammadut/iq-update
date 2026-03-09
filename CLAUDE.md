@@ -131,8 +131,8 @@ workstream files. These six commands cover the full workflow.
 7. **SHARDCLASS/** (or **SharedClass/** in Nova Scotia) exists alongside Code/ for hab helper classes -- include in blast radius scans
 8. **Preserve exact VB.NET formatting** (indentation, spacing, line endings)
 9. **Skip commented lines** (starting with `'`) -- never modify commented-out code
-10. **Understand before acting:** Intake MUST present a ticket understanding to the developer and get confirmation BEFORE extracting change requests. Read ALL comments and ALL image attachments. Comments often contain corrections, clarifications, and the actual values.
-11. **Two approval gates + understanding checkpoint:** Ticket understanding (Intake Step 0) BEFORE CR extraction, Gate 1 (/iq-plan) BEFORE editing, Gate 2 (/iq-review) AFTER validation
+10. **Understand before acting:** Intake MUST present a ticket understanding **journey** (description → comments → images → synthesis) showing HOW the understanding was built, not just a summary. The developer sees exactly which evidence led to each conclusion — comments often correct the description. Get confirmation BEFORE extracting change requests.
+11. **Three checkpoints, full traceability:** (a) Understanding journey (Intake Step 0) BEFORE CR extraction, (b) Gate 1 (/iq-plan) with verification strategy (automated vs developer checks) BEFORE editing, (c) Gate 2 (/iq-review) with CR-linked completion checklist ([AUTO] vs [DEV] items) AFTER validation
 12. **Save per-file snapshots** before editing -- restore on validator failure
 13. **Hash-check files before writing** -- abort if file changed since plan approval (TOCTOU protection)
 14. **SVN is the version control** -- the plugin does not manage system-level rollback
@@ -210,9 +210,9 @@ workstream files. These six commands cover the full workflow.
 ## Agent Pipeline
 
 ```
-/iq-plan:    Intake(Comprehension -> [UNDERSTANDING CHECK] -> CR Extraction) -> Discovery -> Analyzer -> Decomposer -> Planner -> [GATE 1]
+/iq-plan:    Intake(Understanding Journey -> [DEV CONFIRMS] -> CR Extraction) -> Discovery -> Analyzer -> Decomposer -> Planner(+Verification Strategy) -> [GATE 1]
 /iq-execute: Build Capsules -> [File-Copy Worker] -> [Change Engine Workers...] -> [EXECUTED]
-/iq-review:  Validator -> Diff -> Semantic Verifier -> Report -> [GATE 2] -> DONE
+/iq-review:  Validator -> Diff -> Semantic Verifier(inline proofs) -> Report -> [GATE 2 + CR Checklist] -> DONE
 ```
 
 **Discovery Agent:** Reads CalcMain.vb, traces the calculation flow, matches change

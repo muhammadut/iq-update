@@ -301,14 +301,24 @@ Human-readable blast radius report. The Planner reads this for:
 
 ### parsed/ticket_understanding.md (from Intake -- confirmed by developer)
 
-The Planner reads this file to understand the business context behind the changes.
-This file has been confirmed by the developer -- it represents the agreed-upon
+The Planner reads this file to build the "Understanding Journey" section of the
+plan. This file has been confirmed by the developer -- it represents the agreed-upon
 understanding of what the ticket is asking for.
 
+The document has numbered sections that the Planner extracts from:
+1. "What the Ticket Description Says" — raw evidence from description
+2. "What the Comments Add" — how comments corrected/extended the description
+3. "What the Screenshots/Images Show" — data extracted from images
+4. "My Understanding (Synthesized)" — final interpretation with evidence sources
+5. "Ambiguities & Open Questions"
+6. "Confidence Assessment"
+7. "Developer Confirmation" — timestamp and any corrections
+
 The Planner uses this to:
-- Include a business-context summary at the top of the execution plan
+- Build a condensed reasoning chain in the plan's "Understanding Journey" section
 - Connect each plan phase back to the ticket evidence
 - Detect if the code plan has drifted from the business intent
+- Populate the Verification Strategy with CR-specific developer check items
 
 ### parsed/change_requests.yaml (from Intake)
 
@@ -341,10 +351,20 @@ COMPLEX (full structure). Both use the CR-organized format below.
 ```markdown
 # EXECUTION PLAN: {Province} {LOB(s)} {Date}
 
-## Confirmed Ticket Understanding
-{One-paragraph restatement from parsed/ticket_understanding.md}
-Latest clarifications: {any corrections from developer}
-Non-goals: {what this ticket is NOT doing}
+## Understanding Journey
+{Condensed reasoning chain from parsed/ticket_understanding.md.
+NOT the full document -- extract the key trail that shows HOW the
+final understanding was reached:
+
+**From description:** {1-2 sentence summary of what the description said}
+**From comments:** {what comments changed or added — "Comment 3 by John Smith
+corrected the percentage from 5% to 3%. Comment 5 added deductible factor change."}
+**From screenshots:** {what was extracted — or "None" if no images}
+**Final understanding:** {2-3 sentences — the confirmed, synthesized understanding}
+**What changed:** {what differs between raw description and final understanding,
+or "Comments confirmed description as-is."}
+
+Developer confirmed at {confirmation_timestamp}.}
 
 ## Decisions Applied
 {List of developer decisions from manifest.yaml developer_decisions}
@@ -373,6 +393,32 @@ Non-goals: {what this ticket is NOT doing}
 
 ## Execution Order
 {Phase ordering with dependency explanation}
+
+## Verification Strategy
+
+### What the Plugin Will Verify Automatically
+{List all automated checks that run during /iq-review. For each, explain
+what it proves in plain language:}
+- Array6 syntax: all Array6() calls have correct parentheses and unchanged arg counts
+- Completeness: all {N} territories updated, all {M} LOBs handled
+- No old file modification: only target-date files were edited
+- No commented code modified: no commented-out lines were changed
+- Value sanity: all rate changes within expected range ({min%} to {max%})
+- Cross-LOB consistency: shared module references consistent across all LOBs
+- Traceability: every CR maps to at least one code change
+- Vbproj integrity: every <Compile Include> path resolves to an existing file
+- Semantic verification: for each value edit, verify old × factor = new within rounding
+
+### What the Developer Must Verify
+{Specific, actionable items tied to each CR:}
+{For each CR:}
+- **CR-001:** Build {project_name} in Visual Studio → confirm compile.
+  Run a {Province} {LOB} quote → check that {specific field/section in UI}
+  shows ~{expected change} (e.g., "liability premiums ~3% higher than before").
+- **CR-002:** Run a quote with ${case_value} deductible → verify discount
+  shows {new_value} (was {old_value}).
+{Generic:}
+- svn commit and record revision
 
 ## Impact Summary
 - Files to copy: {N}
@@ -1888,13 +1934,43 @@ if plan_is_draft:
     plan_lines.append("")
 ```
 
-10.3. Write the "Confirmed Ticket Understanding" section:
+10.3. Write the "Understanding Journey" section:
+
+The plan should show the condensed reasoning chain — not dump the full
+ticket_understanding.md, but extract the key evidence trail so the developer
+sees HOW the understanding was built and can spot errors at the source level.
 
 ```python
-plan_lines.append("## Confirmed Ticket Understanding")
+plan_lines.append("## Understanding Journey")
 if ticket_understanding:
     # ticket_understanding is the full text from parsed/ticket_understanding.md
-    plan_lines.append(ticket_understanding.strip())
+    # Extract key sections to build the condensed reasoning chain.
+    # The ticket understanding document has numbered sections:
+    #   1. What the Ticket Description Says
+    #   2. What the Comments Add
+    #   3. What the Screenshots/Images Show
+    #   4. My Understanding (Synthesized)
+    #   5. Ambiguities & Open Questions
+    #   6. Confidence Assessment
+
+    desc_summary = extract_section_summary(ticket_understanding, "What the Ticket Description Says")
+    comments_summary = extract_section_summary(ticket_understanding, "What the Comments Add")
+    images_summary = extract_section_summary(ticket_understanding, "What the Screenshots")
+    synthesis = extract_section_summary(ticket_understanding, "My Understanding")
+    what_changed = extract_subsection(ticket_understanding, "What changed from description")
+    confidence = extract_section_summary(ticket_understanding, "Confidence Assessment")
+
+    plan_lines.append(f"**From description:** {desc_summary or '(not available)'}")
+    plan_lines.append(f"**From comments:** {comments_summary or 'No comments.'}")
+    plan_lines.append(f"**From screenshots:** {images_summary or 'None.'}")
+    plan_lines.append(f"**Final understanding:** {synthesis or '(not available)'}")
+    plan_lines.append(f"**What changed:** {what_changed or 'Comments confirmed description as-is.'}")
+    plan_lines.append(f"**Confidence:** {confidence or 'N/A'}")
+
+    # Include developer confirmation timestamp if present
+    confirmation = extract_section_summary(ticket_understanding, "Developer Confirmation")
+    if confirmation:
+        plan_lines.append(f"**Developer confirmed:** {confirmation}")
 else:
     plan_lines.append("*(ticket_understanding.md not available)*")
 
@@ -1905,12 +1981,21 @@ if developer_decisions:
     plan_lines.append(f"Latest clarifications: {len(developer_decisions)} decision(s) applied (see Decisions Applied below)")
 
 # Non-goals from ticket understanding (if parsed)
-# The Planner looks for a "Non-goals" or "Out of scope" section in ticket_understanding
 non_goals = extract_non_goals(ticket_understanding) if ticket_understanding else None
 if non_goals:
     plan_lines.append(f"Non-goals: {non_goals}")
 plan_lines.append("")
 ```
+
+**`extract_section_summary` helper:** Find the section header matching the given
+prefix (case-insensitive), extract its content, and return a condensed version
+(first 2-3 non-empty lines, or the full section if short). If the section has
+sub-items (comment-by-comment evidence), summarize the key findings rather than
+repeating every comment. The goal is a 1-3 sentence summary per evidence source.
+
+**`extract_subsection` helper:** Find a specific subsection within a section
+(e.g., "What changed from description" within section 4). Return its content
+as a single string.
 
 10.4. Write the "Decisions Applied" section:
 
@@ -2161,7 +2246,81 @@ if partial_approval_constraints:
     plan_lines.append("")
 ```
 
-10.13. Write the "Approval" footer:
+10.13. Write the "Verification Strategy" section:
+
+This section explicitly separates what the plugin will verify automatically from
+what the developer must verify manually. This closes the loop — the developer
+knows upfront what they're still on the hook for after execution.
+
+```python
+plan_lines.append("## Verification Strategy")
+plan_lines.append("")
+plan_lines.append("### What the Plugin Will Verify Automatically")
+plan_lines.append("After `/iq-execute`, running `/iq-review` will check:")
+plan_lines.append("- **Array6 syntax:** all Array6() calls have correct parentheses and unchanged arg counts")
+plan_lines.append("- **Completeness:** all territories updated, all LOBs handled")
+plan_lines.append("- **No old file modification:** only target-date files were edited")
+plan_lines.append("- **No commented code modified:** no commented-out lines were changed")
+if all_pct_changes:
+    plan_lines.append(f"- **Value sanity:** all rate changes within expected range ({min_pct:+.1f}% to {max_pct:+.1f}%)")
+else:
+    plan_lines.append("- **Value sanity:** all rate changes within expected range")
+plan_lines.append("- **Cross-LOB consistency:** shared module references consistent across all LOBs")
+plan_lines.append("- **Traceability:** every CR maps to at least one code change")
+plan_lines.append("- **Vbproj integrity:** every Compile Include path resolves to an existing file")
+plan_lines.append("- **Semantic verification:** for each value edit, verify old x factor = new within rounding tolerance")
+plan_lines.append("")
+
+plan_lines.append("### What the Developer Must Verify")
+plan_lines.append("These checks require recompiling the DLL and testing in TBW:")
+
+# Build per-CR developer verification items
+for cr_id in sorted(intents_by_cr.keys()):
+    cr_intents = intents_by_cr[cr_id]
+    cr_info = cr_map.get(cr_id, {})
+    cr_title = cr_info.get('title', cr_intents[0]['title'])
+
+    # Determine what to check based on capability and parameters
+    capabilities = set(intent['capability'] for intent in cr_intents)
+    params = cr_intents[0].get('parameters', {})
+
+    plan_lines.append(f"- **{cr_id.upper()}: {cr_title}**")
+
+    # Build project names from target folders
+    target_files = set(intent['target_file'] for intent in cr_intents)
+    plan_lines.append(f"  1. Build affected project(s) in Visual Studio -- confirm compile")
+
+    if 'value_editing' in capabilities:
+        factor = params.get('factor')
+        if factor:
+            pct_str = f"{(factor - 1) * 100:+.1f}%" if factor else ""
+            plan_lines.append(
+                f"  2. Run a {province_name} {', '.join(lobs[:2])} quote in TBW -- "
+                f"verify affected premiums show ~{pct_str} change"
+            )
+        elif params.get('case_value') is not None:
+            plan_lines.append(
+                f"  2. Run a quote with ${params['case_value']} deductible -- "
+                f"verify factor is {params.get('new_value')} (was {params.get('old_value')})"
+            )
+        else:
+            plan_lines.append(
+                f"  2. Run a quote and verify the changed values appear correctly in TBW"
+            )
+    elif 'structure_insertion' in capabilities:
+        plan_lines.append(
+            f"  2. Run a quote that exercises the new code path -- verify it behaves as expected"
+        )
+    elif 'file_creation' in capabilities:
+        plan_lines.append(
+            f"  2. Run a quote that uses the new file -- verify it loads and produces correct results"
+        )
+
+plan_lines.append(f"- **General:** svn commit and record revision number")
+plan_lines.append("")
+```
+
+10.14. Write the "Approval" footer:
 
 ```python
 plan_lines.append("## Approval")
@@ -2176,7 +2335,7 @@ else:
     plan_lines.append("Approve, reject, or ask questions.")
 ```
 
-10.14. Write to `plan/execution_plan.md`:
+10.15. Write to `plan/execution_plan.md`:
 
 ```python
 plan_dir = f"{workstream_path}/plan"

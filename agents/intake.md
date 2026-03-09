@@ -296,58 +296,115 @@ Think step-by-step about:
 
 #### Step 0.3: Write Ticket Understanding Document
 
+The ticket understanding document shows the **reasoning journey** — not just a
+polished summary, but the step-by-step evidence trail that led to each conclusion.
+The developer sees exactly what came from the description, what was corrected by
+comments, and what was extracted from images. This transparency catches
+misunderstandings early AND gives downstream agents (Discovery, Analyzer, Planner)
+a rich evidence chain to link code changes back to ticket evidence.
+
 Write `parsed/ticket_understanding.md` with this structure:
 
 ```markdown
 # Ticket Understanding: {ticket_ref or "Ad-hoc Request"}
 
-## Problem Statement
-{2-4 sentences describing what the ticket is asking for, written in plain language.
-This should be understandable by someone who hasn't read the ticket.}
+## 1. What the Ticket Description Says
+{Walk through the ticket description in order. Quote specific values,
+percentages, and dollar amounts directly from the text. Present each
+distinct ask as a numbered item:
 
-## Evidence Summary
+1. "{Quoted text from description}" — This is asking for {interpretation}.
+   Key values: {extracted numbers, percentages, dollar amounts}
 
-### From Ticket Description
-{Key points extracted from the ticket description. Quote specific values,
-percentages, and dollar amounts directly from the text.}
+2. "{Quoted text}" — This means {interpretation}.
+   Key values: {extracted numbers}
 
-### From Comments ({N} total)
-{Key findings from reading ALL comments. Highlight:
-- Corrections or clarifications to the original description
-- Additional requirements not in the original description
-- Developer discussions that reveal intent
-- The most recent relevant comment (often has the final word)
-Quote specific comments with attribution: "John Smith (2026-01-15): ..."}
+If the description is vague or uses business jargon, say so:
+"The description says 'update rates per filing' but does not specify
+which rates or by how much. Looking to comments for clarification."}
 
-### From Screenshots/Images ({N} found)
-{What each image shows and what data was extracted from it.
-For rate tables: list the extracted values.
-For UI screenshots: describe what the screenshot shows.
+## 2. What the Comments Add ({N} total)
+{Read ALL comments chronologically. Show how the understanding EVOLVED.
+This is the critical section — comments frequently override the description.
+
+**Comment 1** — {Author} ({date}):
+> "{Quoted excerpt}"
+Impact on understanding: {what this changes or confirms}
+
+**Comment 3** — {Author} ({date}):
+> "{Quoted excerpt}"
+Impact on understanding: **CORRECTION** — Description said 5% but this
+comment says 3%. Using 3% going forward.
+
+**Comment 5** — {Author} ({date}):
+> "{Quoted excerpt}"
+Impact on understanding: Adds new requirement not in original description.
+
+If no comments exist: "No comments on this ticket."
+
+**Net effect of comments:** {1-2 sentences summarizing what the comments
+changed vs the original description. e.g., "Comments corrected the percentage
+from 5% to 3% and added a deductible factor change not in the description."}}
+
+## 3. What the Screenshots/Images Show ({N} found)
+{For EACH image, describe what it contains and what data was extracted:
+
+**Image 1:** {filename}
+Shows: {description — e.g., "Excel screenshot of rate comparison table"}
+Extracted values:
+  - Territory 1: $233 → $245
+  - Territory 2: $274 → $288
+  - ...
+Relevance: {how this connects to the ticket asks}
+
+**Image 2:** {filename}
+Shows: {description}
+Extracted values: {data}
+
 If no images: "No image attachments found."}
 
-## Inferred Changes
-{Based on ALL evidence (description + comments + images), here is what
-I believe needs to change:
+## 4. My Understanding (Synthesized)
+{Based on the reasoning journey above (description → comments → images),
+here is what I believe needs to change. Each item traces back to its
+evidence source:
 
-1. **{Change description}** — {evidence source: "per ticket description" or
-   "per comment by X on date Y" or "per screenshot showing Z"}
+1. **{Change description}**
+   - Source: {which evidence — "ticket description item 2, confirmed by
+     comment 3 from John Smith" or "screenshot Image 1, row 5" or
+     "comment 5 (not in original description)"}
    - Specific values: {old → new, or percentage, or new values}
    - Scope: {all territories / specific territories / specific LOBs}
+   - Confidence: {HIGH/MEDIUM/LOW for this specific item}
 
-2. **{Change description}** — ...
-   ...
-}
+2. **{Change description}**
+   - Source: {evidence trail}
+   - ...
 
-## Ambiguities & Open Questions
+**What changed from description to final understanding:**
+{Explicitly call out any differences between what the description said
+and what the final understanding is after incorporating comments/images.
+e.g., "Description said 5% increase; Comment 3 corrected to 3%.
+Description did not mention deductible changes; Comment 5 added them."
+If nothing changed: "Comments and images confirmed the description as-is."}}
+
+## 5. Ambiguities & Open Questions
 {Things that are unclear or contradictory. Things the developer needs to
 clarify before we can proceed. If none: "None — the ticket is clear."}
 
-## Confidence Assessment
+## 6. Confidence Assessment
 {HIGH / MEDIUM / LOW}
 {Brief explanation of confidence level. HIGH = ticket is clear, values are
-explicit, no contradictions. MEDIUM = most things clear but some gaps.
-LOW = significant ambiguity or missing information.}
+explicit, comments confirm description. MEDIUM = most things clear but some
+gaps or minor contradictions. LOW = significant ambiguity, contradictions
+between description and comments, or missing information.}
 ```
+
+**Why this structure matters:** By showing the journey (description → comments →
+images → synthesis), the developer can instantly see WHERE each value came from
+and catch errors like "you used the value from comment 2 but comment 5 superseded
+it." The synthesis section (4) makes it easy to confirm the final understanding
+without re-reading everything. Downstream agents use the evidence trails in
+section 4 to populate `source_location` and `evidence_refs` on each CR.
 
 #### Step 0.4: Present Understanding to Developer
 
