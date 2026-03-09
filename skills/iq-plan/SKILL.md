@@ -408,8 +408,9 @@ mkdir -p ".iq-workstreams/changes/{workstream-name}"
 **If auto-fetched in Step 4.1:** This step is skipped. The full context from
 `workitem-{key}-full/llm-context.md` (ALL comments, ALL metadata) is stored as
 the raw input. The full ticket data directory (including downloaded attachments
-and images) is copied to the workstream in Step 4.7 for the Intake agent's
-Deep Ticket Comprehension step (Step 0).
+and images) is moved into the workstream in Step 4.7 for the Intake agent's
+Deep Ticket Comprehension step (Step 0). The original directory in the carrier
+root is removed to avoid clutter.
 
 **Otherwise,** ask the developer to describe the changes:
 
@@ -717,13 +718,22 @@ mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/r
 
 Write the developer's raw input (held from Step 4.2) to `input/source.md`.
 
-**If auto-fetched from ADO (Step 4.1):** Also copy the full ticket data directory
-into the workstream for reference:
+**If auto-fetched from ADO (Step 4.1):** Move the full ticket data directory
+into the workstream (not copy — move, to avoid cluttering the carrier root):
 ```bash
-cp -r "workitem-{key}-full" ".iq-workstreams/changes/{workstream-name}/input/ticket-data"
+mv "workitem-{key}-full" ".iq-workstreams/changes/{workstream-name}/input/ticket-data"
 ```
 This preserves all comments, attachments, and raw API responses alongside the brief
-that was used as `input/source.md`.
+that was used as `input/source.md`, and keeps the carrier root clean.
+
+**IMPORTANT:** The `fetch-ticket.sh` script downloads `workitem-{key}-full/` into
+the carrier root directory. If left there, multiple tickets will clutter the carrier
+root with `workitem-24778-full/`, `workitem-25001-full/`, etc. Always MOVE (not copy)
+the directory into the workstream, so the carrier root stays clean. If the move fails
+(e.g., target exists), fall back to `cp -r` then `rm -rf` the source:
+```bash
+cp -r "workitem-{key}-full" ".iq-workstreams/changes/{workstream-name}/input/ticket-data" && rm -rf "workitem-{key}-full"
+```
 
 ### Step 4.8: Write Initial manifest.yaml
 
@@ -750,7 +760,7 @@ ticket:
   key: "{normalized, e.g., '24778'}"
   mode: "{ticketed | adhoc}"
   auto_fetched: false               # true if fetched via fetch-ticket.sh
-  fetch_dir: null                   # "workitem-{id}-full" if auto-fetched
+  fetch_dir: null                   # "input/ticket-data" (moved from carrier root after fetch)
 
 target_folders:
   - path: "{relative path from carrier root}"

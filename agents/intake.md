@@ -34,7 +34,7 @@ directory and conversational interaction.
 # Input arrives as one of the following:
 # 1. Conversational: developer types or pastes into chat
 # 2. File-based: developer says "I pasted it in input/" → read input/source.md
-# 3. ADO ticket: fetched via fetch-ticket.sh → workitem-{id}-full/llm-context-brief.md
+# 3. ADO ticket: fetched via fetch-ticket.sh → input/ticket-data/llm-context.md
 # 4. Any other format: the agent reads and interprets it
 
 # Context from /iq-plan (already in manifest.yaml):
@@ -230,7 +230,7 @@ pipeline wastes time extracting the wrong CRs.
 
 **For auto-fetched ADO tickets:**
 
-The orchestrator has copied the full ticket data to `input/ticket-data/`. Read the
+The orchestrator has moved the full ticket data to `input/ticket-data/`. Read the
 FULL context, not the brief:
 
 1. Read `input/ticket-data/llm-context.md` (contains ALL comments, not just first 3).
