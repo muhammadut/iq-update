@@ -91,9 +91,12 @@ the whole init because one province is malformed).
       ```
 
    **Persist the result** as `plugin_root` in config.yaml (see template below).
+   Also read `{plugin_root}/package.json` to extract the `version` field — this is
+   the plugin version. Store it as `plugin_version` in paths.md.
    Report what was found:
    ```
-   Plugin root:  ✓ {path}  [local | marketplace]
+   IQ Update v{version}  [local | marketplace]
+   Plugin root:  ✓ {path}
    ```
 
    **IMPORTANT:** Throughout this skill and all agent specs, `.iq-update/` is shorthand
@@ -513,9 +516,10 @@ root_path: "{Absolute path to carrier folder}"
 # -- Plugin Location ----------------------------------------------------------
 # Discovered by /iq-init Step 0. All .iq-update/ references resolve to this path.
 # Local install: "{carrier_root}/.iq-update"
-# Marketplace:   "~/.claude/plugins/cache/iq-update-marketplace/iq-update/0.1.0"
+# Marketplace:   "~/.claude/plugins/cache/iq-update-marketplace/iq-update/{version}"
 plugin_root: "{Absolute path to the plugin directory}"
 plugin_install_type: "{local | marketplace}"
+plugin_version: "{Version from package.json, e.g., 0.2.0}"
 
 # -- Python Environment ------------------------------------------------------
 # Discovered by /iq-init preflight check. Used by all downstream skills
@@ -1377,7 +1381,7 @@ After init completes, show the developer the full workflow roadmap:
 
 ```
 ===========================================================================
- Plugin initialized. Here's how the workflow works:
+ IQ Update v{version} — Plugin initialized
 ===========================================================================
 
  /iq-plan     Analyze your rate changes and build an execution plan.

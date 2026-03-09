@@ -1,6 +1,6 @@
 {
   "name": "@muhammadut/iq-update",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI-powered ticket implementation pipeline for TBW/IntelliQuote VB.NET rating engines. 8 agents (Intake, Discovery, Analyzer, Decomposer, Planner, Change Engine, Reviewer, Semantic Verifier) handle any ticket with two human approval gates.",
   "keywords": ["claude-code-plugin", "vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"],
   "license": "MIT",
@@ -12,7 +12,6 @@
     "validators/",
     "CLAUDE.md",
     "fetch-ticket.sh",
-    "init_scan.py",
-    "ISSUES.md"
+    "init_scan.py"
   ]
 }

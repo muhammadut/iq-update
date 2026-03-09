@@ -36,6 +36,11 @@ If `paths.md` does not exist, STOP: `"ERROR: Run /iq-init first to initialize th
 `.iq-update/agents/...` or `.iq-update/validators/...`, replace `.iq-update/` with
 the `plugin_root` value from paths.md. All paths are absolute — use them directly.
 
+If `plugin_version` is present in paths.md, print it once at startup:
+```
+IQ Update v{plugin_version}
+```
+
 ### Check 2: Config Exists (/iq-init Has Been Run)
 
 Verify that `.iq-workstreams/config.yaml` exists.
