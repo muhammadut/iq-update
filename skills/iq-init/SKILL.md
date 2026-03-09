@@ -205,9 +205,12 @@ the whole init because one province is malformed).
    If they press Enter or say "default", use `Rival Insurance Technology`.
 
    6b. **Auto-create** `.iq-workstreams/.env`:
+
+   **IMPORTANT:** Always quote values that may contain spaces. Use double quotes
+   around ALL values to be safe:
    ```
-   ADO_ORG={org_from_6a}
-   ADO_PROJECT={project_from_6a}
+   ADO_ORG="{org_from_6a}"
+   ADO_PROJECT="{project_from_6a}"
    ADO_USE_VSCOM=1
    ADO_PAT=
    ```

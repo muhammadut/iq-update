@@ -310,10 +310,19 @@ Ticket reference? You can:
    - `DevOps 24778` -> key: `24778`, raw ref preserved as-is
 2. **Auto-fetch attempt (numeric IDs only):**
    If the key is purely numeric, read `paths.md` to get `plugin_root` and `env_file`.
-   Check that `{plugin_root}/fetch-ticket.sh` and `{env_file}` both exist, then auto-fetch:
+   Check that `{plugin_root}/fetch-ticket.sh` and `{env_file}` both exist, then auto-fetch.
+
+   **IMPORTANT:** Do NOT use `source "{env_file}"` directly — `.env` files may have
+   unquoted values with spaces (e.g., `ADO_PROJECT=Rival Insurance Technology`),
+   which bash interprets as separate commands. Instead, use `set -a` with a
+   while-read loop that handles both quoted and unquoted values:
+
    ```bash
-   cd "{carrier_root}" && source "{env_file}" && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
+   cd "{carrier_root}" && while IFS='=' read -r key value; do [ -n "$key" ] && [[ ! "$key" =~ ^# ]] && export "$key"="$(echo "$value" | sed 's/^"//;s/"$//')"; done < "{env_file}" && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
    ```
+
+   This safely exports each `KEY=value` pair, stripping surrounding double quotes
+   if present, and handles values with spaces correctly.
    - **On success:** Read `workitem-{key}-full/llm-context.md` (the FULL version
      with ALL comments, not the brief) as the change description. Set
      `ticket.auto_fetched: true`. Extract a short description from the ticket
