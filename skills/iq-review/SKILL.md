@@ -40,6 +40,12 @@ If `paths.md` does not exist, STOP: `"ERROR: Run /iq-init first to initialize th
 
 Use the paths from this file for the entire command. Replace `.iq-update/` with `plugin_root`.
 
+**Auto-heal after plugin upgrade:** Verify `{plugin_root}/package.json` exists.
+If not (plugin was reinstalled to a new version), glob for
+`~/.claude/plugins/cache/*/iq-update/*/package.json`, read the version, and
+update `paths.md` in-place (replace old plugin_root path with new one throughout).
+Print `Plugin upgraded: v{old} → v{new}`. Then print `IQ Update v{version}`.
+
 ### Check 2: Config Exists
 
 Verify `.iq-workstreams/config.yaml` exists. If missing: `"ERROR: Run /iq-init first."`

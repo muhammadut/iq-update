@@ -36,9 +36,27 @@ If `paths.md` does not exist, STOP: `"ERROR: Run /iq-init first to initialize th
 `.iq-update/agents/...` or `.iq-update/validators/...`, replace `.iq-update/` with
 the `plugin_root` value from paths.md. All paths are absolute — use them directly.
 
-If `plugin_version` is present in paths.md, print it once at startup:
+### Check 1b: Verify plugin_root is still valid (auto-heal after plugin upgrade)
+
+After reading `paths.md`, verify that the `plugin_root` directory still exists by
+checking for `{plugin_root}/package.json`. If the directory does NOT exist (common
+after reinstalling a newer plugin version), **auto-discover the new plugin root:**
+
+1. Glob for `~/.claude/plugins/cache/*/iq-update/*/package.json`
+   (on Windows: `C:/Users/{user}/.claude/plugins/cache/*/iq-update/*/package.json`)
+2. If found, read the `package.json` to get the version
+3. Update `paths.md` in-place: replace the old `plugin_root` and `plugin_version`
+   values with the new ones. Use the Edit tool to do a find-and-replace of the old
+   plugin_root path with the new one throughout the file (this also fixes any
+   agent/validator paths that embed the plugin_root).
+4. Print: `Plugin upgraded: v{old_version} → v{new_version} (paths.md updated)`
+
+If the plugin_root IS valid, read `{plugin_root}/package.json` to get the current
+version. If it differs from `plugin_version` in paths.md, update paths.md.
+
+Print the version once at startup:
 ```
-IQ Update v{plugin_version}
+IQ Update v{version}
 ```
 
 ### Check 2: Config Exists (/iq-init Has Been Run)
