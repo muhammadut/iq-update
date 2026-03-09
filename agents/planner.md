@@ -375,16 +375,31 @@ Developer confirmed at {confirmation_timestamp}.}
 ## Plan By Change Request
 
 ### CR-001: {title}
-**What the ticket is asking:** {from ticket understanding, not just the CR title}
-**Evidence:** {source_text, source_location, screenshot references}
+
+**What the ticket is asking:**
+{from ticket understanding, not just the CR title}
+
+**Evidence:**
+- Source: "{quoted text from ticket}"
+- Location: {where in the ticket}
+- Ref: {comment, screenshot, etc.}
+
 **Implementation:**
-  Phase {N}: {intent title}
-    File: {filepath}
-    Function: {function}
-    Action: {description}
-    Before -> After: {preview with per-value % annotations}
-**Validation:** {done_when criteria from intent}
-**Risks/Assumptions:** {any assumptions from intent, risk flags}
+
+> **Phase {N}: {intent title}** (intent-001) `[capability]`
+>
+> - File: `{filepath}`
+> - Function: `{function}()`
+> - Action: {description}
+> - Before -> After: {preview with per-value % annotations}
+
+**Validation:**
+- {done_when criteria from intent}
+
+**Risks/Assumptions:**
+- {any assumptions from intent, risk flags}
+
+---
 
 ### CR-002: ...
 
@@ -2051,30 +2066,34 @@ for cr_id in sorted(intents_by_cr.keys()):
     cr_title = cr_intents[0]['title']  # Use first intent's title as fallback
 
     plan_lines.append(f"### {cr_id.upper()}: {cr_info.get('title', cr_title)}")
+    plan_lines.append("")
 
     # What the ticket is asking (from ticket understanding + CR context)
-    plan_lines.append(f"**What the ticket is asking:** {cr_info.get('source_text', cr_title)}")
+    plan_lines.append(f"**What the ticket is asking:**")
+    plan_lines.append(f"{cr_info.get('source_text', cr_title)}")
+    plan_lines.append("")
 
-    # Evidence trail
-    evidence_parts = []
+    # Evidence trail -- each piece on its own line for readability
+    plan_lines.append("**Evidence:**")
     if cr_info.get('source_text'):
-        evidence_parts.append(f"Source: \"{cr_info['source_text']}\"")
+        plan_lines.append(f"- Source: \"{cr_info['source_text']}\"")
     if cr_info.get('source_location'):
-        evidence_parts.append(f"Location: {cr_info['source_location']}")
+        plan_lines.append(f"- Location: {cr_info['source_location']}")
     # Also check intent-level evidence_refs (carried from Decomposer)
     all_refs = set()
     for intent in cr_intents:
         for ref in intent.get('evidence_refs', []):
             all_refs.add(ref)
     if all_refs:
-        evidence_parts.append(f"Refs: {', '.join(sorted(all_refs))}")
-    if evidence_parts:
-        plan_lines.append(f"**Evidence:** {'; '.join(evidence_parts)}")
-    else:
-        plan_lines.append("**Evidence:** *(no evidence trail available)*")
+        for ref in sorted(all_refs):
+            plan_lines.append(f"- Ref: {ref}")
+    if not cr_info.get('source_text') and not cr_info.get('source_location') and not all_refs:
+        plan_lines.append("- *(no evidence trail available)*")
+    plan_lines.append("")
 
-    # Implementation details -- each intent as a phase
+    # Implementation details -- each intent as a phase, with clear visual separation
     plan_lines.append("**Implementation:**")
+    plan_lines.append("")
     for intent in cr_intents:
         intent_id = intent['id']
         # Find which phase this intent belongs to
@@ -2088,10 +2107,11 @@ for cr_id in sorted(intents_by_cr.keys()):
         if intent.get('depends_on'):
             dep_str = f" (depends on {', '.join(intent['depends_on'])})"
 
-        plan_lines.append(f"  Phase {intent_phase}: {intent['title']} ({intent_id}) [{intent['capability']}{dep_str}]")
-        plan_lines.append(f"    File: {intent['target_file']}")
+        plan_lines.append(f"> **Phase {intent_phase}: {intent['title']}** ({intent_id}) `[{intent['capability']}{dep_str}]`")
+        plan_lines.append(f">")
+        plan_lines.append(f"> - File: `{intent['target_file']}`")
         if intent.get('function'):
-            plan_lines.append(f"    Function: {intent['function']}()")
+            plan_lines.append(f"> - Function: `{intent['function']}()`")
 
         # Delegate to capability-specific detail writers
         if intent['capability'] == 'value_editing':
@@ -2101,16 +2121,20 @@ for cr_id in sorted(intents_by_cr.keys()):
 
         # Show warnings for this intent
         if not intent.get('developer_confirmed', True):
-            plan_lines.append(f"    *** WARNING: Targets NOT confirmed by developer ***")
+            plan_lines.append(f"> - ⚠ WARNING: Targets NOT confirmed by developer")
         if intent.get('has_expressions'):
-            plan_lines.append(f"    *** NOTE: Array6 arguments contain arithmetic expressions ***")
+            plan_lines.append(f"> - ℹ NOTE: Array6 arguments contain arithmetic expressions")
+        plan_lines.append("")
 
     # Validation criteria (done_when from intents)
     done_whens = [intent.get('done_when', '') for intent in cr_intents if intent.get('done_when')]
+    plan_lines.append("**Validation:**")
     if done_whens:
-        plan_lines.append(f"**Validation:** {'; '.join(done_whens)}")
+        for dw in done_whens:
+            plan_lines.append(f"- {dw}")
     else:
-        plan_lines.append(f"**Validation:** Verify values match before/after previews above")
+        plan_lines.append("- Verify values match before/after previews above")
+    plan_lines.append("")
 
     # Risks and assumptions
     all_assumptions = []
@@ -2125,11 +2149,14 @@ for cr_id in sorted(intents_by_cr.keys()):
         risk_notes.append(f"Ambiguity: {cr_info.get('ambiguity_note', 'flagged')}")
 
     combined = all_assumptions + risk_notes
+    plan_lines.append("**Risks/Assumptions:**")
     if combined:
-        plan_lines.append(f"**Risks/Assumptions:** {'; '.join(combined)}")
+        for item in combined:
+            plan_lines.append(f"- {item}")
     else:
-        plan_lines.append(f"**Risks/Assumptions:** None identified")
-
+        plan_lines.append("- None identified")
+    plan_lines.append("")
+    plan_lines.append("---")
     plan_lines.append("")
 ```
 
@@ -2354,19 +2381,20 @@ def write_value_editing_details(lines, intent, use_simple):
     strategy = intent.get('strategy_hint', '')
 
     if strategy in ('array6-multiply', None) and params.get('factor'):
-        lines.append(f"  Action: Multiply all Array6 values by {params['factor']}")
+        lines.append(f"> - Action: Multiply all Array6 values by {params['factor']}")
         if intent.get('rounding_resolved'):
-            lines.append(f"  Rounding: {intent['rounding_resolved']}")
+            lines.append(f"> - Rounding: {intent['rounding_resolved']}")
             if intent.get('rounding_detail'):
-                lines.append(f"    {intent['rounding_detail'].strip()}")
-        lines.append("")
+                lines.append(f">   {intent['rounding_detail'].strip()}")
+        lines.append(f">")
 
         # Show before/after entries
         max_show = len(ba_list) if use_simple else min(2, len(ba_list))
         for i, ba in enumerate(ba_list[:max_show]):
-            lines.append(f"  Before -> After ({ba['context']}):")
-            lines.append(f"    {ba['before']}")
-            lines.append(f"    {ba['after']}")
+            lines.append(f"> Before → After ({ba['context']}):")
+            lines.append(f"> ```")
+            lines.append(f"> {ba['before']}")
+            lines.append(f"> {ba['after']}")
             # Show per-value percentage changes
             if ba.get('pct_changes'):
                 pct_strs = []
@@ -2375,37 +2403,42 @@ def write_value_editing_details(lines, intent, use_simple):
                         pct_strs.append("    ")
                     else:
                         pct_strs.append(f"{pct:+.1f}%")
-                lines.append(f"    {'  '.join(pct_strs)}")
-            lines.append("")
+                lines.append(f"> {'  '.join(pct_strs)}")
+            lines.append(f"> ```")
+            lines.append(f">")
 
         if not use_simple and len(ba_list) > max_show:
             lines.append(
-                f"  (showing {max_show} of {len(ba_list)} -- "
-                f"all follow same {params['factor']}x pattern)"
+                f"> *(showing {max_show} of {len(ba_list)} — "
+                f"all follow same {params['factor']}x pattern)*"
             )
 
         total_vals = sum(ba.get('value_count', 1) for ba in ba_list)
-        lines.append(f"  Impact: {len(ba_list)} lines x ~{total_vals // max(len(ba_list), 1)} values = {total_vals} changes")
+        lines.append(f"> - Impact: {len(ba_list)} lines × ~{total_vals // max(len(ba_list), 1)} values = {total_vals} changes")
 
     elif strategy == 'factor-table' or params.get('case_value'):
-        lines.append(f"  Action: Change Case {params.get('case_value')} factor")
-        lines.append("")
+        lines.append(f"> - Action: Change Case {params.get('case_value')} factor")
+        lines.append(f">")
         for ba in ba_list:
             if len(ba_list) > 1:
-                lines.append(f"  Path ({ba['context']}):")
-            lines.append(f"  Before: {ba['before']}")
-            lines.append(f"  After:  {ba['after']}")
-            lines.append(f"  Change: {ba.get('change', '')}")
-            lines.append("")
+                lines.append(f"> Path ({ba['context']}):")
+            lines.append(f"> ```")
+            lines.append(f"> Before: {ba['before']}")
+            lines.append(f"> After:  {ba['after']}")
+            lines.append(f"> Change: {ba.get('change', '')}")
+            lines.append(f"> ```")
+            lines.append(f">")
 
     else:
         # Generic value editing -- show before/after pairs
-        lines.append(f"  Action: {intent['description']}")
-        lines.append("")
+        lines.append(f"> - Action: {intent['description']}")
+        lines.append(f">")
         for ba in ba_list:
-            lines.append(f"  Before: {ba['before']}")
-            lines.append(f"  After:  {ba['after']}")
-            lines.append("")
+            lines.append(f"> ```")
+            lines.append(f"> Before: {ba['before']}")
+            lines.append(f"> After:  {ba['after']}")
+            lines.append(f"> ```")
+            lines.append(f">")
 ```
 
 **`write_insertion_details` helper:**
@@ -2416,17 +2449,19 @@ def write_insertion_details(lines, intent):
 
     if intent.get('insertion_point'):
         ip = intent['insertion_point']
-        lines.append(f"  Action: {intent['description']}")
-        lines.append(f"  Insert {ip['position']} line {ip['line']} ({ip['context']}):")
+        lines.append(f"> - Action: {intent['description']}")
+        lines.append(f"> - Insert {ip['position']} line {ip['line']} ({ip['context']}):")
+        lines.append(f"> ```vb")
 
         # Show the new code to be added (from parameters)
         if params.get('constant_name'):
-            lines.append(f"    + Public Const {params['constant_name']} As String = \"{params.get('coverage_type_name', 'VALUE')}\"")
+            lines.append(f"> + Public Const {params['constant_name']} As String = \"{params.get('coverage_type_name', 'VALUE')}\"")
         elif 'code_to_add' in params:
             for code_line in params['code_to_add']:
-                lines.append(f"    + {code_line}")
+                lines.append(f"> + {code_line}")
         else:
-            lines.append(f"    (code will be generated by Change Engine)")
+            lines.append(f"> (code will be generated by Change Engine)")
+        lines.append(f"> ```")
 
     elif intent.get('needs_new_file'):
         lines.append(f"  Action: CREATE NEW FILE")
