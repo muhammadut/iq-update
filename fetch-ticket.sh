@@ -666,11 +666,15 @@ extract_and_strip_base64() {
 
   echo "Extracting inline base64 images to attachments/ ..."
 
-  # Find python command (try python3 first, then python)
+  # Find python command: prefer PYTHON_CMD env var (set by iq-plan from paths.md),
+  # then try python3/python on PATH. On Windows, the Microsoft Store "App Execution
+  # Aliases" intercept bare python/python3 and fail, so PYTHON_CMD is the reliable path.
   local pycmd=""
-  if command -v python3 >/dev/null 2>&1; then
+  if [ -n "${PYTHON_CMD:-}" ] && "$PYTHON_CMD" --version >/dev/null 2>&1; then
+    pycmd="$PYTHON_CMD"
+  elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
     pycmd="python3"
-  elif command -v python >/dev/null 2>&1; then
+  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
     pycmd="python"
   else
     echo "  WARNING: python not found — cannot extract base64 images. Stripping with sed instead." >&2

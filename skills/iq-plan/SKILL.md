@@ -323,11 +323,13 @@ Ticket reference? You can:
    they get mangled by shell escaping on Windows. Use simple POSIX `[ ]` tests only:
 
    ```bash
-   cd "{carrier_root}" && set -a && while IFS='=' read -r key value; do if [ -n "$key" ] && [ "${key:0:1}" != "#" ]; then export "$key=$(echo $value | sed 's/^"//;s/"$//')"; fi; done < "{env_file}" && set +a && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
+   cd "{carrier_root}" && export PYTHON_CMD="{python_cmd}" && set -a && while IFS='=' read -r key value; do if [ -n "$key" ] && [ "${key:0:1}" != "#" ]; then export "$key=$(echo $value | sed 's/^"//;s/"$//')"; fi; done < "{env_file}" && set +a && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
    ```
 
-   This safely exports each `KEY=value` pair, stripping surrounding double quotes
-   if present, and handles values with spaces correctly.
+   Where `{python_cmd}` is the `python_cmd` value from `paths.md`. This safely
+   exports each `KEY=value` pair, stripping surrounding double quotes if present,
+   handles values with spaces correctly, and passes the verified Python path to
+   `fetch-ticket.sh` (avoiding Windows App Execution Alias interception).
    - **On success:** Read `workitem-{key}-full/llm-context.md` (the FULL version
      with ALL comments, not the brief) as the change description. Set
      `ticket.auto_fetched: true`. Extract a short description from the ticket
