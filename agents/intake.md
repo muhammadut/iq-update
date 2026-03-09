@@ -244,20 +244,30 @@ FULL context, not the brief:
    - `comments[]` — ALL comments, each with `.author`, `.createdDate`, `.markdown`
    - `attachments[]` — list of downloaded attachments with `.localPath`
 
-3. **Read ALL image attachments:** Scan `input/ticket-data/attachments/` for image
-   files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.tiff`). For EACH image found,
-   use the Read tool to view the image. Claude Code is multimodal — it can see and
-   interpret screenshots, rate tables, annotated diagrams, and Excel/PDF screenshots.
+3. **Read ALL attachments (images AND PDFs):** Scan `input/ticket-data/attachments/`
+   for image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.tiff`) AND PDF files
+   (`.pdf`). For EACH file found, use the **Read tool directly** — do NOT use Python,
+   PyPDF2, PyMuPDF, or any other library. Claude Code's Read tool natively handles
+   images (multimodal vision) and PDFs (text extraction with page selection).
 
-   For each image, extract:
-   - What the image shows (screenshot of a UI, rate table, error message, etc.)
-   - Any rate values, numbers, or data visible in the image
+   **For images:** Read tool displays them visually — extract rate values, annotations,
+   table data, and any visual context.
+
+   **For PDFs:** Read tool extracts text natively. For PDFs over 10 pages, use the
+   `pages` parameter (e.g., `pages: "1-10"`). Read the first few pages to understand
+   structure, then read remaining pages as needed. NEVER install or use Python PDF
+   libraries — the Read tool handles this.
+
+   For each attachment, extract:
+   - What it shows (screenshot, rate table, error message, rate schedule, etc.)
+   - Any rate values, numbers, or data visible
    - Any annotations, highlights, or circled areas
-   - How this image relates to the ticket description
+   - How it relates to the ticket description
 
-   **Image interpretation is CRITICAL.** Actuarial tickets frequently include:
+   **Attachment interpretation is CRITICAL.** Actuarial tickets frequently include:
    - Screenshots of rate comparison spreadsheets (old vs new values)
    - Screenshots of the IntelliQuote UI showing incorrect behavior
+   - PDF rate schedules or actuarial filings with rate tables
    - Scanned or photographed paper rate schedules
    - Annotated screenshots highlighting what needs to change
 
@@ -475,13 +485,16 @@ is first captured.
      to extract rate values, annotations, or visual context. Common in actuarial
      tickets where rate tables are shared as screenshots rather than structured data.
 
-1.2. **Check for image attachments:** Scan `input/attachments/` AND
+1.2. **Check for attachments (images + PDFs):** Scan `input/attachments/` AND
      `input/ticket-data/attachments/` for image files (`.png`, `.jpg`, `.jpeg`,
-     `.gif`, `.bmp`, `.tiff`). If found, Read each image to extract any rate values,
-     table data, or annotations. Incorporate extracted information into the change
-     request parsing. If an image contains a rate table, treat the extracted values
-     as structured input alongside the text description. If an image is decorative
-     or not relevant to rate changes, note it and move on.
+     `.gif`, `.bmp`, `.tiff`) and PDF files (`.pdf`). Use the **Read tool directly**
+     for ALL of these — NEVER use Python libraries (PyPDF2, PyMuPDF, etc.) to read
+     PDFs. The Read tool handles both images and PDFs natively. For PDFs over 10
+     pages, pass the `pages` parameter. If found, Read each file to extract rate
+     values, table data, or annotations. Incorporate extracted information into the
+     change request parsing. If a file contains a rate table, treat the extracted
+     values as structured input alongside the text description. If a file is
+     decorative or not relevant to rate changes, note it and move on.
 
 1.3. Save the raw input text to `input/source.md` in the workflow directory. If the
      developer provided it conversationally, write it now. If it was already in
