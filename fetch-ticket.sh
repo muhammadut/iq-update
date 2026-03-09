@@ -648,6 +648,108 @@ build_llm_context \
   "${TICKET_DIR}/llm-context.json" \
   "${TICKET_DIR}/llm-context.md"
 
+# Extract and strip base64 data URIs from llm-context.md and llm-context.json.
+# Embedded screenshots (data:image/png;base64,...) can be 50K+ characters each,
+# bloating the markdown to 50K+ tokens. These are images pasted directly into the
+# ticket HTML (not hosted as ADO attachments), so they are NOT caught by the
+# attachment downloader. We save them as files first, then replace the inline
+# base64 with local file references.
+extract_and_strip_base64() {
+  local md_file="$1"
+  local json_file="$2"
+  local attach_dir="$3"
+
+  # Check if there are any base64 data URIs
+  if ! grep -q 'data:image/' "$md_file" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Extracting inline base64 images to attachments/ ..."
+
+  # Find python command (try python3 first, then python)
+  local pycmd=""
+  if command -v python3 >/dev/null 2>&1; then
+    pycmd="python3"
+  elif command -v python >/dev/null 2>&1; then
+    pycmd="python"
+  else
+    echo "  WARNING: python not found — cannot extract base64 images. Stripping with sed instead." >&2
+    # Fallback: just strip with sed, no image extraction
+    sed -E 's/!\[([^]]*)\]\(data:image\/[^)]+\)/![\1](inline image removed — install python to extract)/g' \
+      "$md_file" > "${md_file}.tmp" && mv "${md_file}.tmp" "$md_file"
+    return 0
+  fi
+
+  # Step 1: Extract each base64 image to a file using python.
+  # Produces: attachments/inline-1.png, inline-2.png, etc.
+  $pycmd -c "
+import re, base64, sys, os
+
+md = open(sys.argv[1], 'r', encoding='utf-8').read()
+attach_dir = sys.argv[2]
+sed_lines = []
+idx = 0
+
+for m in re.finditer(r'!\[([^\]]*)\]\((data:image/(png|jpe?g|gif|bmp|webp);base64,([A-Za-z0-9+/=\s]+))\)', md):
+    idx += 1
+    alt = m.group(1)
+    ext = m.group(3)
+    if ext == 'jpeg':
+        ext = 'jpg'
+    b64 = m.group(4).replace('\n','').replace('\r','').replace(' ','')
+    fname = f'inline-{idx}.{ext}'
+    fpath = os.path.join(attach_dir, fname)
+    try:
+        with open(fpath, 'wb') as f:
+            f.write(base64.b64decode(b64))
+        print(f'  Saved {fname} ({os.path.getsize(fpath)} bytes)')
+    except Exception as e:
+        print(f'  Failed to save {fname}: {e}', file=sys.stderr)
+
+print(f'Extracted {idx} inline image(s)')
+" "$md_file" "$attach_dir" 2>&1
+
+  # Step 2: Strip base64 from markdown -- replace with local path references
+  $pycmd -c "
+import re, sys
+
+md = open(sys.argv[1], 'r', encoding='utf-8').read()
+idx = [0]
+
+def replace_match(m):
+    idx[0] += 1
+    alt = m.group(1)
+    ext = m.group(3)
+    if ext == 'jpeg':
+        ext = 'jpg'
+    return f'![{alt}](attachments/inline-{idx[0]}.{ext})'
+
+result = re.sub(
+    r'!\[([^\]]*)\]\(data:image/(png|jpe?g|gif|bmp|webp);base64,[A-Za-z0-9+/=\s]+\)',
+    replace_match,
+    md
+)
+with open(sys.argv[1], 'w', encoding='utf-8') as f:
+    f.write(result)
+" "$md_file"
+
+  # Step 3: Strip base64 from JSON too
+  if [ -f "$json_file" ]; then
+    jq '
+      def strip_base64:
+        gsub("!\\[(?<alt>[^\\]]*)\\]\\(data:image/[^)]+\\)"; "![\\(.alt)](see attachments/ for extracted images)");
+      .ticket.markdown |= strip_base64
+      | .ticket.reproStepsMarkdown |= (if . then strip_base64 else . end)
+      | .comments |= map(.markdown |= strip_base64)
+    ' "$json_file" > "${json_file}.tmp" && mv "${json_file}.tmp" "$json_file"
+  fi
+}
+
+extract_and_strip_base64 \
+  "${TICKET_DIR}/llm-context.md" \
+  "${TICKET_DIR}/llm-context.json" \
+  "${ATTACH_DIR}"
+
 build_llm_brief \
   "${TICKET_DIR}/llm-context.json" \
   "${TICKET_DIR}/llm-context-brief.md"
