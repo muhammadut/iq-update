@@ -319,11 +319,11 @@ Ticket reference? You can:
 
    **IMPORTANT:** Do NOT use `source "{env_file}"` directly — `.env` files may have
    unquoted values with spaces (e.g., `ADO_PROJECT=Rival Insurance Technology`),
-   which bash interprets as separate commands. Instead, use `set -a` with a
-   while-read loop that handles both quoted and unquoted values:
+   which bash interprets as separate commands. Do NOT use `[[ =~ ]]` regex tests —
+   they get mangled by shell escaping on Windows. Use simple POSIX `[ ]` tests only:
 
    ```bash
-   cd "{carrier_root}" && while IFS='=' read -r key value; do [ -n "$key" ] && [[ ! "$key" =~ ^# ]] && export "$key"="$(echo "$value" | sed 's/^"//;s/"$//')"; done < "{env_file}" && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
+   cd "{carrier_root}" && set -a && while IFS='=' read -r key value; do if [ -n "$key" ] && [ "${key:0:1}" != "#" ]; then export "$key=$(echo $value | sed 's/^"//;s/"$//')"; fi; done < "{env_file}" && set +a && bash "{plugin_root}/fetch-ticket.sh" {key} 2>&1
    ```
 
    This safely exports each `KEY=value` pair, stripping surrounding double quotes
