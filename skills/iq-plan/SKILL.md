@@ -1649,42 +1649,116 @@ The developer's message is a question (not a command) when it:
 - Asks about something outside the current workflow step
 - Requests information without making a decision
 
-### What Investigation Mode Does
+### Step 1: Classify the Question
+
+Before answering, classify what kind of context the question needs:
+
+| Category | Examples | How to Handle |
+|----------|----------|---------------|
+| **TICKET-ONLY** | "What would the total be after the fix?", "What did comment 3 say?", "How many CRs?" | Answer directly from ticket data, manifest, agent outputs already produced. No agent needed. |
+| **STATUS** | "What's the status?", "Where are we?", "What's left?" | Read manifest.yaml and summarize. No agent needed. |
+| **CODE-LEVEL** | "Show me how All Perils is currently calculated", "What does the function look like?", "How does the code handle high theft?" | **Spawn investigation sub-agent** (see below). |
+| **CROSS-REFERENCE** | "Does this affect other LOBs?", "What other files reference this module?", "Which projects use this function?" | **Spawn investigation sub-agent** (see below). |
+| **ADDENDUM** | "I forgot to mention, also change X" | Not a question — treat as addendum (see below). |
+
+**Rule of thumb:** If the answer requires reading VB.NET source files, .vbproj
+files, or searching the codebase, spawn a sub-agent. If the answer is in the
+ticket data or manifest, answer directly.
+
+### Step 2a: Direct Answer (TICKET-ONLY, STATUS)
+
+For simple questions, answer inline:
 
 ```
 1. Note the current workflow position (state, gate, step)
-2. Process the question:
-   - File exploration: use Read tool to show file contents
-   - Cross-reference queries: parse .vbproj files, search Code/ files
-   - Status queries: read manifest.yaml and summarize
-   - Comparison queries: read old and new file versions
-   - Codebase queries: search config.yaml and the file system
-3. Present the answer
-4. Return to the current position:
+2. Read the relevant data (ticket_understanding.md, manifest.yaml, agent outputs)
+3. Compute or summarize the answer
+4. Present the answer
+5. Return to the current position:
 
    "Back to {current context}. {prompt for next action}"
-
-   Examples:
-   "Back to the plan -- approve, reject, or keep asking."
-   "Back to the results -- approve or tell me what to fix."
-   "You were describing the changes. Continue?"
 ```
 
-### Common Investigation Queries and How to Handle Them
+### Step 2b: Investigation Sub-Agent (CODE-LEVEL, CROSS-REFERENCE)
 
-| Developer Says | What to Do |
-|----------------|-----------|
-| "Show me the current file" | Read the file and display with line numbers |
-| "Show me {function_name}" | Find the function in the relevant file, display it |
-| "What does line {N} look like?" | Read and display specific lines |
-| "Does this affect Farm?" | Check all .vbproj files that reference the shared module |
-| "What other files reference this?" | Run reverse lookup on the file |
-| "What's the status?" | Read manifest.yaml, show state and CR progress |
-| "How many territories does {Province} {LOB} have?" | Search the relevant mod file |
-| "What did the previous version look like?" | Find and display the prior-dated file |
-| "Show me the diff so far" | Compare snapshot to current file state |
-| "What's left to do?" | Show remaining operations from execution_order.yaml |
-| "I forgot to mention, also change X" | Treat as addendum -- see below |
+For questions that need codebase access, spawn a focused sub-agent via the
+Agent tool. This keeps the orchestrator's context clean and gives the sub-agent
+full access to grep, read, and search the codebase.
+
+**Build the sub-agent prompt with this template:**
+
+```
+You are an investigation sub-agent for the IQ Update plugin. Answer the
+developer's question using the codebase.
+
+## Question
+{developer's question}
+
+## Current Context
+- Carrier: {carrier_name} ({carrier_prefix})
+- Province: {province_code} ({province_name})
+- LOB: {lob}
+- Target version: {effective_date}
+- Carrier root: {carrier_root}
+
+## Ticket Understanding (Summary)
+{2-3 sentence summary of the ticket — what change is being made and why}
+
+## Change Requests
+{List CR IDs and titles}
+
+## What to Search
+- Pattern Library: {carrier_root}/.iq-workstreams/pattern-library.yaml
+  (Grep for relevant function names — do NOT load the whole file)
+- Codebase Profile: {carrier_root}/.iq-workstreams/codebase-profile.yaml
+  (Grep for glossary terms, dispatch tables — do NOT load the whole file)
+- Province Code/ files: {carrier_root}/{province}/Code/
+- Target .vbproj: {path to .vbproj if known}
+
+## Instructions
+1. Search the Pattern Library and Codebase Profile for relevant functions
+2. Read the actual source code to find the answer
+3. Report back with:
+   - What you found (file, function name, line numbers)
+   - The relevant code snippet (keep it focused, not the whole file)
+   - How it relates to the developer's question
+4. Do NOT modify any files. Read-only investigation.
+```
+
+**After the sub-agent returns:**
+
+1. Present the answer to the developer
+2. **Save to developer_decisions** in manifest.yaml:
+   ```yaml
+   - phase: "{current_phase}"
+     question: "{developer's question}"
+     answer: "{summary of what the sub-agent found}"
+     source: "investigation_subagent"
+     timestamp: "{now}"
+   ```
+   This is important — downstream agents (Discovery, Analyzer) will see this
+   finding and use it instead of re-discovering the same information.
+3. Return to the current position:
+   ```
+   Back to {current context}. {prompt for next action}
+   ```
+
+### Common Investigation Queries
+
+| Developer Says | Category | What Happens |
+|----------------|----------|-------------|
+| "What would the total be after the fix?" | TICKET-ONLY | Compute from ticket values directly |
+| "What did comment 3 say?" | TICKET-ONLY | Read ticket_understanding.md or llm-context.md |
+| "How many CRs are there?" | STATUS | Read manifest.yaml |
+| "Show me the current file" | CODE-LEVEL | Sub-agent reads and displays with line numbers |
+| "Show me {function_name}" | CODE-LEVEL | Sub-agent finds function in codebase, shows code |
+| "How does the code currently calculate this?" | CODE-LEVEL | Sub-agent traces the logic in VB source |
+| "Does this affect Farm?" | CROSS-REFERENCE | Sub-agent checks all .vbproj files for shared module refs |
+| "What other files reference this?" | CROSS-REFERENCE | Sub-agent runs reverse lookup |
+| "How many territories does {Province} {LOB} have?" | CODE-LEVEL | Sub-agent searches the relevant mod file |
+| "What did the previous version look like?" | CODE-LEVEL | Sub-agent finds and displays prior-dated file |
+| "Show me the diff so far" | CODE-LEVEL | Sub-agent compares snapshot to current file state |
+| "I forgot to mention, also change X" | ADDENDUM | Not a question — see addendum handling below |
 
 ### Addendum Handling ("I forgot to mention...")
 
