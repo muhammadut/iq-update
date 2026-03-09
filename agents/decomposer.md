@@ -937,6 +937,174 @@ Use sequential IDs: `intent-001`, `intent-002`, etc. Zero-padded to 3 digits.
 Intent IDs are flat and sequential because one CR can produce intents across
 different functions with no natural nesting.
 
+### Step 8.5: Caller Analysis — Produce Additional Intents for Caller Fixes
+
+**Action:** Check each intent's Analyzer output for `caller_analysis` warnings.
+When the Analyzer detected that a caller OVERWRITES the return value of a target
+function, the Decomposer MUST produce an additional intent to fix the caller.
+
+This step prevents the bug where the pipeline correctly identifies a defect in a
+function but misses that the caller's post-processing renders the fix ineffective.
+
+#### 8.5.1 Check for Caller Warnings
+
+For each intent, check if the Analyzer output includes `caller_analysis`:
+
+```python
+def check_caller_warnings(intents, analyzer_outputs):
+    """Scan Analyzer outputs for caller_analysis with HIGH risk.
+
+    When found, produce an additional intent to fix the caller function.
+    """
+    additional_intents = []
+    next_id = max_intent_id(intents) + 1
+
+    for intent in intents:
+        func_key = intent["function"]
+        analyzer = analyzer_outputs.get(func_key, {})
+        caller = analyzer.get("caller_analysis", {})
+
+        if not caller or caller.get("overall_risk") != "HIGH":
+            continue
+
+        # HIGH risk means: caller unconditionally overwrites the return value
+        # The target function fix is correct, but the caller needs fixing too
+        competing_writes = caller.get("competing_writes", [])
+        code_smells = caller.get("code_smells", [])
+
+        # Build an additional intent for the caller fix
+        caller_intent = build_caller_fix_intent(
+            intent_id=f"intent-{next_id:03d}",
+            original_intent=intent,
+            caller_analysis=caller,
+            competing_writes=competing_writes,
+            code_smells=code_smells,
+        )
+        additional_intents.append(caller_intent)
+        next_id += 1
+
+        # The caller fix depends on the original intent
+        caller_intent["depends_on"].append(intent["id"])
+
+        # Flag the original intent
+        intent["has_caller_fix"] = caller_intent["id"]
+
+    return additional_intents
+```
+
+#### 8.5.2 Build the Caller Fix Intent
+
+```python
+def build_caller_fix_intent(intent_id, original_intent, caller_analysis,
+                             competing_writes, code_smells):
+    """Build an intent to fix the caller that overwrites a return value.
+
+    capability: 'flow_modification' — we're changing control flow (removing
+    or conditionalizing an unconditional overwrite).
+    """
+    caller_func = caller_analysis["caller_function"]
+    result_var = caller_analysis["result_variable"]
+
+    # Build description from the competing writes
+    overwrite_lines = [cw["content"].strip() for cw in competing_writes]
+    smell_descriptions = [cs["description"] for cs in code_smells]
+
+    description_parts = [
+        f"Caller '{caller_func}' unconditionally overwrites '{result_var}' "
+        f"after calling '{original_intent['function']}'.",
+    ]
+    if overwrite_lines:
+        description_parts.append(
+            f"Competing write(s): {'; '.join(overwrite_lines)}"
+        )
+    if smell_descriptions:
+        description_parts.append(
+            f"Code smells: {'; '.join(smell_descriptions)}"
+        )
+
+    return {
+        "id": intent_id,
+        "cr": original_intent["cr"],
+        "title": f"Fix caller '{caller_func}' — remove overwrite of "
+                 f"'{result_var}' returned by '{original_intent['function']}'",
+        "description": " ".join(description_parts),
+        "capability": "flow_modification",
+        "strategy_hint": None,
+        "file": caller_analysis.get("caller_file",
+                                     original_intent["file"]),
+        "file_type": original_intent["file_type"],
+        "function": caller_func,
+        "depends_on": [],
+        "confidence": 0.80,
+        "open_questions": [
+            f"Caller '{caller_func}' overwrites the return value of "
+            f"'{original_intent['function']}'. The overwrite at "
+            f"line(s) {', '.join(str(cw['line']) for cw in competing_writes)} "
+            f"needs to be removed or conditionalized. Please confirm the "
+            f"correct fix approach."
+        ],
+        "source_text": original_intent.get("source_text", ""),
+        "source_location": "Analyzer caller_analysis (auto-detected)",
+        "evidence_refs": [f"caller_analysis for {original_intent['function']}"],
+        "assumptions": [
+            f"Auto-generated: Analyzer detected that {caller_func} overwrites "
+            f"the result of {original_intent['function']}. Without fixing the "
+            f"caller, the original change has no effect."
+        ],
+        "done_when": (
+            f"'{result_var}' in '{caller_func}' is no longer unconditionally "
+            f"overwritten after the call to '{original_intent['function']}'"
+        ),
+        "source_file": caller_analysis.get("caller_file",
+                                            original_intent.get("source_file")),
+        "target_file": caller_analysis.get("caller_file",
+                                            original_intent.get("target_file")),
+        "needs_copy": original_intent.get("needs_copy", False),
+        "file_hash": None,  # Planner will compute
+        "function_line_start": caller_analysis.get("call_site_line"),
+        "function_line_end": None,  # Planner will determine from full read
+        "target_lines": [
+            {
+                "line": cw["line"],
+                "content": cw["content"],
+                "context": f"Competing write — overwrites {result_var}",
+                "rounding": None,
+                "value_count": 0,
+            }
+            for cw in competing_writes
+        ],
+        "parameters": {
+            "result_variable": result_var,
+            "competing_writes": competing_writes,
+            "code_smells": code_smells,
+            "original_function": original_intent["function"],
+        },
+        "caller_analysis_source": True,  # Flag: this intent was auto-generated
+    }
+```
+
+#### 8.5.3 Merge Additional Intents
+
+```python
+# After building all regular intents in Step 8:
+caller_fix_intents = check_caller_warnings(intents, analyzer_outputs)
+
+if caller_fix_intents:
+    intents.extend(caller_fix_intents)
+
+    # Log prominently
+    for cfi in caller_fix_intents:
+        print(f"[Decomposer] ⚠ AUTO-GENERATED INTENT {cfi['id']}: "
+              f"Caller fix for {cfi['function']}")
+        print(f"             Original: {cfi['parameters']['original_function']} "
+              f"return value is overwritten")
+        print(f"             This intent has an OPEN QUESTION for developer review")
+```
+
+**CRITICAL:** When `caller_analysis.overall_risk == "HIGH"`, the Decomposer MUST
+produce this additional intent. Failing to do so means the original fix will have
+NO EFFECT at runtime — the caller will overwrite the corrected return value.
+
 ### Step 9: Handle Shared Module Deduplication
 
 **Action:** Ensure shared modules are edited ONCE, not per LOB.

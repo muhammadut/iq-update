@@ -1408,23 +1408,35 @@ The Planner has NO developer interaction — it is fully automated.
 
 3b. **PRE-GATE-1 VALIDATION — Symbol Reference Check:**
 
-   Scan the Planner's output for any code snippets that introduce NEW symbol
-   references (constants, enums, `Cssi.ResourcesConstants.*` values) that don't
-   appear in the original code. This catches hallucinated API references before
-   the developer sees them.
+   Scan the Planner's output for any code snippets that introduce NEW symbols
+   (constants, enums, function calls, Case values) that don't appear in the
+   original code. This catches hallucinated references before the developer sees
+   them. Pattern extrapolation applies to ALL symbol types, not just constants.
 
    a. Read `plan/execution_order.yaml`. For each intent that has action
-      descriptions or code snippets, extract any fully-qualified references
-      (e.g., `Cssi.ResourcesConstants.MappingCodes.DISCOUNT_ALLPERILS`,
-      `ResourcesConstants.*`, or all-caps constant names like `DISCOUNT_*`).
-   b. For each extracted symbol, check if it exists in the intent's source file
-      (the file being modified) using Grep. Also check `ResourceID.vb` files
-      in the target version folder.
+      descriptions or code snippets, extract these symbol categories:
+
+      **Constants & enums:** `Cssi.ResourcesConstants.MappingCodes.*`,
+      `ResourcesConstants.*`, all-caps constant names (`DISCOUNT_*`, etc.).
+
+      **Function/Sub calls:** Any function or Sub call in "after" code that does
+      NOT appear in the corresponding "before" code. Extract the function name
+      from patterns like `FunctionName(...)` or `Call SubName(...)`.
+
+      **Case string values:** Any `Case "..."` string in "after" code that does
+      NOT appear in "before" code. Numeric Case values (e.g., `Case 7500`) are
+      exempt — these are typically new tiers specified in the ticket.
+
+   b. For each extracted symbol, check if it exists in the codebase using Grep:
+      - Constants: search source file + `ResourceID.vb` files
+      - Function calls: search carrier root for `Function {name}` or `Sub {name}`
+      - Case strings: search carrier root for the string value
+
    c. If a symbol is NOT found anywhere in the codebase:
       ```
       WARNING: Unresolved symbol in plan — may be hallucinated:
-        {symbol_name} (in intent {intent_id})
-        Not found in source file or ResourceID.vb.
+        {symbol_name} ({symbol_type}) in intent {intent_id}
+        Not found in codebase.
         The Planner may have extrapolated this from a pattern in the file.
 
       Review this carefully at Gate 1.

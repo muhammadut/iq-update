@@ -2908,6 +2908,242 @@ All enriched entries receive `provenance: "analyzer"` and `discovered_at: "{time
 Zero developer interaction. Fully automated. Only writes if new knowledge was
 discovered. If codebase-profile.yaml does not exist, the entire step is skipped.
 
+### Step 5.12: Caller Analysis and Competing Write Detection (CRITICAL)
+
+**Action:** For each CR with a resolved target function, verify that fixing the
+target function will actually produce the expected end result. This catches cases
+where the caller overwrites, discards, or transforms the target function's return
+value after it comes back.
+
+**Why this matters:** A fix inside a callee is useless if the caller overwrites
+the result. This is not hypothetical — it happens when callers have post-processing
+loops or conditionals that modify the same output variable after the callee returns.
+
+**Trigger:** Runs for EVERY CR that has a resolved target function and where
+Discovery provided `caller_analysis` with `risk: "HIGH"` or `risk: "MEDIUM"`.
+Also runs when the target function is NOT at the top of the call chain (i.e.,
+`called_by` is non-empty in code_discovery.yaml). If Discovery did not provide
+caller_analysis (older Discovery output), the Analyzer performs its own caller
+check.
+
+#### 5.12.1 READ THE CALLER BODY
+
+If Discovery flagged `caller_analysis.risk: "HIGH"` or `"MEDIUM"`, OR if the
+target function has `called_by` entries, read the FULL body of the immediate
+caller function. Not a 30-line snippet — the full body. This is the function that
+calls the target and processes its return value.
+
+```python
+def read_caller_body(discovery_hints, cr_id, function_index, file_lines):
+    """Read the caller function's full body for post-processing analysis."""
+    caller_info = discovery_hints.get(cr_id, {}).get("caller_analysis", {})
+    caller_name = caller_info.get("caller_function")
+
+    if not caller_name:
+        # Discovery didn't provide caller — look at called_by
+        called_by = discovery_hints.get(cr_id, {}).get("called_by", [])
+        if called_by:
+            caller_name = called_by[0]  # Immediate caller
+        else:
+            return None  # No caller to check
+
+    # Find and read caller body
+    for func in function_index:
+        if func["name"] == caller_name:
+            return extract_function_body(file_lines, func["line_start"], func["line_end"])
+    return None
+```
+
+#### 5.12.2 COMPETING WRITE DETECTION (R2)
+
+For each variable that stores the target function's return value, scan the caller
+for ALL assignment sites to that variable. Flag "write-after-write" hazards.
+
+```python
+def detect_competing_writes(caller_body, target_func_name, result_variable):
+    """Find all writes to result_variable after the call to target_func.
+
+    Returns list of competing writes with context.
+    """
+    call_site_line = None
+    competing_writes = []
+
+    for i, line in enumerate(caller_body):
+        # Find where target function is called
+        if target_func_name in line and call_site_line is None:
+            call_site_line = i
+            continue
+
+        # After the call site, look for writes to the result variable
+        if call_site_line is not None and is_assignment_to(line, result_variable):
+            # Check if this write is conditional or unconditional
+            is_conditional = is_inside_if_block(caller_body, i)
+            competing_writes.append({
+                "line": i,
+                "content": line.strip(),
+                "conditional": is_conditional,
+                "context": caller_body[max(0,i-3):i+4],
+            })
+
+    return competing_writes
+```
+
+#### 5.12.3 UNCONDITIONAL OVERWRITE DETECTION (R4)
+
+Flag as a **code smell** any pattern where:
+- A variable is computed via a complex calculation (min(), multi-cap, callee return)
+- Then unconditionally overwritten in a subsequent branch
+
+Specifically compare sibling branches: if one branch conditionally updates the
+variable (`If CInt(x) >= 10 Then x = ...`) but another branch unconditionally
+overwrites it (`x = ...`), flag the unconditional branch as suspicious.
+
+#### 5.12.4 REDUNDANT DOUBLE-ASSIGNMENT DETECTION (R5)
+
+Flag as a **code smell** any pattern where the same variable is assigned twice
+in sequence with no intervening logic:
+
+```vb
+' FLAGGED: redundant double-assignment
+driverRecord = CStr(SetDriverRecord_MaxDR_YearsLicensed(objDriver))
+driverRecord = SetDriverRecord_MaxDR_YearsLicensed(objDriver)
+```
+
+This is a reliable indicator of copy-paste errors and incomplete refactors.
+
+#### 5.12.5 BYREF PARAMETER HAZARD DETECTION
+
+VB.NET `ByRef` parameters allow callees to silently modify the caller's variables
+without any visible assignment in the caller. The competing write detector (5.12.2)
+only catches direct assignments (`result_variable = ...`). This step catches
+indirect modification through ByRef parameter passing.
+
+After the call site, scan for any function/sub call that passes `result_variable`
+as an argument. Cross-reference the callee's parameter list (from the function
+index already built in Step 4.3) to check if the corresponding parameter is `ByRef`.
+
+```python
+def detect_byref_hazards(caller_body, target_func_name, result_variable,
+                          function_index, call_site_line):
+    """Detect ByRef parameter passing that could silently modify result_variable.
+
+    VB.NET ByRef is the default for Sub parameters. A call like:
+        ProcessDriverRecord(driverRecord)
+    could modify driverRecord in-place if the parameter is ByRef.
+    """
+    byref_hazards = []
+
+    for i, line in enumerate(caller_body):
+        if i <= call_site_line:
+            continue  # Only check after the call to target function
+
+        # Look for function/sub calls that pass result_variable as argument
+        # Pattern: FuncName(... result_variable ...)
+        stripped = line.strip()
+        if stripped.startswith("'"):
+            continue  # Skip comments
+
+        # Check if result_variable appears as an argument in any call
+        if result_variable not in stripped:
+            continue
+
+        # Extract the callee name from the line
+        callee_name = extract_callee_name(stripped)
+        if not callee_name or callee_name == target_func_name:
+            continue
+
+        # Find the callee in function_index and check param types
+        for func in function_index:
+            if func["name"] == callee_name:
+                params = func.get("param_types", [])
+                # Find which argument position result_variable is in
+                arg_pos = find_argument_position(stripped, callee_name,
+                                                  result_variable)
+                if arg_pos is not None and arg_pos < len(params):
+                    param = params[arg_pos]
+                    # ByRef is default in VB.NET for Sub; explicit ByRef or
+                    # no modifier = ByRef
+                    if param.get("by_ref", False) or not param.get("by_val", False):
+                        byref_hazards.append({
+                            "line": i,
+                            "content": stripped,
+                            "callee": callee_name,
+                            "parameter": param.get("name", f"arg{arg_pos}"),
+                            "risk": "MEDIUM",
+                            "note": (
+                                f"'{callee_name}' receives '{result_variable}' "
+                                f"as ByRef parameter '{param.get('name', '?')}' "
+                                f"— may modify it in-place, bypassing the fix"
+                            ),
+                        })
+                break
+
+    return byref_hazards
+```
+
+When ByRef hazards are found, add them to `competing_writes` with `type: "byref"`
+and adjust `overall_risk` upward (NONE→MEDIUM, MEDIUM→HIGH).
+
+#### 5.12.6 OUTPUT
+
+Add to each CR analysis file:
+
+```yaml
+caller_analysis:
+  caller_function: "SetDriverRecord"
+  caller_file: "FMRP Shared/Ontario/Auto/mod_DC_DR_ONAuto20240601.vb"
+  caller_line_start: 1766
+  caller_line_end: 1819
+  result_variable: "driverRecord"
+  call_site_line: 1780
+  competing_writes:
+    - line: 1799
+      content: "driverRecord = CStr(SetDriverRecord_MaxDR_YearsLicensed(objDriver))"
+      conditional: false
+      risk: "HIGH"
+      note: "Unconditional overwrite — discards conviction cap from target function"
+    - line: 1800
+      content: "driverRecord = SetDriverRecord_MaxDR_YearsLicensed(objDriver)"
+      conditional: false
+      risk: "HIGH"
+      note: "Redundant double-assignment (copy-paste artifact)"
+  byref_hazards: []   # Empty if none found; populated by Step 5.12.5
+  code_smells:
+    - type: "unconditional_overwrite"
+      line: 1799
+      note: "Under-25 branch is conditional (If CInt(driverRecord) >= 10) but >= 25 branch is unconditional"
+    - type: "redundant_double_assignment"
+      lines: [1799, 1800]
+      note: "Same variable assigned twice in sequence with no intervening logic"
+  overall_risk: "HIGH"
+  recommendation: |
+    WARNING: Fixing the target function alone may be insufficient.
+    The caller unconditionally overwrites the result at line 1799.
+    The Decomposer MUST produce an additional intent to fix the caller,
+    or the fix will have no effect.
+```
+
+**When `overall_risk` is HIGH:** The Analyzer MUST surface this prominently:
+
+```
+CALLER ANALYSIS WARNING (CR-001):
+  Target function: SetDriverRecord_MaxDR_Convictions (fix at line 1440)
+  Caller function: SetDriverRecord (lines 1766-1819)
+  PROBLEM: Caller overwrites result at line 1799 (unconditional)
+  The fix inside SetDriverRecord_MaxDR_Convictions will be NULLIFIED
+  unless the caller is also fixed.
+  → Decomposer MUST produce an additional intent for the caller.
+```
+
+#### Context Cost of Step 5.12
+
+| Activity | Tool Calls | Time |
+|----------|-----------|------|
+| Read caller body (if not already in memory) | 0-1 | ~1-2 sec |
+| Competing write scan (pure logic) | 0 | negligible |
+| Code smell detection (pure logic) | 0 | negligible |
+| **Total per CR** | **0-1** | **~1-2 sec** |
+
 ---
 
 ### Step 6: Resolve Rounding Mode

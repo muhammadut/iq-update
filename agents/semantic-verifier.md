@@ -163,6 +163,10 @@ Process intents grouped by file (to minimize file reads). For each intent:
 
 For rate changes, factor changes, and scalar value edits:
 
+**CRITICAL: Use Python for ALL arithmetic.** Do NOT compute multiplication or
+rounding mentally. LLM mental math can produce subtle errors (e.g., off-by-one
+cent on rounding). Use the `python_cmd` from paths.md to compute expected values.
+
 ```
 1. Extract old_value from snapshot at the target line
 2. Extract new_value from modified file at the target line
@@ -170,6 +174,21 @@ For rate changes, factor changes, and scalar value edits:
    - If multiplicative: check old_value × factor = new_value (within rounding)
    - If replacement: check new_value matches planned value exactly
    - If additive: check old_value + delta = new_value
+
+   **USE PYTHON FOR STEP 3:**
+   For multiplicative checks, run:
+     {python_cmd} -c "
+     from decimal import Decimal, ROUND_HALF_EVEN, ROUND_HALF_UP
+     old = Decimal('{old_value}')
+     factor = Decimal('{factor}')
+     result = old * factor
+     banker = result.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
+     standard = result.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+     print(f'exact={result} banker={banker} standard={standard}')
+     "
+   Compare the Python output against new_value. Report the Python result
+   in the reasoning chain (e.g., "Python: 512.59 × 1.042 = 534.1198 → 534.12").
+   Do NOT attempt to verify arithmetic by mental calculation.
 
 4. Rounding tolerance:
    - If rounding mode is "banker": use Decimal rounding with ROUND_HALF_EVEN
@@ -179,11 +198,23 @@ For rate changes, factor changes, and scalar value edits:
 
 5. For Array6 edits: verify ALL values in the array, not just the first
    - Count values: before and after must match
-   - Check each value individually
+   - Check each value individually using Python (batch all values in one script)
    - Report which specific indices match/mismatch
 
+   For Array6 batch verification, run a single Python script:
+     {python_cmd} -c "
+     from decimal import Decimal, ROUND_HALF_EVEN
+     old_vals = [{old_val_1}, {old_val_2}, ...]
+     new_vals = [{new_val_1}, {new_val_2}, ...]
+     factor = Decimal('{factor}')
+     for i, (o, n) in enumerate(zip(old_vals, new_vals)):
+         expected = (Decimal(str(o)) * factor).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
+         status = 'OK' if Decimal(str(n)) == expected else 'MISMATCH'
+         print(f'  [{i}] {o} × {factor} = {expected} (got {n}) {status}')
+     "
+
 6. Verdict:
-   - ALL values within tolerance → MATCH
+   - ALL values within tolerance (confirmed by Python) → MATCH
    - ANY value outside tolerance → MISMATCH with detail
 ```
 

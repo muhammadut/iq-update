@@ -597,6 +597,38 @@ new line. The engine reasons about what kind of value is on the line:
 - **Factor/limit replacement:** find the old value on the line, replace with new
 - **Const modification:** find the value after `=`, replace, preserve trailing comment
 
+**CRITICAL: Use Python for ALL arithmetic.** Do NOT compute `old_value × factor`
+mentally. LLM mental math produces subtle rounding errors (off-by-one cent) that
+are nearly invisible in review. For every multiplicative computation, use Python:
+
+```bash
+{python_cmd} -c "
+from decimal import Decimal, ROUND_HALF_EVEN, ROUND_HALF_UP
+old = Decimal('{old_value}')
+factor = Decimal('{factor}')
+result = old * factor
+banker = result.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
+standard = result.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+print(f'{banker}')
+"
+```
+
+For batch Array6 computation (multiple values on one line), run a single script:
+
+```bash
+{python_cmd} -c "
+from decimal import Decimal, ROUND_HALF_EVEN
+vals = [{val1}, {val2}, {val3}, ...]
+factor = Decimal('{factor}')
+results = [(Decimal(str(v)) * factor).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN) for v in vals]
+print(','.join(str(r) for r in results))
+"
+```
+
+Read the Python output and use those exact values in the replacement line. The
+`safe_eval_arithmetic` helper (below) handles expression evaluation for non-numeric
+Array6 arguments (e.g., `basePremium + 30`).
+
 See **strategies.md** for detailed guidance on each of these value change types.
 
 #### 6b: Structure Insertion
@@ -952,25 +984,47 @@ Files in `config.yaml["cross_province_shared_files"]` (e.g., `Code/PORTCommonHea
 are shared across provinces. These are NEVER auto-modified — flag for developer
 review instead.
 
-### Rule 15: Never Apply Unverified Constants or API References
+### Rule 15: Never Apply Unverified Symbols (Constants, Functions, Case Values)
 
-Before applying any edit that introduces a new constant, enum value, or
-`Cssi.ResourcesConstants.*` reference (i.e., a symbol that does NOT appear in the
-`old_string` / before-code), the worker MUST verify the symbol exists in the
-codebase by grepping for it. If zero matches are found:
+Before applying any edit that introduces a new symbol (i.e., a symbol that does
+NOT appear in the `old_string` / before-code), the worker MUST verify the symbol
+exists in the codebase by grepping for it. If zero matches are found:
 
 1. Do NOT apply the edit
 2. Mark the intent result as `status: "needs_review"`
 3. Report: `"Unresolved symbol: {symbol_name} — not found in codebase. Skipping edit."`
 
-This prevents build-breaking errors from fabricated constants. The Planner or
+This prevents build-breaking errors from fabricated symbols. The Planner or
 upstream agents may have hallucinated a symbol by pattern extrapolation (e.g.,
-observing `DISCOUNT_ANTITHEFTDEVICE` and inventing `DISCOUNT_ALLPERILS`).
+observing `DISCOUNT_ANTITHEFTDEVICE` and inventing `DISCOUNT_ALLPERILS`, or
+seeing `AddToDiscountArray` calls and inventing `AddToDiscountArray_AllPerils`).
 
-**What to grep for:** Extract any `Cssi.ResourcesConstants.MappingCodes.*` or
-fully-qualified enum references from the new code. Search the carrier root and
-Hub/ directory for each symbol. A valid symbol will appear in at least one
-`ResourceID.vb`, `Constants.vb`, or shared class file.
+**What to verify — three categories:**
+
+**A. Constants and enum references:**
+Extract any `Cssi.ResourcesConstants.MappingCodes.*`, fully-qualified enum values,
+or ALL_CAPS constants from the new code. Search the carrier root and Hub/ directory.
+A valid symbol will appear in at least one `ResourceID.vb`, `Constants.vb`, or
+shared class file.
+
+**B. Function/Sub calls:**
+Extract any function or Sub call from the new code that does NOT appear in the
+`old_string`. For each new function call, grep the carrier root for the function
+definition (`Function {name}` or `Sub {name}`). A valid function must have at
+least one definition in the codebase. This catches fabricated functions like
+`AddToDiscountArray_AllPerils()` that look plausible but do not exist.
+
+**C. Case string/enum values:**
+Extract any `Case "..."` string values from the new code that are not in the
+`old_string`. For each new Case value, grep the codebase for that value. A valid
+Case value should appear in at least one other location (e.g., a Constants file,
+an enum definition, or an existing Case block). New Case values for **numeric**
+Cases (e.g., `Case 7500`) are exempt — these are typically new coverage tiers
+specified in the ticket.
+
+**Skip verification for:** Values explicitly provided in the intent's `parameters`
+(e.g., `new_value`, `premium`) — these came from the ticket via Intake, not from
+pattern extrapolation.
 
 ---
 

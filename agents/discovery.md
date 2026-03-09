@@ -407,6 +407,169 @@ def find_vehicle_type_functions(func_index):
     return vehicle_funcs
 ```
 
+3.6. **TRACE BACK UP: Caller post-processing check (CRITICAL)**
+
+After finding the target function for each CR, trace the return value back UP
+through the call chain. The goal is to verify that the caller doesn't override,
+discard, or transform the target function's return value after it comes back.
+
+**Why this matters:** A fix inside a callee function is useless if the caller
+overwrites the result. This is not hypothetical — it happens when callers have
+post-processing logic (loops, conditionals, or assignments) AFTER calling the
+target function.
+
+**For each resolved CR target:**
+
+```python
+def check_caller_post_processing(target_func, call_chain, func_index, file_lines):
+    """After finding bug in target_func, check if the caller respects its return value.
+
+    Read the BODY of the immediate caller. Look for:
+    1. The variable that stores target_func's return value
+    2. Any SUBSEQUENT writes to that variable (after the call site)
+    3. Whether those writes are conditional or unconditional
+    """
+    # Find the immediate caller from the call chain
+    caller = find_caller_in_chain(target_func, call_chain)
+    if not caller:
+        return None  # target_func IS the top-level — no caller to check
+
+    # Read the caller's FULL body (not just a 30-line snippet)
+    caller_body = read_function_body(file_lines, func_index, caller)
+
+    # Find where target_func is called and what variable stores its result
+    call_site = find_call_to(caller_body, target_func)
+    if not call_site:
+        return None  # caller doesn't directly call target (intermediate wrapper)
+
+    result_var = call_site.assigned_to  # e.g., "driverRecord", "intMaxDR"
+
+    # Scan ALL lines AFTER the call site for writes to the same variable
+    competing_writes = []
+    for line_num in range(call_site.line + 1, len(caller_body)):
+        line = caller_body[line_num]
+        if is_assignment_to(line, result_var):
+            competing_writes.append({
+                "line": line_num,
+                "content": line.strip(),
+                "conditional": is_inside_conditional(caller_body, line_num),
+                "context": get_surrounding_lines(caller_body, line_num, 3)
+            })
+
+    return {
+        "caller": caller,
+        "result_variable": result_var,
+        "call_site_line": call_site.line,
+        "competing_writes": competing_writes,
+        "risk": "HIGH" if any(not cw["conditional"] for cw in competing_writes) else
+                "MEDIUM" if competing_writes else "NONE"
+    }
+```
+
+#### 3.6.1 TRANSITIVE CALLER CHECK (Walk up 2-3 levels)
+
+The single-level check above catches the immediate caller. But if the call chain
+is A→B→C and the ticket targets C, an overwrite in A is invisible to the single-
+level check. Walk up the `call_chain` to check the caller's caller.
+
+**Limit:** Walk up a maximum of 3 levels (immediate caller + 2 ancestors). Beyond
+that, the call chain is too deep for automated analysis — flag for developer review.
+
+```python
+def check_transitive_callers(target_func, call_chain, func_index, file_lines,
+                              max_levels=3):
+    """Walk up the call chain checking each caller for post-processing overwrites.
+
+    Returns a list of caller_analysis results, one per level.
+    Stop early if:
+    - We reach the top of the chain (no more callers)
+    - The caller is in a different file (cross-file tracing needs file I/O)
+    - We exceed max_levels
+    """
+    results = []
+    current_func = target_func
+
+    for level in range(max_levels):
+        analysis = check_caller_post_processing(
+            current_func, call_chain, func_index, file_lines
+        )
+        if analysis is None:
+            break  # No caller to check (top of chain or different file)
+
+        analysis["level"] = level  # 0 = immediate, 1 = grandparent, etc.
+        results.append(analysis)
+
+        if analysis["risk"] == "HIGH":
+            break  # Found the problem — no need to go higher
+
+        # Move up: the caller becomes the new target
+        current_func = analysis["caller"]
+
+    return results
+```
+
+**Cross-file callers:** When the caller is in a different file (e.g., CalcMain.vb
+calls a function in mod_Common), `find_caller_in_chain` may return a name that is
+NOT in `func_index` (because func_index only covers the current file). In this case:
+
+1. Check if the caller file path is available from `call_chain` or `calculation_flow`
+2. If available, read that file and build a local func_index for the caller
+3. If not available, record `"cross_file_caller": true` and flag for Analyzer follow-up
+
+```python
+def resolve_cross_file_caller(caller_name, call_chain, calculation_flow):
+    """Find the file containing a caller that isn't in the current file's func_index."""
+    # Check if calculation_flow has the file path for this caller
+    for step in calculation_flow:
+        if step.get("function") == caller_name:
+            return step.get("file")
+    return None  # Caller file unknown — flag for developer
+```
+
+**Output:** The `caller_analysis` field now includes `transitive_callers` when
+additional levels are checked:
+
+```yaml
+    caller_analysis:
+      # ... immediate caller fields (unchanged) ...
+      transitive_callers:
+        - level: 1
+          caller_function: "TotPrem"
+          caller_file: "CalcMain.vb"
+          result_variable: "intDriverDiscount"
+          competing_writes: []
+          risk: "NONE"
+```
+
+**Output in code_discovery.yaml:** Add to each `request_targets` entry:
+
+```yaml
+  cr-001:
+    # ... existing fields ...
+    caller_analysis:
+      caller_function: "{caller name}"
+      caller_file: "{file path}"
+      result_variable: "{variable that stores the return value}"
+      call_site_line: {line number in caller}
+      competing_writes:
+        - line: {line number}
+          content: "{the line that writes to the same variable}"
+          conditional: false   # true = guarded by If, false = unconditional overwrite
+          context: "{3 lines before and after for Analyzer to review}"
+      risk: "HIGH"  # HIGH = unconditional overwrite, MEDIUM = conditional, NONE = clean
+      warning: "Caller SetDriverRecord overwrites driverRecord unconditionally at line 1799 after calling SetDriverRecord_MaxDR"
+```
+
+**When `risk` is HIGH or MEDIUM:** Include a prominent warning in the completion
+summary so the Analyzer knows to investigate the caller:
+
+```
+WARNING: CR-001 target function SetDriverRecord_MaxDR_Convictions has its return
+value potentially overwritten by caller SetDriverRecord at line 1799.
+Risk: HIGH (unconditional write to driverRecord after call site).
+Analyzer MUST investigate the caller body.
+```
+
 ---
 
 ### Step 4: BUILD THE CODE MAP
@@ -457,6 +620,13 @@ request_targets:
         relationship: "same_category"
         line_start: {1-indexed line number}
         note: "{why this is related}"
+    caller_analysis:                   # From Step 3.6 — trace back UP
+      caller_function: "{caller name or null if top-level}"
+      caller_file: "{file path}"
+      result_variable: "{var that stores return value, or null}"
+      call_site_line: {line in caller}
+      competing_writes: []              # Empty = clean pass-through
+      risk: "NONE"                      # NONE | MEDIUM | HIGH
     code_snippet: |
       ' First 30 lines of the function body
       ' (enough for downstream agents to understand structure)
