@@ -313,7 +313,11 @@ comments, and what was extracted from images. This transparency catches
 misunderstandings early AND gives downstream agents (Discovery, Analyzer, Planner)
 a rich evidence chain to link code changes back to ticket evidence.
 
-Write `parsed/ticket_understanding.md` with this structure:
+**ALWAYS write the file first, THEN present it.** Use the Write tool to create
+`parsed/ticket_understanding.md` BEFORE presenting it to the developer or returning
+to the orchestrator. This file is read by downstream agents (Discovery, Analyzer,
+Planner) — if it doesn't exist, the plan will show "(ticket_understanding.md not
+available)". Write it with this structure:
 
 ```markdown
 # Ticket Understanding: {ticket_ref or "Ad-hoc Request"}
@@ -449,11 +453,16 @@ understanding is correct. This is the most important checkpoint in the pipeline.
 
 #### Step 0.5: Save Confirmed Understanding
 
-Once the developer confirms:
-1. Update `parsed/ticket_understanding.md` with any corrections (mark as confirmed)
+The file `parsed/ticket_understanding.md` was already written in Step 0.3. Now
+update it with the developer's feedback:
+1. If the developer provided corrections, rewrite the file with updated content
 2. Append `\n\n## Developer Confirmation\nConfirmed by developer at {timestamp}.\n`
    and any corrections or additional context they provided.
 3. Proceed to Step 1 using the CONFIRMED understanding to guide CR extraction.
+
+**If running as a sub-agent (no direct developer interaction):** The file from
+Step 0.3 is the draft. The orchestrator will present it to the developer and
+handle confirmation. The file MUST exist when the agent returns.
 
 **For subsequent steps:** When extracting CRs in Steps 3-4, reference the confirmed
 ticket understanding. If the understanding says "3% increase per comment by John"

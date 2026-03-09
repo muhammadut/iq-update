@@ -1334,6 +1334,7 @@ Agent:  planner
 Input:  analysis/intent_graph.yaml,
         analysis/files_to_copy.yaml, analysis/blast_radius.md,
         analysis/analyzer_output/,
+        parsed/ticket_understanding.md, parsed/change_requests.yaml,
         actual Code/ source files
 Output: plan/execution_plan.md, plan/execution_order.yaml,
         execution/file_hashes.yaml
