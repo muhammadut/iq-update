@@ -1,4 +1,4 @@
-# IQ Update Plugin — Contract Registry (v0.4.0)
+# IQ Update Plugin — Contract Registry (v0.5.0)
 #
 # This file is the SOURCE OF TRUTH for all inter-agent artifact schemas.
 # Inline schema examples in agent specs are illustrative only — if they
@@ -7,7 +7,7 @@
 # Updated: 2026-03-10
 
 version: "2.0"
-pipeline_version: "0.4.0"
+pipeline_version: "0.5.0"
 
 # ──────────────────────────────────────────────────────────────────────
 # Identity Rules — canonical naming and precision contracts
