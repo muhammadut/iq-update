@@ -1531,6 +1531,7 @@ The Plan agent has NO developer interaction — it is fully automated.
      -c 'reasoning.effort="xhigh"' \
      --full-auto \
      --ephemeral \
+     --skip-git-repo-check \
      -C "{carrier_root}" \
      -o "{workstream_dir}/plan/cross_review.md" \
      "$(cat {workstream_dir}/plan/cross_review_prompt.md)"
@@ -1544,6 +1545,8 @@ The Plan agent has NO developer interaction — it is fully automated.
      mode). The reviewer needs to freely read files, run the VB parser, `find`,
      `grep`, etc. without getting stuck on permission prompts.
    - `--ephemeral` — no session persistence (fresh context every time)
+   - `--skip-git-repo-check` — carrier folders are SVN-managed, not git repos.
+     Without this flag, Codex refuses to run outside a git repository.
    - `-C "{carrier_root}"` — working directory is the carrier root so Codex
      can navigate and read all VB.NET source files independently
    - `-o` — write the final response as markdown to a file we read back
