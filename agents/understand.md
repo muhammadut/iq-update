@@ -1378,6 +1378,66 @@ HAZARD: dat_file_function
   Source: parser function.calls[] — presence of GetPremFromResourceFile
   Detection: any(c.name == "GetPremFromResourceFile" for c in function.calls)
   Impact: CR targeting this function CANNOT be fulfilled by code edits
+
+HAZARD: stored_field_propagation
+  Trigger: A function called from the target takes a premium/subtotal parameter
+           as ByVal AND stores it to an object field (e.g., obj.PREMIUMCOMP = value).
+           Other functions later read that stored field to compute totals or display.
+  Source: Parser on the CALLED function — look for assignments to object fields
+          (pattern: {object}.{FIELD} = {parameter_or_derived_value})
+  Detection:
+    1. For each function call in the target that passes a premium/subtotal variable:
+       a. Run parser on the called function
+       b. Check if the parameter is ByVal (parser gives parameter modifiers)
+       c. Read the function body — scan for obj.FIELD = assignments using the parameter
+    2. If found, grep the codebase for readers of that field name
+    3. If a "Totals" function or display function reads the field, FLAG this hazard
+  Impact: Moving code that changes the premium BEFORE vs AFTER this call will cause
+          the stored field to have a different value. The fix may be correct locally
+          but break the Totals/display downstream.
+  Record: {
+    type: "stored_field_propagation",
+    severity: "HIGH",
+    storing_function: "{function that stores to field}",
+    stored_field: "{field name, e.g., PREMIUMCOMP}",
+    stored_from_param: "{parameter name}",
+    param_is_byval: true,
+    field_readers: ["{list of functions that read this field}"],
+    totals_function: "{function that aggregates stored fields, if found}",
+    impact: "Reordering code around this call changes what value gets stored"
+  }
+
+HAZARD: hidden_consumer
+  Trigger: A function called from the target has side effects that other functions
+           depend on — but the dependency is invisible from the caller's perspective.
+           This is the GENERALIZED form of stored_field_propagation.
+  Subtypes:
+    a. stored_field — Function stores parameter to object field (see above)
+    b. collection_mutation — Function adds to a shared array/collection (e.g.,
+       AddToArray, AddToDiscountArray) that is later read for display or totals
+    c. global_state — Function modifies a module-level variable read elsewhere
+    d. byref_output — Function has ByRef output parameters that the caller
+       doesn't capture (but another function in the chain does)
+  Source: Parser on called functions + Claude semantic reading
+  Detection: For every function call in the target that ISN'T a pure value return:
+    1. Run parser on the called function
+    2. Read the function body — look for:
+       - Object field assignments (obj.FIELD = ...)
+       - Collection additions (AddToArray, .Add, ReDim Preserve)
+       - Module-level variable writes
+       - ByRef output parameters
+    3. If any found, trace who reads the modified state
+  Impact: The plan MUST account for all consumers of the side effect, not just
+          the direct return value. Reordering calls changes what consumers see.
+  Record: {
+    type: "hidden_consumer",
+    subtype: "{stored_field|collection_mutation|global_state|byref_output}",
+    severity: "HIGH",
+    side_effect_function: "{function with side effects}",
+    side_effect_detail: "{what it modifies}",
+    consumers: ["{functions that read the modified state}"],
+    impact: "{what breaks if the call order changes}"
+  }
 ```
 
 Record all hazards in the CR's `understanding.hazards[]` list.
@@ -1451,6 +1511,54 @@ For each subsequent call in caller body:
     Check callee's parameter list from parser
     IF parameter is ByRef: FLAG as byref_hazard
 ```
+
+8. **Stored field / hidden consumer detection (CRITICAL):** For every function
+call in the target that passes a premium, subtotal, or accumulator variable:
+
+```
+For each call in target function body that receives result_variable or intSubTotal:
+  callee_name = call.name
+  callee_file = find file containing callee (may be OUTSIDE carrier repo — trace it)
+
+  # Parse the called function (even if in shared TBW framework)
+  callee_data = {vb_parser} function {callee_file} {callee_name}
+
+  # Check 1: Is the premium parameter ByVal?
+  param = find parameter matching the passed variable
+  IF param.modifier == "ByVal":
+    # The caller's variable is NOT modified — but the callee may STORE the value
+
+  # Check 2: Does the callee store to an object field?
+  READ callee body — look for patterns:
+    - {object}.{FIELD} = {param_or_derived}  (e.g., oVeh.PREMIUMCOMP = adjusted)
+    - {object}.{FIELD} = {expression using param}
+  IF found:
+    stored_field = FIELD name
+    # Check 3: Who reads this field?
+    GREP codebase for stored_field name (e.g., "PREMIUMCOMP")
+    readers = functions that access obj.{stored_field}
+    # Check 4: Is there a Totals/aggregation function?
+    totals_funcs = [r for r in readers if "Total" in r.name or "Sum" in r.name]
+
+    FLAG as stored_field_propagation hazard (see Step U.9 schema)
+
+  # Check 3: Does the callee add to a shared collection?
+  READ callee body — look for:
+    - AddToArray, .Add, ReDim Preserve, collection manipulations
+  IF found:
+    FLAG as hidden_consumer hazard, subtype: collection_mutation
+
+  # Check 4: Does the callee modify module-level state?
+  READ callee body — look for assignments to variables NOT in parameter list
+    and NOT declared locally (Dim)
+  IF found:
+    FLAG as hidden_consumer hazard, subtype: global_state
+```
+
+**This step traces BEYOND the carrier boundary.** If the callee lives in
+`Cssi.Net/Components/` or another shared module, follow it. Use the parser
+on the shared file — it works on any .vb file. This is how ticket 21333's
+stored field bug was found: the function was in TbwIQCommon, 3 levels deep.
 
 8. When `risk` is HIGH or MEDIUM, surface prominently:
 

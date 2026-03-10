@@ -1042,6 +1042,56 @@ def check_caller_warnings(intents, understanding_targets):
         caller_intent["depends_on"].append(intent["id"])
         intent["has_caller_fix"] = caller_intent["id"]
 
+    # --- P.4.3: Stored Field / Hidden Consumer Analysis ---
+    #
+    # Check for stored_field_propagation and hidden_consumer hazards.
+    # These are DIFFERENT from caller_overwrites_return — they mean a
+    # CALLED function has side effects that affect downstream consumers.
+    #
+    # Example: Moving High Theft surcharge after the All Perils call
+    # fixes the local variable but breaks the stored PREMIUMCOMP field
+    # that the Totals function reads.
+    #
+    for intent in intents:
+        understanding = intent.get('understanding', {})
+        hazards = understanding.get('hazards', [])
+
+        for h in hazards:
+            if h.get('type') in ('stored_field_propagation', 'hidden_consumer'):
+                # ALWAYS treat as HIGH risk — these are invisible dependencies
+                intent["stored_field_risk"] = "HIGH"
+                intent["stored_field_detail"] = {
+                    "hazard_type": h.get('type'),
+                    "subtype": h.get('subtype', 'stored_field'),
+                    "storing_function": h.get('storing_function', h.get('side_effect_function')),
+                    "stored_field": h.get('stored_field', h.get('side_effect_detail')),
+                    "consumers": h.get('field_readers', h.get('consumers', [])),
+                    "totals_function": h.get('totals_function'),
+                }
+
+                # Add a prominent warning to the execution plan
+                warning = {
+                    "type": "STORED_FIELD_WARNING",
+                    "intent_id": intent["id"],
+                    "message": (
+                        f"CRITICAL: {h.get('storing_function', 'Called function')} "
+                        f"stores value to {h.get('stored_field', 'object field')} "
+                        f"(ByVal — caller's variable is NOT updated). "
+                        f"Consumers: {h.get('field_readers', h.get('consumers', []))}. "
+                        f"The plan MUST ensure the stored field has the correct "
+                        f"value after all changes. A simple code reorder may break "
+                        f"the stored value while appearing correct locally."
+                    ),
+                }
+                intent.setdefault("plan_warnings", []).append(warning)
+
+                # If a totals function was identified, add dependency note
+                if h.get('totals_function'):
+                    intent.setdefault("verification_notes", []).append(
+                        f"Verify {h['totals_function']} reads correct stored "
+                        f"values after this change"
+                    )
+
     return additional_intents
 ```
 
@@ -1846,6 +1896,16 @@ unconfirmed = [i['id'] for i in intents if not i.get('developer_confirmed', True
 if unconfirmed:
     risk_level = "HIGH"
     risk_reasons.append(f"Unconfirmed intents: {', '.join(unconfirmed)}")
+
+# Stored field propagation or hidden consumer hazards → always HIGH
+stored_field_intents = [i['id'] for i in intents if i.get('stored_field_risk')]
+if stored_field_intents:
+    risk_level = "HIGH"
+    risk_reasons.append(
+        f"Stored field propagation detected in {', '.join(stored_field_intents)}: "
+        f"called functions store values to object fields read by downstream consumers. "
+        f"Code reordering may appear correct locally but break stored field values."
+    )
 ```
 
 #### P.12.2 Intent Tier Assignment

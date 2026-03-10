@@ -262,6 +262,7 @@ enriched by the Understand agent (Step U.12) and `/iq-investigate --promote`. Co
 - **glossary** — Business terms → canonical functions (e.g., "liability bundle" → `GetLiabilityBundlePremiums`)
 - **factor_cardinality** — Case branch counts per function (enriched by Understand at runtime)
 - **rule_dependencies** — Business rule pairs (e.g., Water Coverage ↔ Sewer Backup)
+- **stored_field_flows** — Maps functions that store premium values to object fields → functions that read those fields. Critical for detecting hidden dependencies when code is reordered. Enriched by Understand (Step U.10) and `/iq-investigate --promote`.
 
 Agents Grep for specific sections — **never load the full file**. Workers never see it
 (zero capsule impact). All agents gracefully degrade if the profile is absent.

@@ -1281,10 +1281,37 @@ The Codebase Profile is rebuilt when:
 
 **Incremental enrichment (NOT from /iq-init):**
 - **Understand agent (Step U.12)** adds `factor_cardinality` and `rule_dependencies` entries
-- **/iq-investigate --promote** adds validated glossary entries and rule dependencies
+- **Understand agent (Step U.10)** adds `stored_field_flows` entries when
+  stored_field_propagation hazards are detected (see below)
+- **/iq-investigate --promote** adds validated glossary entries, rule dependencies,
+  and stored field flow discoveries
 - These enrichments have `provenance: "understand"` or `provenance: "investigation"`
   and are NEVER overwritten by /iq-init rebuilds (init only overwrites
   `provenance: "init"` entries)
+
+**Stored Field Flows (enriched by Understand + /iq-investigate):**
+```yaml
+stored_field_flows:
+  # Maps: function that STORES → field → function(s) that READ
+  # This is reusable knowledge — once discovered for one ticket, it applies to all future work
+  - storing_function: "PolicyTerm_AddToPPVCoverageArray"
+    stored_field: "PREMIUMCOMP"
+    parameter_passing: "ByVal p_dblAnnualPrem"
+    file: "modAutoFunctions.vb"
+    location: "shared"  # shared = TBW framework, carrier = carrier code
+    readers:
+      - function: "PolicyTerm_AddTotalsToPPVCoverageArray"
+        reads_field: "POLTERMPREMIUMCOMP"
+        computes: "POLTERMPREMIUMAP = POLTERMPREMIUMCOLL + POLTERMPREMIUMCOMP"
+        file: "modAutoFunctions.vb"
+    provenance: "investigation"  # or "understand"
+    discovered_from: "ticket-21333"
+    validated_by: "developer"
+```
+When the Understand agent finds a stored_field_propagation hazard, it checks
+`stored_field_flows` first. If the flow is already known, it can immediately
+flag the hazard without re-tracing the chain. This makes the plugin smarter
+with every ticket.
 
 ---
 

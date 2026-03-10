@@ -1454,6 +1454,20 @@ The Plan agent has NO developer interaction — it is fully automated.
       e. Will any existing function calls or references be broken?
       f. Are ALL lines that need changing actually in the plan? (count the
          Array6 lines, count the Case branches, compare to the plan)
+      g. **STORED FIELD CHECK (CRITICAL):** For every function call in the
+         target that takes a premium/subtotal as a parameter:
+         - Use the parser to check: is the parameter ByVal or ByRef?
+         - Read the called function body: does it STORE the value to an
+           object field (e.g., oVeh.PREMIUMCOMP = adjustedValue)?
+         - If yes: find the "Totals" function that reads that stored field.
+           Verify the stored field will have the CORRECT value after the
+           plan's changes — not just that the local variable is correct.
+         - This applies even if the called function is in shared framework
+           code OUTSIDE the carrier repo. Trace into it.
+      h. **HIDDEN CONSUMER CHECK:** For every function call that modifies
+         shared state (adds to arrays, modifies collections, updates globals):
+         - Who reads that shared state later?
+         - Will the plan's changes cause a consumer to see wrong values?
    5. Look for GAPS — things the plan should do but doesn't:
       a. Missing subtotal/accumulation updates
       b. Missing related functions (if liability changes, check extension too)
@@ -1461,6 +1475,12 @@ The Plan agent has NO developer interaction — it is fully automated.
       d. Values that flow to other calculations not covered by the plan
       e. Functions that are called from the target but whose output isn't
          accounted for in the plan
+      f. **Stored field values that become stale** after the plan's changes —
+         a called function stores a value to a field, but the stored value
+         no longer reflects the correct subtotal because the plan reordered
+         the code around the call
+      g. **Display/report arrays** that show values in the wrong order or
+         with wrong subtotals after the plan's changes
 
    ## Codebase Structure
 
