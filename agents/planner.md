@@ -1955,15 +1955,25 @@ def verify_value_flow(intents):
                 })
 
         # Check if Analyzer flagged caller_analysis but Decomposer didn't
-        # create a fix (belt-and-suspenders check)
-        if (intent.get("parameters", {}).get("caller_analysis_risk") == "HIGH"
-                and not caller_fix_id):
+        # create a fix (belt-and-suspenders check).
+        # The Decomposer propagates caller_analysis onto the original intent
+        # as "caller_analysis_risk" in Step 8.5.3.
+        caller_risk = intent.get("caller_analysis_risk")
+        if caller_risk == "HIGH" and not caller_fix_id:
             flow_warnings.append({
                 "intent": intent["id"],
                 "warning": f"Analyzer detected HIGH caller risk for "
                            f"{intent['function']} but no caller fix intent "
                            f"was generated. Value may be overwritten.",
                 "severity": "CRITICAL",
+            })
+        elif caller_risk == "MEDIUM" and not caller_fix_id:
+            flow_warnings.append({
+                "intent": intent["id"],
+                "warning": f"Analyzer detected MEDIUM caller risk for "
+                           f"{intent['function']}. Caller may conditionally "
+                           f"overwrite the return value.",
+                "severity": "WARNING",
             })
 
     return flow_warnings

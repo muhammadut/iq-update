@@ -1413,8 +1413,8 @@ The Planner has NO developer interaction — it is fully automated.
    original code. This catches hallucinated references before the developer sees
    them. Pattern extrapolation applies to ALL symbol types, not just constants.
 
-   a. Read `plan/execution_order.yaml`. For each intent that has action
-      descriptions or code snippets, extract these symbol categories:
+   a. Read `plan/execution_plan.md` (which contains before/after code
+      snippets). For each intent section, extract these symbol categories:
 
       **Constants & enums:** `Cssi.ResourcesConstants.MappingCodes.*`,
       `ResourcesConstants.*`, all-caps constant names (`DISCOUNT_*`, etc.).
@@ -1463,9 +1463,10 @@ The Planner has NO developer interaction — it is fully automated.
 
    **4b.0 Choose the reviewer:**
 
-   Check if Codex CLI is available: `which codex`.
+   Read the `codex` value from paths.md (already loaded in Check 1).
+   If the value is a valid path (not "NOT FOUND"), Codex CLI is available.
 
-   - **If codex is found:** Use GPT-5.4 via Codex CLI (cross-model review).
+   - **If codex path is valid:** Use GPT-5.4 via Codex CLI (cross-model review).
      Two different models with different training data catch different things.
    - **If codex is NOT found:** Spawn a Claude sub-agent as an independent
      reviewer. The sub-agent gets a fresh context window with NO pipeline

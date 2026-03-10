@@ -274,6 +274,7 @@ every downstream `/iq-*` command.
 ## Plugin
 plugin_root: {absolute path to plugin directory}
 install_type: {local | marketplace}
+plugin_version: {version from package.json, e.g., 0.3.2}
 
 ## Carrier
 carrier_root: {absolute path to carrier folder}

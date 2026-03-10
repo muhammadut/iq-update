@@ -711,6 +711,9 @@ if file_exists(discovery_path):
                 "function_length_hint": target.get("function_length"),
                 "returns_hint": target.get("returns"),
                 "peer_functions": target.get("related_functions", []),
+                # Caller analysis from Discovery Step 3.6 — needed by Step 5.12
+                "caller_analysis": target.get("caller_analysis", {}),
+                "called_by": target.get("called_by", []),
             }
     # Discovery peer_functions feed into Step 5.10.5 (FUB nearby_functions).
     # Stored here, then merged into collect_nearby_functions() in Step 5.10.
@@ -3027,9 +3030,11 @@ def detect_byref_hazards(caller_body, target_func_name, result_variable,
                           function_index, call_site_line):
     """Detect ByRef parameter passing that could silently modify result_variable.
 
-    VB.NET ByRef is the default for Sub parameters. A call like:
+    VB.NET defaults to ByVal (since VB.NET 2005). However, some legacy code
+    or explicit ByRef declarations allow callees to modify the caller's
+    variable in-place. A call like:
         ProcessDriverRecord(driverRecord)
-    could modify driverRecord in-place if the parameter is ByRef.
+    could modify driverRecord in-place if the parameter is explicitly ByRef.
     """
     byref_hazards = []
 
@@ -3061,9 +3066,10 @@ def detect_byref_hazards(caller_body, target_func_name, result_variable,
                                                   result_variable)
                 if arg_pos is not None and arg_pos < len(params):
                     param = params[arg_pos]
-                    # ByRef is default in VB.NET for Sub; explicit ByRef or
-                    # no modifier = ByRef
-                    if param.get("by_ref", False) or not param.get("by_val", False):
+                    # VB.NET defaults to ByVal. Only flag if explicitly ByRef.
+                    # If modifier is unknown (not parsed), flag as REVIEW-NEEDED
+                    # instead of assuming ByRef.
+                    if param.get("by_ref", False):
                         byref_hazards.append({
                             "line": i,
                             "content": stripped,

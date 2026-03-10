@@ -960,9 +960,12 @@ def check_caller_warnings(intents, analyzer_outputs):
     next_id = max_intent_id(intents) + 1
 
     for intent in intents:
-        func_key = intent["function"]
-        analyzer = analyzer_outputs.get(func_key, {})
-        caller = analyzer.get("caller_analysis", {})
+        cr_id = intent["cr"]
+        # caller_analysis is a ROOT-LEVEL key in the CR analysis file
+        # (cr-NNN-analysis.yaml), NOT inside functions_analyzed[].
+        # Look it up by CR ID, not by function name.
+        cr_analysis = analyzer_outputs.get(cr_id, {})
+        caller = cr_analysis.get("caller_analysis", {})
 
         if not caller or caller.get("overall_risk") != "HIGH":
             continue
@@ -1007,7 +1010,7 @@ def build_caller_fix_intent(intent_id, original_intent, caller_analysis,
 
     # Build description from the competing writes
     overwrite_lines = [cw["content"].strip() for cw in competing_writes]
-    smell_descriptions = [cs["description"] for cs in code_smells]
+    smell_descriptions = [cs["note"] for cs in code_smells]
 
     description_parts = [
         f"Caller '{caller_func}' unconditionally overwrites '{result_var}' "
@@ -1099,6 +1102,18 @@ if caller_fix_intents:
         print(f"             Original: {cfi['parameters']['original_function']} "
               f"return value is overwritten")
         print(f"             This intent has an OPEN QUESTION for developer review")
+
+# ALSO propagate caller_analysis_risk onto ALL intents (not just HIGH).
+# This lets the Planner's Step 9.7 belt-and-suspenders check work,
+# and surfaces MEDIUM risk as a warning even when no auto-fix is created.
+for intent in intents:
+    if intent.get("caller_analysis_source"):
+        continue  # Skip auto-generated caller-fix intents
+    cr_id = intent["cr"]
+    cr_analysis = analyzer_outputs.get(cr_id, {})
+    caller = cr_analysis.get("caller_analysis", {})
+    if caller.get("overall_risk"):
+        intent["caller_analysis_risk"] = caller["overall_risk"]
 ```
 
 **CRITICAL:** When `caller_analysis.overall_risk == "HIGH"`, the Decomposer MUST
