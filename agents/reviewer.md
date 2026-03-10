@@ -2,19 +2,19 @@
 
 ## Purpose
 
-Validate all changes and produce the approval document presented at Gate 2. Run
+Validate all changes and produce the approval document presented at Gate 5. Run
 all 8 validators, produce a traceability matrix, a diff report, and a clean change
 summary suitable for SVN commit message.
 
 ## Pipeline Position
 
 ```
-[INPUT] --> Intake --> Discovery --> Analyzer --> Decomposer --> Planner --> [GATE 1] --> Change Engine --> REVIEWER --> [GATE 2]
-                                                                                                          ^^^^^^^^
+[INPUT] --> Intake --> Understand --> Plan --> [GATE 1] --> Change Engine --> REVIEWER --> [GATE 5]
+                                                                                        ^^^^^^^^
 ```
 
 - **Upstream:** Change Engine (provides modified source files + `execution/operations_log.yaml`)
-- **Downstream:** Developer reviews at Gate 2; `summary/change_summary.md` used for SVN commit message
+- **Downstream:** Developer reviews at Gate 5; `summary/change_summary.md` used for SVN commit message
 
 ## Input Schema
 
@@ -23,8 +23,7 @@ summary suitable for SVN commit message.
 # Reads: parsed/change_requests.yaml (original CRs for traceability)
 # Reads: parsed/requests/cr-NNN.yaml (individual CR details)
 # Reads: analysis/intent_graph.yaml (intents mapped to code regions)
-# Reads: analysis/analyzer_output/cr-NNN-analysis.yaml (CR analysis with line numbers)
-# Reads: analysis/files_to_copy.yaml (which files were copied)
+# Reads: analysis/code_understanding.yaml (CR analysis with FUBs, line numbers, file copy info)
 # Reads: execution/operations_log.yaml (what was actually done)
 # Reads: execution/file_hashes.yaml (file hashes)
 # Reads: execution/snapshots/*.snapshot (pre-edit file copies)
@@ -197,7 +196,7 @@ Validation: 8/8 checks passed (0 BLOCKERs, 0 WARNINGs)
 | 7 | validate_traceability | WARNING | Every CR maps to at least one file:line change via intents |
 | 8 | validate_vbproj | BLOCKER | Every `<Compile Include>` path resolves to existing file, no duplicate entries |
 
-**BLOCKERs prevent Gate 2 approval.** The Reviewer will attempt to self-correct
+**BLOCKERs prevent Gate 5 approval.** The Reviewer will attempt to self-correct
 BLOCKER failures by restoring from snapshots and re-applying. If self-correction
 fails, the developer is asked to intervene.
 
@@ -232,7 +231,7 @@ these snapshots by copying them back to the original path.
 4. **Orphan changes:** Changes in operations_log that don't map to any CR/intent -- flag as suspicious
 5. **Missing CR trace:** A CR has no corresponding code change -- flag as incomplete
 6. **Re-validation requested:** Developer says "re-run validation" -- run all validators again on current file state
-7. **Developer rejects at Gate 2:** Identify which changes need fixing, re-enter Change Engine phase
+7. **Developer rejects at Gate 5:** Identify which changes need fixing, re-enter Change Engine phase
 
 ---
 
@@ -296,14 +295,15 @@ def step_1_load_context(workstream_dir):
         cr = read_yaml(cr_file)
         crs[cr["id"]] = cr
 
-    # Load intent graph (produced by Decomposer)
+    # Load intent graph (produced by Plan agent)
     intent_graph = read_yaml(workstream_dir / "analysis/intent_graph.yaml")
 
-    # Load all CR analysis files (produced by Analyzer)
+    # Load unified code understanding (produced by Understand agent)
+    # FUBs are under change_requests.{cr_id}.fub; file copy info under needs_copy/source_file/target_file
+    code_understanding = read_yaml(workstream_dir / "analysis/code_understanding.yaml")
     cr_analyses = {}
-    for analysis_file in glob(workstream_dir / "analysis/analyzer_output/cr-*-analysis.yaml"):
-        analysis = read_yaml(analysis_file)
-        cr_analyses[analysis["cr"]] = analysis
+    for cr_id, cr_data in (code_understanding or {}).get("change_requests", {}).items():
+        cr_analyses[cr_id] = cr_data
 
     return manifest, config, ops_log, file_hashes, change_requests, crs, intent_graph, cr_analyses
 ```
@@ -346,7 +346,7 @@ def step_2_inventory(ops_log, file_hashes, carrier_root):
             inventory["value_files"].add(filepath)
 
     # Cross-check: every file in file_hashes should be in inventory or be a source
-    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Planner)
+    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Plan agent)
     for filepath, fh_info in file_hashes.get("files", {}).items():
         if fh_info["role"] == "target" and filepath not in inventory["all_files"]:
             WARNING(f"File in hashes but not in ops_log: {filepath}")
@@ -368,11 +368,11 @@ def step_3_verify_integrity(file_hashes, carrier_root):
     """Compare current SHA-256 hashes to stored post-execution hashes.
 
     If mismatch: file was modified outside the plugin. Flag but don't abort --
-    the developer decides at Gate 2.
+    the developer decides at Gate 5.
     """
     mismatches = []
 
-    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Planner)
+    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Plan agent)
     for filepath, fh_info in file_hashes.get("files", {}).items():
         path = carrier_root / filepath
         if not path.exists():
@@ -398,7 +398,7 @@ def step_3_verify_integrity(file_hashes, carrier_root):
             })
 
     if mismatches:
-        # Don't abort -- log and let the developer decide at Gate 2
+        # Don't abort -- log and let the developer decide at Gate 5
         WARNING(f"{len(mismatches)} file(s) have hash mismatches")
 
     return mismatches
@@ -451,7 +451,7 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "intent": entry.get("operation", ""),
+                    "intent": entry.get("intent_id", entry.get("operation", "")),
                     "expected_args": before_count,
                     "actual_args": after_count,
                     "before": before_line.strip(),
@@ -463,7 +463,7 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "intent": entry.get("operation", ""),
+                    "intent": entry.get("intent_id", entry.get("operation", "")),
                     "issue": "empty_arg",
                     "after": after_line.strip(),
                 })
@@ -473,7 +473,7 @@ def validate_array6(ops_log, inventory, carrier_root, snapshots_dir):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "intent": entry.get("operation", ""),
+                    "intent": entry.get("intent_id", entry.get("operation", "")),
                     "issue": "unmatched_parens",
                     "after": after_line.strip(),
                 })
@@ -528,7 +528,7 @@ def is_array6_test_usage(line):
 #### Step 4b: Completeness Validator
 
 ```python
-def validate_completeness(ops_log, intent_graph, cr_analyses, workstream_dir, carrier_root, snapshots_dir):
+def validate_completeness(ops_log, intent_graph, cr_analyses, crs, workstream_dir, carrier_root, snapshots_dir):
     """BLOCKER: Verify every planned intent was executed.
 
     Checks:
@@ -555,7 +555,7 @@ def validate_completeness(ops_log, intent_graph, cr_analyses, workstream_dir, ca
     for entry in ops_log.get("operations", []):
         if entry["status"] == "FAILED":
             findings.append({
-                "intent": entry.get("operation", ""),
+                "intent": entry.get("intent_id", entry.get("operation", "")),
                 "issue": "failed",
                 "message": f"Intent {entry.get('operation', '')} has status FAILED",
                 "file": entry.get("file"),
@@ -567,16 +567,17 @@ def validate_completeness(ops_log, intent_graph, cr_analyses, workstream_dir, ca
     for entry in ops_log.get("operations", []):
         if entry["status"] != "COMPLETED":
             continue
-        intent_id = entry.get("operation", "")
-        # Find corresponding CR analysis for territory counting
-        cr_id = entry.get("cr_id")
-        cr_analysis = cr_analyses.get(cr_id, {}) if cr_id else {}
-        if not cr_analysis.get("extracted", {}).get("factor"):
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
+        # Find corresponding CR for territory counting
+        cr_id = entry.get("cr")
+        cr_data = crs.get(cr_id, {}) if cr_id else {}
+        if not cr_data.get("extracted", {}).get("factor"):
             continue  # Only applies to rate multiplication changes
 
         # Count territories from snapshot (ground truth)
+        cr_analysis = cr_analyses.get(cr_id, {}) if cr_id else {}
         snapshot_path = workstream_dir / "execution/snapshots" / (
-            Path(entry["file"]).name + ".snapshot"
+            entry["file"].replace("/", "__").replace("\\", "__") + ".snapshot"
         )
         func_name = entry.get("function")
         if snapshot_path.exists() and func_name:
@@ -584,9 +585,8 @@ def validate_completeness(ops_log, intent_graph, cr_analyses, workstream_dir, ca
                 snapshot_path, func_name
             )
         else:
-            # Fallback: use CR analysis target_lines count
-            func_analyses = cr_analysis.get("functions_analyzed", [])
-            target_lines = func_analyses[0].get("target_lines", []) if func_analyses else []
+            # Fallback: use code_understanding target_lines count
+            target_lines = cr_analysis.get("target", {}).get("target_lines", [])
             snapshot_territory_count = len(target_lines)
 
         actual_count = len(entry.get("changes", []))
@@ -647,7 +647,7 @@ def validate_no_old_modify(file_hashes, carrier_root, manifest):
     """
     findings = []
 
-    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Planner)
+    # NOTE: file_hashes["files"] is a dict keyed by filepath (from Plan agent)
     for filepath, fh_info in file_hashes.get("files", {}).items():
         if fh_info["role"] != "source":
             continue
@@ -695,7 +695,7 @@ def validate_no_old_modify(file_hashes, carrier_root, manifest):
 #### Step 4d: No Commented Code Modified Validator
 
 ```python
-def validate_no_commented_code(ops_log):
+def validate_no_commented_code(ops_log, cr_analyses):
     """BLOCKER: Verify no commented-out lines were modified.
 
     Rule: A line is a comment if its first non-whitespace character is '
@@ -719,7 +719,7 @@ def validate_no_commented_code(ops_log):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "intent": entry.get("operation", ""),
+                    "intent": entry.get("intent_id", entry.get("operation", "")),
                     "issue": "commented_line_modified",
                     "before": before_line.strip(),
                     "after": change.get("after", "").strip(),
@@ -731,7 +731,7 @@ def validate_no_commented_code(ops_log):
                 findings.append({
                     "file": entry["file"],
                     "line": change["line"],
-                    "intent": entry.get("operation", ""),
+                    "intent": entry.get("intent_id", entry.get("operation", "")),
                     "issue": "inline_comment_only_change",
                     "before": before_line.strip(),
                     "after": change.get("after", "").strip(),
@@ -742,11 +742,10 @@ def validate_no_commented_code(ops_log):
     for entry in ops_log.get("operations", []):
         if entry["status"] != "COMPLETED":
             continue
-        # Check surrounding context -- if any skipped_lines in op-spec were comments
-        cr_id = entry.get("cr_id")
+        # Check surrounding context -- if any skipped_lines in code_understanding were comments
+        cr_id = entry.get("cr")
         cr_analysis = cr_analyses.get(cr_id, {}) if cr_id else {}
-        func_analyses = cr_analysis.get("functions_analyzed", [])
-        skipped = func_analyses[0].get("skipped_lines", []) if func_analyses else []
+        skipped = cr_analysis.get("target", {}).get("skipped_lines", [])
         for sl in skipped:
             if sl.get("reason") == "commented":
                 commented_lines_untouched += 1
@@ -792,7 +791,7 @@ def step_5_self_correct(failed_validators, ops_log, intent_specs, carrier_root,
                 affected_files.add(detail["file"])
 
         for filepath in affected_files:
-            snapshot_path = snapshots_dir / f"{basename(filepath)}.snapshot"
+            snapshot_path = snapshots_dir / (filepath.replace("/", "__").replace("\\", "__") + ".snapshot")
             target_path = carrier_root / filepath
 
             if not snapshot_path.exists():
@@ -822,7 +821,7 @@ def step_5_self_correct(failed_validators, ops_log, intent_specs, carrier_root,
 
             reapply_success = True
             for op_entry in file_ops_sorted:
-                intent_id = op_entry.get("operation", "")
+                intent_id = op_entry.get("intent_id", entry.get("operation", ""))
                 intent_spec = intent_specs.get(intent_id)
                 if intent_spec:
                     result = reapply_change(target_path, intent_spec)
@@ -912,7 +911,7 @@ def update_file_hash(workstream_dir, filepath, new_hash):
 
 ### Step 6: Run WARNING Validators (5-7)
 
-WARNING validators do not block Gate 2. They flag suspicious conditions for
+WARNING validators do not block Gate 5. They flag suspicious conditions for
 developer review.
 
 #### Step 6a: Value Sanity Validator
@@ -962,7 +961,7 @@ def validate_value_sanity(ops_log):
                     findings.append({
                         "file": entry["file"],
                         "line": change["line"],
-                        "intent": entry.get("operation", ""),
+                        "intent": entry.get("intent_id", entry.get("operation", "")),
                         "issue": "sentinel_modified",
                         "arg_index": i,
                         "before": bv,
@@ -1006,7 +1005,7 @@ def _check_value(findings, all_pct, entry, change, bv, av, pct, arg_idx=None):
             findings.append({
                 "file": entry["file"],
                 "line": change["line"],
-                "intent": entry.get("operation", ""),
+                "intent": entry.get("intent_id", entry.get("operation", "")),
                 "issue": "zero_to_nonzero",
                 "arg_index": arg_idx,
                 "before": bv,
@@ -1019,7 +1018,7 @@ def _check_value(findings, all_pct, entry, change, bv, av, pct, arg_idx=None):
         findings.append({
             "file": entry["file"],
             "line": change["line"],
-            "intent": entry.get("operation", ""),
+            "intent": entry.get("intent_id", entry.get("operation", "")),
             "issue": "large_change",
             "arg_index": arg_idx,
             "before": bv,
@@ -1116,11 +1115,14 @@ def validate_traceability(crs, intent_graph, ops_log):
     """
     findings = []
 
-    # Build mapping: intent_id -> cr_id (from intent_graph.yaml)
+    # Build mapping: intent_id -> cr_id (from intent_graph.yaml, using explicit cr field)
     intent_to_cr = {}
     for intent in intent_graph.get("intents", []):
-        intent_id = intent["id"]
-        cr_id = extract_cr_from_intent(intent_id)  # "intent-001" -> "cr-001"
+        intent_id = intent.get("id", intent.get("intent_id", ""))
+        # Primary: explicit cr/cr_id field from intent_graph (v0.4.0)
+        cr_id = intent.get("cr", intent.get("cr_id"))
+        if not cr_id:
+            cr_id = extract_cr_from_intent(intent_id)  # DEPRECATED fallback
         if cr_id:
             intent_to_cr[intent_id] = cr_id
 
@@ -1140,10 +1142,10 @@ def validate_traceability(crs, intent_graph, ops_log):
 
     # Check 2: Every executed intent maps to a known CR
     for entry in ops_log.get("operations", []):
-        intent_id = entry.get("operation", "")
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
         if intent_id.startswith("rework-"):
             continue  # Rework entries don't map to CRs
-        cr_id = extract_cr_from_intent(intent_id)
+        cr_id = extract_cr_from_intent(intent_id, entry)  # uses explicit "cr" field first
         if cr_id and cr_id not in crs:
             findings.append({
                 "issue": "orphan_change",
@@ -1256,7 +1258,7 @@ def step_8_generate_diff(ops_log, inventory, carrier_root, snapshots_dir,
     total_lines_changed = 0
 
     for filepath in sorted(inventory["all_files"]):
-        snapshot_name = basename(filepath) + ".snapshot"
+        snapshot_name = filepath.replace("/", "__").replace("\\", "__") + ".snapshot"
         snapshot_path = snapshots_dir / snapshot_name
         current_path = carrier_root / filepath
 
@@ -1363,11 +1365,11 @@ def step_9_traceability_matrix(crs, intent_graph, ops_log, workstream_dir):
     untraced_count = 0
     orphan_count = 0
 
-    # Group executed intents by CR
+    # Group executed intents by CR (using explicit cr field from v0.4.0 ops_log)
     intents_by_cr = {}
     for entry in ops_log.get("operations", []):
-        intent_id = entry.get("operation", "")
-        cr_id = extract_cr_from_intent(intent_id)
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
+        cr_id = extract_cr_from_intent(intent_id, entry)  # uses explicit "cr" field first
         if cr_id:
             intents_by_cr.setdefault(cr_id, []).append(entry)
 
@@ -1415,10 +1417,10 @@ def step_9_traceability_matrix(crs, intent_graph, ops_log, workstream_dir):
     # Check for orphan intents (not linked to any CR)
     all_cr_ids = set(crs.keys())
     for entry in ops_log.get("operations", []):
-        intent_id = entry.get("operation", "")
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
         if intent_id.startswith("rework-"):
             continue
-        cr_id = extract_cr_from_intent(intent_id)
+        cr_id = extract_cr_from_intent(intent_id, entry)  # uses explicit "cr" field first
         if cr_id and cr_id not in all_cr_ids:
             lines.append(f"[ORPHAN] {intent_id} -> {cr_id} (CR not found)")
             orphan_count += 1
@@ -1442,7 +1444,7 @@ def step_10_change_summary(manifest, crs, ops_log, file_hashes, validator_result
     """Write summary/change_summary.md.
 
     Format matches the output schema defined in Section 4 of this spec.
-    This file is presented to the developer at Gate 2 and used as the
+    This file is presented to the developer at Gate 5 and used as the
     suggested SVN commit message.
     """
     province_name = manifest["province_name"]
@@ -1547,7 +1549,7 @@ self_corrections:
 ### Step 12: Signal Completion
 
 Return a summary to the orchestrator (skills/iq-review/SKILL.md). The orchestrator uses this
-to proceed to Gate 2.
+to proceed to Gate 5.
 
 ```python
 def step_12_signal_completion(validator_results, corrections, inventory):
@@ -1761,7 +1763,7 @@ Territory 5 had 9 args before and 8 after (Change Engine concatenated two args).
 **Self-correction flow:**
 
 1. Identify affected file: `mod_Common_SKHab20260101.vb`
-2. Restore from `snapshots/mod_Common_SKHab20260101.vb.snapshot`
+2. Restore from `snapshots/Saskatchewan__Code__mod_Common_SKHab20260101.vb.snapshot`
 3. Re-apply ALL intents for this file (intent-003, intent-002, intent-001) bottom-to-top
 4. Re-run `validate_array6`
 
@@ -1791,7 +1793,7 @@ results:
     self_corrected: true
 ```
 
-At Gate 2, the orchestrator shows: `"[OK] Array6 Syntax: PASS (self-corrected)"`
+At Gate 5, the orchestrator shows: `"[OK] Array6 Syntax: PASS (self-corrected)"`
 
 ---
 
@@ -1881,7 +1883,7 @@ If developer accepts:
 
 ### Special Case 5: Rework Entry in Operations Log
 
-After a minor rework at Gate 2, the orchestrator appends a rework entry:
+After a minor rework at Gate 5, the orchestrator appends a rework entry:
 
 ```yaml
 - operation: "rework-001"
@@ -1996,7 +1998,7 @@ developer should treat it as effectively a BLOCKER. The sentinel value `-999`
 means "coverage not available" and should be preserved exactly.
 
 **Self-correction does not apply** (this is a value sanity WARNING, not a
-BLOCKER validator). The developer must decide at Gate 2 whether to fix
+BLOCKER validator). The developer must decide at Gate 5 whether to fix
 manually or re-execute.
 
 ---
@@ -2014,8 +2016,8 @@ manually or re-execute.
 | Write diff_report.md and changes.diff | X | | |
 | Write traceability_matrix.md | X | | |
 | Write change_summary.md | X | | |
-| Present Gate 2 summary to developer | | X | |
-| Handle developer Q&A at Gate 2 | | X | |
+| Present Gate 5 summary to developer | | X | |
+| Handle developer Q&A at Gate 5 | | X | |
 | Capture approve/reject decision | | X | |
 | Update manifest.yaml state transitions | | X | |
 | Record developer_decisions in manifest | | X | |
@@ -2024,7 +2026,7 @@ manually or re-execute.
 | Set state to PLANNED for complex rework | | X | |
 | Format the Done Moment output | | X | |
 | Record SVN revision number | | X | |
-| Approve or reject at Gate 2 | | | X |
+| Approve or reject at Gate 5 | | | X |
 | Decide rework scope (minor vs complex) | | | X |
 | Provide SVN revision after commit | | | X |
 | Build and test DLL in Visual Studio | | | X |
@@ -2054,9 +2056,9 @@ it performs the re-application itself using the logged before/after values.
 ### Key Boundary Principles
 
 1. **Reviewer reads, validates, reports.** It never presents results to the
-   developer directly -- the orchestrator formats and displays Gate 2.
+   developer directly -- the orchestrator formats and displays Gate 5.
 2. **Reviewer writes files, orchestrator reads them.** The orchestrator reads
-   validator_results.yaml, diff_report.md, and change_summary.md to build Gate 2.
+   validator_results.yaml, diff_report.md, and change_summary.md to build Gate 5.
 3. **Reviewer does not update manifest.yaml.** State transitions (VALIDATING,
    COMPLETED, DISCARDED) are orchestrator-only.
 4. **Rework is orchestrator-driven.** The Reviewer validates rework results on
@@ -2084,7 +2086,7 @@ remaining validators. Do NOT abort the entire review.
     traceback: "FileNotFoundError: [Errno 2] No such file..."
 ```
 
-**Recovery:** Orchestrator presents the crash at Gate 2. Developer can fix the
+**Recovery:** Orchestrator presents the crash at Gate 5. Developer can fix the
 issue and say "re-validate", or skip the check (NOT RECOMMENDED for BLOCKERs).
 
 ### Error 2: SNAPSHOT_MISSING
@@ -2103,7 +2105,7 @@ Use the file's current state as "both before and after" (diff will be empty).
   error_type: "SNAPSHOT_MISSING"
   details:
     file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
-    expected_snapshot: "execution/snapshots/mod_Common_SKHab20260101.vb.snapshot"
+    expected_snapshot: "execution/snapshots/Saskatchewan__Code__mod_Common_SKHab20260101.vb.snapshot"
 ```
 
 **Recovery:** Orchestrator offers: skip diff for this file, use the original
@@ -2130,7 +2132,7 @@ Flag in diff_report.md header.
     actual_hash: "sha256:def456..."
 ```
 
-**Recovery:** Orchestrator presents at Gate 2. Developer chooses: show diff between
+**Recovery:** Orchestrator presents at Gate 5. Developer chooses: show diff between
 expected and current, re-run /iq-execute, or accept current state (re-hash).
 
 ### Error 4: SELF_CORRECTION_FAILED
@@ -2217,7 +2219,7 @@ Include in traceability_matrix.md with `[UNTRACED]` marker.
     orphan_changes: []
 ```
 
-**Recovery:** Developer reviews at Gate 2. May indicate a missed intent (re-plan)
+**Recovery:** Developer reviews at Gate 5. May indicate a missed intent (re-plan)
 or a CR that was intentionally deferred (acknowledge and approve).
 
 ### Error 8: CROSS_PROVINCE_VIOLATION
@@ -2273,7 +2275,7 @@ this check if the .vbproj was manually verified.
 4. Orchestrator re-launches the Reviewer (all 4 agents) for re-validation
 5. Reviewer treats rework entries (`agent: "orchestrator"`) like value_change
    entries for validation purposes
-6. Re-present updated Gate 2 results
+6. Re-present updated Gate 5 results
 
 **Complex rework** (multiple files affected, scope change, shifted line numbers):
 
@@ -2313,7 +2315,7 @@ Options:
    file, in execution_order.yaml sequence.
 
 5. **Write ALL output files before signaling completion.** The orchestrator reads
-   these files to build Gate 2. Missing files cause Gate 2 to fail:
+   these files to build Gate 5. Missing files cause Gate 5 to fail:
    `validator_results.yaml`, `diff_report.md`, `changes.diff`,
    `traceability_matrix.md`, `change_summary.md`.
 
@@ -2346,7 +2348,7 @@ Options:
 
 13. **Report untraced CRs and orphan changes in the traceability matrix.** An
     untraced CR has zero executed intents. An orphan change has no matching
-    CR. Both are WARNINGs, not BLOCKERs -- the developer decides at Gate 2.
+    CR. Both are WARNINGs, not BLOCKERs -- the developer decides at Gate 5.
 
 14. **Bottom-to-top execution order is NOT relevant to the Reviewer.** The Reviewer
     reads files and compares content -- it does not apply changes by line number.
@@ -2386,7 +2388,7 @@ Options:
 - **Confidence scoring:** Assign a confidence score (0-100) to each change based
   on: deviation from expected percentage, consistency with other territories,
   pattern match quality, and historical rate trajectories. Low-confidence changes
-  would be highlighted for extra scrutiny at Gate 2.
+  would be highlighted for extra scrutiny at Gate 5.
 
 - **Automated SVN commit:** After developer approval, the plugin commits directly
   to SVN with the suggested commit message. Currently the developer must copy the

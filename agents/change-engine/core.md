@@ -18,10 +18,10 @@ that preserve every formatting detail of the existing VB.NET source.
 
 The Change Engine is the **hands** of the pipeline. By the time it runs, upstream
 agents have already:
-- Discovered the code structure (Discovery)
-- Built Function Understanding Blocks (Analyzer)
-- Planned the execution order and resolved all questions (Planner)
+- Built code understanding with parser-verified structure (Understand)
+- Planned the execution order and resolved all questions (Plan)
 - Received developer approval at Gate 1
+- Passed Gate 2a (source preflight) and Gate 2b (target preflight)
 
 The engine's job: execute the approved plan accurately, one file at a time
 (processing all intents for that file in bottom-to-top order).
@@ -29,14 +29,14 @@ The engine's job: execute the approved plan accurately, one file at a time
 ## Pipeline Position
 
 ```
-/iq-plan:    Intake -> Discovery -> Analyzer -> Decomposer -> Planner -> [GATE 1]
-/iq-execute: Build Capsules -> [File-Copy Worker] -> [CHANGE ENGINE] -> [EXECUTED]
+/iq-plan:    Intake -> Understand -> Plan -> [GATE 1]
+/iq-execute: [GATE 2a] -> File-Copy -> [GATE 2b] -> [CHANGE ENGINE] -> [GATE 4] -> [EXECUTED]
                                                       ^^^^^^^^^^^^^^
-/iq-review:  Validator -> Diff -> Report -> [GATE 2] -> DONE
+/iq-review:  Validator -> Diff -> Semantic Verifier -> Report -> [GATE 5] -> DONE
 ```
 
 - **Upstream:** File-copier worker (creates target files, updates .vbproj references,
-  updates `execution/file_hashes.yaml`); Planner (provides the approved intent graph
+  updates `execution/file_hashes.yaml`); Plan agent (provides the approved intent graph
   and execution order)
 - **Downstream:** /iq-review validators (Array6 format, old-file protection, value
   sanity, cross-LOB consistency, traceability)
@@ -143,7 +143,7 @@ capsule:
 | `intents[].function_body` | no | Pre-extracted function code |
 | `intents[].function_line_start` | yes* | First line of function |
 | `intents[].function_line_end` | yes* | Last line of function |
-| `intents[].fub` | no | Function Understanding Block from Analyzer |
+| `intents[].fub` | no | Function Understanding Block from Understand agent |
 | `intents[].peer_examples` | no | Peer function bodies for reference |
 | `intents[].confidence` | yes | Confidence score (0.0 to 1.0) |
 
@@ -239,6 +239,101 @@ CAPABILITY-SPECIFIC REQUIRED FIELDS:
 
 **On validation failure:** Return `status: "FAILED"` with the validation error.
 Do NOT proceed to subsequent steps.
+
+### Step 1.5 (CE.0): Structural Reconnaissance
+
+Before reading the file as text, use the **vb-parser** to get a machine-verified
+structural map. This gives the engine authoritative function boundaries, call
+inventories, and Select Case structures — data that regex cannot reliably extract.
+
+```
+vb_parser = read paths.md → vb_parser path
+target = codebase_root + "/" + capsule.target_file
+
+# Check parser cache first (written by Gate 2b in /iq-execute)
+cache_path = workstream_dir + "/execution/parser-cache/"
+              + normalize(target) + "_" + file_hash + "_" + function_signature + ".json"
+
+IF cache_path exists AND file_hash matches capsule.file_hash:
+  func_detail = read cache_path   # Gate 2b already parsed this
+ELSE:
+  func_detail = bash: {vb_parser} function {target} {function_name}
+
+# Full-file overview (always fresh — fast, <1 second)
+file_overview = bash: {vb_parser} parse {target}
+
+# ASSERT: file parses cleanly BEFORE we touch it
+ASSERT file_overview.parseErrors == []
+  → FAIL: "Target file has parse errors BEFORE editing: {errors}"
+
+# RECORD baseline metrics for post-edit comparison (CE.4)
+RECORD:
+  function_count_before = len(file_overview.functions)
+  actual_start = func_detail.function.startLine
+  actual_end = func_detail.function.endLine
+  actual_total_lines = func_detail.function.totalLines
+
+# Extract edit-relevant data based on target_kind
+target_kind = intent.target_kind  # call|assignment|constant|case_label|code_block
+IF target_kind == "call":
+  parser_targets = [c for c in func_detail.function.calls
+                    if c.parentContext == "assignment"]
+ELIF target_kind == "assignment":
+  parser_targets = func_detail.function.assignments
+ELIF target_kind == "constant":
+  parser_targets = file_overview.constants
+ELIF target_kind == "case_label":
+  parser_targets = []
+  for sc in func_detail.function.selectCases:
+    for case in sc.cases:
+      parser_targets.extend(case.labels)
+ELIF target_kind == "code_block":
+  parser_targets = func_detail.function.controlFlow
+
+RECORD:
+  parser_target_count = len(parser_targets)
+  select_case_structure = func_detail.function.selectCases  # for CE.4 comparison
+```
+
+### Step 1.7 (CE.1): Plan-vs-Reality Reconciliation
+
+Compare what the plan says should be there vs what the parser actually finds.
+This catches stale plans, file drift, and miscounted targets BEFORE any edits.
+
+```
+planned_targets = capsule.intents[current_intent].target_lines
+planned_count = len(planned_targets)
+
+# Compare counts
+IF parser_target_count == planned_count:
+  LOG: "CE.1 ✓ Target count matches: {planned_count}"
+ELIF parser_target_count > planned_count:
+  WARN: "Parser found {parser_target_count} targets, plan has {planned_count}. "
+        "Extra targets will NOT be edited. Flagging for review."
+  capsule.needs_review = true
+ELIF parser_target_count < planned_count:
+  WARN: "Parser found {parser_target_count} targets, plan expected {planned_count}. "
+        "Missing targets will trigger re-location in Step 4."
+  # CE does NOT fail here — Step 4 will attempt content-based re-location
+
+# Verify function boundaries haven't shifted
+IF intent has function_line_start hint:
+  drift = abs(actual_start - intent.function_line_start)
+  IF drift > 0:
+    LOG: "Function boundary shifted by {drift} lines. "
+         "Using parser coordinates (line {actual_start}-{actual_end})."
+
+# Verify Select Case nesting matches plan expectations
+IF intent has expected_nesting_depth:
+  actual_depth = max(sc.nestingDepth for sc in select_case_structure) if select_case_structure else 0
+  IF actual_depth != intent.expected_nesting_depth:
+    WARN: "Select Case nesting depth mismatch: expected {expected}, actual {actual_depth}"
+```
+
+**On CE.1 FAIL (not WARN):** Return `status: "FAILED"` with reconciliation details.
+The orchestrator restores from snapshot and reports to the developer.
+
+---
 
 ### Step 2: Read Target File
 
@@ -733,6 +828,182 @@ def execute_file_creation(capsule):
 
 See **strategies.md** Section 5 for guidance on file creation from templates.
 
+#### 6d: Flow Modification
+
+For intents that modify control flow — adding/removing branches, changing
+conditions, or refactoring logic structures.
+
+```python
+def execute_flow_modification(lines, intent, fub, parser_data):
+    """Apply control flow changes using parser-verified boundaries.
+
+    Uses parser Select Case/If structures from CE.0 to ensure edits
+    stay within correct structural boundaries.
+    """
+    edits = []
+    func_start = parser_data["actual_start"]
+    func_end = parser_data["actual_end"]
+
+    # Determine the type of flow modification
+    flow_type = intent.get("flow_type", "add_branch")
+
+    if flow_type == "add_branch":
+        # Adding a new Case/ElseIf branch
+        # Use parser selectCases to find the correct insertion point
+        target_select = find_target_select_case(
+            parser_data["select_case_structure"],
+            intent.get("target_select_expression")
+        )
+        if target_select is None:
+            return FAIL("Could not locate target Select Case for branch insertion")
+
+        # Generate the new branch code
+        new_branch = generate_branch_code(intent, lines, target_select)
+
+        # Find the insertion point (before End Select or Case Else)
+        insert_line = target_select["endLine"] - 1  # parser uses 1-indexed
+        anchor = lines[insert_line - 1].rstrip()
+        edits.append({
+            "edit_type": "insert",
+            "old_string": anchor,
+            "new_string": "\n".join(new_branch) + "\n" + anchor,
+            "line": insert_line,
+            "description": f"Add {intent.get('title', 'new branch')}",
+        })
+
+    elif flow_type == "change_condition":
+        # Modifying an If/ElseIf condition expression
+        target_line = intent.get("target_lines", [{}])[0]
+        line_idx = locate_by_content(lines, target_line.get("content", ""),
+                                     func_start, func_end)
+        if line_idx is None:
+            return FAIL("Could not locate condition line for modification")
+
+        old_line = lines[line_idx].rstrip()
+        new_line = apply_condition_change(old_line, intent["parameters"])
+        edits.append({
+            "edit_type": "replace",
+            "old_string": old_line,
+            "new_string": new_line,
+            "line": line_idx + 1,
+            "description": f"Change condition: {intent.get('title', '')}",
+        })
+
+    elif flow_type == "remove_branch":
+        # Removing a Case/ElseIf branch
+        # Use parser to identify exact start/end of the branch
+        branch_start, branch_end = locate_branch_boundaries(
+            parser_data["select_case_structure"],
+            intent.get("target_branch_label")
+        )
+        if branch_start is None:
+            return FAIL("Could not locate branch to remove")
+
+        # Remove by replacing the block with empty
+        old_block = "\n".join(lines[branch_start:branch_end + 1])
+        edits.append({
+            "edit_type": "replace",
+            "old_string": old_block.rstrip(),
+            "new_string": "",
+            "line": branch_start + 1,
+            "description": f"Remove branch: {intent.get('title', '')}",
+        })
+
+    return edits
+```
+
+**Post-verification for flow_modification:**
+After applying flow edits, verify balanced blocks:
+- Count If/End If pairs before and after (from parser parse output)
+- Count Select Case/End Select pairs before and after
+- ASSERT: counts match (unless intent explicitly adds/removes blocks)
+
+See **strategies.md** for additional flow modification patterns.
+
+---
+
+### Step 6.5 (CE.4): Post-Edit Structural Verification
+
+After ALL edits for the current intent are applied, re-parse the file with
+vb-parser to verify structural integrity. This is the engine's self-check —
+it catches broken syntax, lost functions, and corrupted Select Case structures
+BEFORE reporting success.
+
+```
+# Re-parse the entire file after edits
+file_after = bash: {vb_parser} parse {target}
+
+# CHECK 1: No parse errors introduced
+ASSERT file_after.parseErrors == []
+  → FAIL: "Edits introduced parse errors: {errors}". RESTORE from snapshot.
+
+# CHECK 2: Function count unchanged (edits should not add/remove functions)
+ASSERT len(file_after.functions) == function_count_before
+  → FAIL: "Function count changed: {function_count_before} → {len(file_after.functions)}".
+          RESTORE from snapshot.
+
+# Deep verify each modified function
+For each modified function_name:
+  func_after = bash: {vb_parser} function {target} {function_name}
+
+  # CHECK 3: Select Case structure preserved
+  IF select_case_structure was recorded in CE.0:
+    ASSERT same selectCase count (unless intent explicitly adds/removes)
+    ASSERT same nesting depth per selectCase
+      → FAIL: "Select Case structure corrupted". RESTORE from snapshot.
+
+  # CHECK 4: Call count preserved (for value_editing — should not add/remove calls)
+  IF intent.capability == "value_editing":
+    post_edit_target_count = count_by_kind(func_after, target_kind)
+    ASSERT post_edit_target_count == parser_target_count
+      → FAIL: "Target count changed after edit: {parser_target_count} → {post_edit_target_count}".
+              RESTORE from snapshot.
+```
+
+### Step 6.7 (CE.5): Value Correctness Check
+
+For `value_editing` intents, verify that the parser can read back the new values
+and they match what was intended. This is a WARN-only check — it does not
+auto-restore, because small formatting differences (trailing zeros, etc.) may
+cause false mismatches.
+
+```
+IF intent.capability == "value_editing" AND target_kind in ("call", "assignment", "constant"):
+  func_after = bash: {vb_parser} function {target} {function_name}
+
+  For each edited target_line in intent.target_lines:
+    # Find the corresponding element in post-edit parser output
+    IF target_kind == "call":
+      match = find_call_near_line(func_after.function.calls,
+                                   target_line.actual_line,
+                                   target_line.assignment_target)
+      IF match:
+        actual_args = match.arguments
+        expected_args = target_line.expected_new_values
+        IF actual_args != expected_args:
+          WARN: "Value mismatch at line {target_line.actual_line}: "
+                "expected {expected_args}, parser reads {actual_args}"
+
+    ELIF target_kind == "assignment":
+      match = find_assignment_near_line(func_after.function.assignments,
+                                         target_line.actual_line)
+      IF match:
+        IF str(match.value) != str(target_line.expected_new_value):
+          WARN: "Assignment mismatch at line {target_line.actual_line}: "
+                "expected {expected}, parser reads {match.value}"
+
+  # Log the verification summary
+  LOG: "CE.5 — Values verified: {verified_count}/{total_count}"
+```
+
+**Why WARN not FAIL:** The parser may report values with different formatting
+than the engine wrote (e.g., `100.0` vs `100`, trailing zeros). These are
+cosmetically different but functionally identical. A FAIL would cause unnecessary
+restores. The Semantic Verifier in /iq-review handles definitive value verification
+with Python arithmetic.
+
+---
+
 ### Step 7: Verify Edits
 
 After applying all edits, re-read the modified file and verify each change.
@@ -820,8 +1091,8 @@ Private Const ACCIDENTBASE As Double = 0.3     'Base Surcharge
 ### Rule 5: Never Modify Commented Lines
 
 Lines starting with `'` (VB.NET comment marker) are NEVER modified. If a target
-line turns out to be commented, ABORT that edit and report failure. The Analyzer
-should have excluded commented lines — finding one means the file changed.
+line turns out to be commented, ABORT that edit and report failure. The Understand
+agent should have excluded commented lines — finding one means the file changed.
 
 ### Rule 6: Re-Locate Anchors After Each Insertion
 
@@ -957,7 +1228,7 @@ def find_case_else(lines, anchor_idx, end_select_idx):
 
 When the same line content appears multiple times in a function (e.g., identical
 Array6 lines in different Case branches), use `context_above` and `context_below`
-from the target_line spec to disambiguate. The Analyzer provides surrounding
+from the target_line spec to disambiguate. The Understand agent provides surrounding
 context lines when it detects duplicates.
 
 If the intent's `target_lines` entry includes `context_above` or `context_below`:
@@ -994,7 +1265,7 @@ exists in the codebase by grepping for it. If zero matches are found:
 2. Mark the intent result as `status: "needs_review"`
 3. Report: `"Unresolved symbol: {symbol_name} — not found in codebase. Skipping edit."`
 
-This prevents build-breaking errors from fabricated symbols. The Planner or
+This prevents build-breaking errors from fabricated symbols. The Plan agent or
 upstream agents may have hallucinated a symbol by pattern extrapolation (e.g.,
 observing `DISCOUNT_ANTITHEFTDEVICE` and inventing `DISCOUNT_ALLPERILS`, or
 seeing `AddToDiscountArray` calls and inventing `AddToDiscountArray_AllPerils`).
@@ -1336,7 +1607,7 @@ def check_established_patterns(capsule):
     """Check for established code patterns before generating.
 
     Sources (in priority order):
-    1. code_patterns.canonical_access from Analyzer Step 5.9
+    1. code_patterns.canonical_access from Understand agent (Step U.9)
     2. peer_examples from capsule (active functions with high call_sites)
     3. FUB nearby_functions (alive/dead signals)
     """
@@ -1347,7 +1618,7 @@ def check_established_patterns(capsule):
     canonical = {}
     warnings = []
 
-    # Source 1: Analyzer-discovered canonical patterns
+    # Source 1: Understand-agent-discovered canonical patterns
     for access in code_patterns.get("canonical_access", []):
         canonical[access["need"]] = access["pattern"]
 
@@ -1462,7 +1733,7 @@ the business logic.
 
 ### IsItemInArray(Array6(...))
 Array6 inside `IsItemInArray()` is a membership test, NOT a rate value. NEVER
-modify these. The Analyzer should have excluded them via `skipped_lines`. If
+modify these. The Understand agent should have excluded them via `skipped_lines`. If
 one is found in target_lines, ABORT immediately.
 
 ### Enum Collection Array6

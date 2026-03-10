@@ -108,13 +108,13 @@ def validate(manifest_path: str) -> dict:
 
     for entry in ops_log.get("operations", []):
         change_type = entry.get("change_type", "")
-        if change_type not in ("value_editing", "structure_insertion"):
+        if change_type not in ("value_editing", "structure_insertion", "flow_modification"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
 
         filepath = entry.get("file", "")
-        op_id = entry.get("operation", "")
+        op_id = entry.get("intent_id", entry.get("operation", ""))
 
         for change in entry.get("changes", []):
             before_line = change.get("before")

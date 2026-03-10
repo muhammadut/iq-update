@@ -6,7 +6,7 @@ Verify that each executed intent actually achieves what the developer approved i
 the plan. Bridge the gap between structural validators (Python scripts that check
 syntax and completeness) and semantic correctness (does the code change match the
 original intent description?). Produce a reasoning chain for each intent that the
-developer can follow at Gate 2.
+developer can follow at Gate 5.
 
 **Core philosophy: REASON, THEN JUDGE.** For every intent, read the before/after
 code, state what the intent required, show the arithmetic or logic check, and
@@ -15,19 +15,19 @@ declare MATCH or MISMATCH. Never silently pass — always show the reasoning.
 ## Pipeline Position
 
 ```
-[EXECUTED] --> Validator --> Diff --> SEMANTIC VERIFIER --> Report --> [GATE 2]
+[EXECUTED] --> Validator --> Diff --> SEMANTIC VERIFIER --> Report --> [GATE 5]
                                      ^^^^^^^^^^^^^^^^^^
 ```
 
 - **Upstream:** Validator agent (structural checks passed), Diff agent (diffs available)
 - **Downstream:** Report agent (incorporates semantic findings into summary),
-  Developer reviews at Gate 2
+  Developer reviews at Gate 5
 
 ## Input Schema
 
 ```yaml
 # Reads: analysis/intent_graph.yaml (intents with descriptions and target regions)
-# Reads: analysis/analyzer_output/cr-NNN-analysis.yaml (FUBs, function targets)
+# Reads: analysis/code_understanding.yaml (FUBs under change_requests.{cr_id}.fub, function targets)
 # Reads: execution/operations_log.yaml (what operations were performed)
 # Reads: execution/snapshots/*.snapshot (pre-edit file copies)
 # Reads: plan/execution_order.yaml (planned changes with values)
@@ -128,10 +128,12 @@ Verified: {timestamp}
 
 ```
 1. Read manifest.yaml for workflow_id, province, LOBs, effective_date
-2. Read analysis/intent_graph.yaml for the full list of intents
-3. Read plan/execution_order.yaml for planned values and operations
-4. Read execution/operations_log.yaml for executed operations
-5. Build a mapping: intent_id → {description, file, lines, cr_id, capability}
+2. Read paths.md → extract vb_parser path and python_cmd
+3. Read analysis/intent_graph.yaml for the full list of intents
+4. Read analysis/code_understanding.yaml for FUBs and target metadata
+5. Read plan/execution_order.yaml for planned values and operations
+6. Read execution/operations_log.yaml for executed operations
+7. Build a mapping: intent_id → {description, file, lines, cr_id, capability, target_kind}
 ```
 
 ### Step 2: For Each Intent — Verify Semantics
@@ -139,7 +141,10 @@ Verified: {timestamp}
 Process intents grouped by file (to minimize file reads). For each intent:
 
 ```
-1. READ the relevant snapshot (execution/snapshots/{filename}.snapshot)
+1. READ the relevant snapshot using path-encoded naming:
+   snapshot_name = intent.file.replace("/", "__").replace("\\", "__") + ".snapshot"
+   snapshot_path = execution/snapshots/{snapshot_name}
+   (Example: "SK/Code/mod_Common_SKHab20260101.vb" → "SK__Code__mod_Common_SKHab20260101.vb.snapshot")
    - Extract the before-state around the target lines (±10 lines of context)
 
 2. READ the current modified file
@@ -161,15 +166,89 @@ Process intents grouped by file (to minimize file reads). For each intent:
 
 ### Step 3a: Arithmetic Verification (value_editing)
 
-For rate changes, factor changes, and scalar value edits:
+For rate changes, factor changes, and scalar value edits.
+
+#### Step 3a.0: Parser-Backed Value Extraction (v0.4.0 Enhancement)
+
+**Instead of Claude re-reading files to find values** (expensive, error-prone for
+large files with duplicate lines), use the vb-parser to extract exact argument
+values from both snapshot and current file. This gives the Python arithmetic
+proofs **provably correct input data**, eliminating the weakest link in the
+verification chain.
+
+```
+vb_parser = paths.md → vb_parser path
+
+# Get the target function and target_kind from intent metadata
+function_name = intent.function
+target_kind = intent.target_kind  # call|assignment|constant|case_label
+
+# --- Extract BEFORE values from snapshot (path-encoded name) ---
+snapshot_name = intent.file.replace("/", "__").replace("\\", "__") + ".snapshot"
+snapshot_path = execution/snapshots/{snapshot_name}
+IF snapshot_path exists:
+  snapshot_func = bash: {vb_parser} function {snapshot_path} {function_name}
+
+  IF target_kind == "call":
+    # Extract Array6/function call arguments at target lines
+    before_targets = []
+    for target_line in intent.target_lines:
+      match = find_call_near_line(snapshot_func.function.calls,
+                                   target_line.line,
+                                   target_line.assignment_target)
+      IF match:
+        before_targets.append({
+          "line": match.line,
+          "args": match.arguments,      # parser-extracted exact args
+          "name": match.name,
+          "assignment_target": match.assignmentTarget
+        })
+
+  ELIF target_kind == "assignment":
+    before_targets = []
+    for asgn in snapshot_func.function.assignments:
+      if asgn.line in [tl.line for tl in intent.target_lines]:
+        before_targets.append({"line": asgn.line, "value": asgn.value})
+
+  ELIF target_kind == "constant":
+    snapshot_file = bash: {vb_parser} parse {snapshot_path}
+    before_targets = []
+    for const in snapshot_file.constants:
+      if const.name in [tl.constant_name for tl in intent.target_lines]:
+        before_targets.append({"line": const.line, "name": const.name, "value": const.value})
+
+# --- Extract AFTER values from current file ---
+current_path = codebase_root + "/" + intent.file
+current_func = bash: {vb_parser} function {current_path} {function_name}
+
+# Same extraction logic as above, applied to current_func
+# (produces after_targets with parser-extracted values)
+
+# --- Feed parser-extracted values to Python arithmetic ---
+# The old_values and new_values below come from parser output,
+# NOT from Claude reading the file. This is the key improvement:
+# parser provenance eliminates misreads.
+```
+
+**Fallback:** If the parser cannot extract values (e.g., complex expressions,
+non-standard patterns), fall back to Claude reading the snapshot/file directly.
+Log: "Parser extraction unavailable for {intent_id}, using LLM read."
+
+IMPORTANT: If parser extraction fails for ANY intent, include a WARNING in the
+semantic_verification.yaml output:
+  parser_fallback: true
+  note: "Parser could not extract values for {intent_id}; verification based on Claude reading (lower confidence)"
+This allows the developer at Gate 5 to see which verifications are parser-backed vs LLM-backed.
+
+#### Step 3a.1: Python Arithmetic Check
 
 **CRITICAL: Use Python for ALL arithmetic.** Do NOT compute multiplication or
 rounding mentally. LLM mental math can produce subtle errors (e.g., off-by-one
 cent on rounding). Use the `python_cmd` from paths.md to compute expected values.
 
 ```
-1. Extract old_value from snapshot at the target line
-2. Extract new_value from modified file at the target line
+1. Use parser-extracted old_value (from Step 3a.0) or extract from snapshot
+2. Use parser-extracted new_value (from Step 3a.0) or extract from modified file
 3. Read the planned operation:
    - If multiplicative: check old_value × factor = new_value (within rounding)
    - If replacement: check new_value matches planned value exactly
@@ -347,7 +426,7 @@ Only show individual breakdowns for mismatched values.
 - **Diff generation** — that's the Diff agent's job
 - **Traceability matrix** — that's the Report agent's job
 - **Self-correction** — the Semantic Verifier reports, it doesn't fix. Fixes are
-  handled by the rework loop at Gate 2.
+  handled by the rework loop at Gate 5.
 - **Editing any files** — the Semantic Verifier is READ-ONLY. It reads code and
   writes only to `verification/semantic_verification.yaml` and
   `verification/semantic_report.md`.

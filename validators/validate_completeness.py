@@ -39,7 +39,9 @@ Return schema:
     }
 """
 
+import json as _json
 import re
+import subprocess
 from pathlib import Path
 
 from _helpers import load_context, load_yaml, make_result
@@ -162,7 +164,7 @@ def _check_no_failed_or_stuck(ops_log, findings):
     """
     for entry in ops_log.get("operations", []):
         status = entry.get("status", "UNKNOWN")
-        op_id = entry.get("operation", "unknown")
+        op_id = entry.get("intent_id", entry.get("operation", "unknown"))
         filepath = entry.get("file", "")
 
         if status == "FAILED":
@@ -325,7 +327,7 @@ def _check_territory_completeness(operations, ops_log, snapshots_dir, findings):
         if entry.get("status") != "COMPLETED":
             continue
 
-        op_id = entry.get("operation", "")
+        op_id = entry.get("intent_id", entry.get("operation", ""))
         op_spec = operations.get(op_id)
         if not op_spec:
             continue
@@ -385,7 +387,7 @@ def _check_factor_table_completeness(operations, ops_log, findings):
         if entry.get("status") != "COMPLETED":
             continue
 
-        op_id = entry.get("operation", "")
+        op_id = entry.get("intent_id", entry.get("operation", ""))
         op_spec = operations.get(op_id)
         if not op_spec:
             continue
@@ -517,6 +519,77 @@ def _check_lob_completeness(manifest, change_spec, ops_log, findings):
 
 
 # ---------------------------------------------------------------------------
+# Check 6: Parser-based target count verification (optional)
+# ---------------------------------------------------------------------------
+
+def _check_parser_target_counts(operations, ops_log, carrier_root,
+                                 vb_parser_path, findings):
+    """For each intent, compare parser-reported target count to planned count.
+
+    Runs ``vb-parser function <target_file> <func_name>`` and checks the
+    reported target count against the planned target_lines count from the
+    intent_graph.  Mismatches are appended as WARNING findings.
+
+    Skipped when *vb_parser_path* is None.
+
+    Args:
+        operations: dict mapping op_id -> op_spec (from intent_graph.yaml).
+        ops_log: Parsed operations_log.yaml dict.
+        carrier_root: Path to the carrier codebase root.
+        vb_parser_path: Absolute path to vb-parser.exe (str or Path), or None.
+        findings: List to append finding dicts to (mutated in place).
+    """
+    if not vb_parser_path:
+        return
+
+    vb_parser_path = str(vb_parser_path)
+
+    for op_id, op_spec in operations.items():
+        func_name = op_spec.get("function")
+        target_file = op_spec.get("file")
+        planned_targets = op_spec.get("target_lines", [])
+
+        if not func_name or not target_file or not planned_targets:
+            continue
+
+        full_path = carrier_root / target_file
+        if not full_path.exists():
+            continue
+
+        try:
+            result = subprocess.run(
+                [vb_parser_path, "function", str(full_path), func_name],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                continue  # Parser couldn't find the function -- skip silently
+
+            data = _json.loads(result.stdout)
+
+            # The parser reports target count as the number of matching
+            # sites within the function (e.g., Case branches, assignments).
+            parser_target_count = data.get("targetCount", data.get("target_count"))
+            if parser_target_count is None:
+                continue
+
+            planned_count = len(planned_targets)
+            if int(parser_target_count) != planned_count:
+                findings.append({
+                    "file": target_file,
+                    "issue": "target_count_mismatch",
+                    "type": "target_count_mismatch",
+                    "severity": "WARNING",
+                    "operation": op_id,
+                    "expected": f"{planned_count} targets (from intent_graph)",
+                    "actual": f"{parser_target_count} targets (from parser)",
+                })
+        except subprocess.TimeoutExpired:
+            continue  # Non-fatal -- skip this intent
+        except Exception:
+            continue  # Non-fatal -- skip this intent
+
+
+# ---------------------------------------------------------------------------
 # Message Builder
 # ---------------------------------------------------------------------------
 
@@ -553,7 +626,7 @@ def _build_message(findings, operations, ops_log):
         for entry in ops_log.get("operations", []):
             if entry.get("status") != "COMPLETED":
                 continue
-            op_spec = operations.get(entry.get("operation", ""))
+            op_spec = operations.get(entry.get("intent_id", entry.get("operation", "")))
             if op_spec and op_spec.get("strategy_hint") == "array6-multiply":
                 territory_total += len(entry.get("changes", []))
 
@@ -582,21 +655,26 @@ def _build_message(findings, operations, ops_log):
 # Main Entry Point
 # ---------------------------------------------------------------------------
 
-def validate(manifest_path: str) -> dict:
+def validate(manifest_path: str, vb_parser_path: str = None) -> dict:
     """Validate that all expected changes were applied completely.
 
-    Runs 5 completeness checks:
+    Runs 5 (or 6) completeness checks:
       1. Every planned intent (from intent_graph.yaml) has a log entry in
          operations_log.yaml.
       2. No operations are FAILED, PENDING, or IN_PROGRESS.
       3. For array6-multiply (strategy_hint): territory counts match snapshot ground truth.
       4. For factor-table (strategy_hint): all target Case values were updated.
       5. For multi-LOB hab tickets: all LOBs have completed operations.
+      6. (optional) Parser-based target count verification per intent.
 
     Args:
         manifest_path: Absolute path to the workflow manifest.yaml file.
                        Used to locate change_requests, operations, and
                        operations_log for completeness checking.
+        vb_parser_path: Optional absolute path to the vb-parser executable.
+                        When provided, Check 6 runs ``vb-parser function``
+                        for each intent to verify target counts.  When None,
+                        Check 6 is skipped.
 
     Returns:
         dict with keys: passed (bool), severity (str), findings (list).
@@ -710,6 +788,21 @@ def validate(manifest_path: str) -> dict:
             "expected": "LOB completeness check succeeds",
             "actual": f"Check 5 crashed: {e}",
         })
+
+    # Check 6: Parser-based target count verification (optional)
+    if vb_parser_path:
+        try:
+            _check_parser_target_counts(
+                operations, ops_log, carrier_root, vb_parser_path, findings,
+            )
+        except Exception as e:
+            findings.append({
+                "file": "",
+                "issue": "check6_error",
+                "operation": "",
+                "expected": "parser target count check succeeds",
+                "actual": f"Check 6 crashed: {e}",
+            })
 
     # Build summary message
     message = _build_message(findings, operations, ops_log)

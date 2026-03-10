@@ -368,8 +368,9 @@ def test_configurable_threshold():
 # ---------------------------------------------------------------------------
 
 def test_no_value_editing_ops():
-    """Operations only with change_type flow_modification. Value sanity
-    skips them. Should pass with 0 values checked."""
+    """Operations only with change_type flow_modification. v0.4.0 (A5 fix):
+    flow_modification IS now included in value sanity checks. A 100% change
+    (0.05 -> 0.10) triggers the threshold warning."""
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = _build_workstream(
             tmpdir,
@@ -404,10 +405,9 @@ def test_no_value_editing_ops():
         )
 
         result = validate(manifest_path)
-        assert result["passed"] is True
-        assert len(result["findings"]) == 0
-        msg = result.get("message", "")
-        assert "0 values checked" in msg
+        # v0.4.0: flow_modification is now checked. The 100% value change
+        # (0.05 -> 0.10) triggers a warning, which is expected behavior.
+        assert result["passed"] is False or len(result["findings"]) > 0
 
 
 # ---------------------------------------------------------------------------

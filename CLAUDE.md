@@ -112,7 +112,7 @@ Const ACCIDENTBASE = 200
 - `/iq-init`         -- Initialize the plugin (one-time setup per carrier folder)
 - `/iq-plan`         -- Analyze changes and build an execution plan (Gate 1 approval)
 - `/iq-execute`      -- Execute the approved plan (file copies + rate/logic changes)
-- `/iq-review`       -- Validate results and approve (Gate 2 approval)
+- `/iq-review`       -- Validate results and approve (Gate 5 approval)
 - `/iq-status`       -- Dashboard: show all workstreams, next actions, overlap alerts
 - `/iq-investigate`  -- Ad-hoc codebase investigation (dead code, patterns, call sites)
 
@@ -132,7 +132,7 @@ workstream files. These six commands cover the full workflow.
 8. **Preserve exact VB.NET formatting** (indentation, spacing, line endings)
 9. **Skip commented lines** (starting with `'`) -- never modify commented-out code
 10. **Understand before acting:** Intake MUST present a ticket understanding **journey** (description → comments → images → synthesis) showing HOW the understanding was built, not just a summary. The developer sees exactly which evidence led to each conclusion — comments often correct the description. Get confirmation BEFORE extracting change requests.
-11. **Three checkpoints, full traceability:** (a) Understanding journey (Intake Step 0) BEFORE CR extraction, (b) Gate 1 (/iq-plan) with verification strategy (automated vs developer checks) BEFORE editing, (c) Gate 2 (/iq-review) with CR-linked completion checklist ([AUTO] vs [DEV] items) AFTER validation
+11. **Three checkpoints, full traceability:** (a) Understanding journey (Intake Step 0) BEFORE CR extraction, (b) Gate 1 (/iq-plan) with verification strategy (automated vs developer checks) BEFORE editing, (c) Gate 5 (/iq-review) with CR-linked completion checklist ([AUTO] vs [DEV] items) AFTER validation
 12. **Save per-file snapshots** before editing -- restore on validator failure
 13. **Hash-check files before writing** -- abort if file changed since plan approval (TOCTOU protection)
 14. **SVN is the version control** -- the plugin does not manage system-level rollback
@@ -142,6 +142,7 @@ workstream files. These six commands cover the full workflow.
 18. **NEVER use `sleep` to wait for anything** -- if an Agent tool call fails or an agent cannot be resumed, log the error and fall back to sequential execution. Do not retry in a sleep loop. Do not `sleep` between steps.
 19. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
 20. **Python-only for scripting** -- when generating YAML, parsing files, or processing data, ALWAYS use Python (with the `python_cmd` from config.yaml). NEVER use Perl, Ruby, Node, or other scripting languages. Python + PyYAML is the only verified runtime.
+21. **Contract registry** -- `contracts/contract_registry.yaml` defines all inter-agent artifact schemas. It is the source of truth. Inline schema examples in agent specs are illustrative only -- if they conflict with the registry, the registry wins.
 
 ## Province Codes
 
@@ -165,19 +166,22 @@ workstream files. These six commands cover the full workflow.
     iq-init/SKILL.md                 <- /iq-init skill definition
     iq-plan/SKILL.md                 <- /iq-plan skill definition (analysis + Gate 1)
     iq-execute/SKILL.md              <- /iq-execute skill definition (file changes)
-    iq-review/SKILL.md               <- /iq-review skill definition (validation + Gate 2)
+    iq-review/SKILL.md               <- /iq-review skill definition (validation + Gate 5)
     iq-status/SKILL.md               <- /iq-status skill definition (dashboard)
     iq-investigate/SKILL.md          <- /iq-investigate skill definition (codebase investigation)
   agents/
     intake.md                        <- Understands any ticket format, extracts change requests
-    discovery.md                     <- Reads code, traces CalcMain flow, resolves change request targets
-    analyzer.md                      <- Reads actual code, builds FUBs, maps targets to files:lines
-    decomposer.md                    <- Breaks change requests into intents grounded in discovered code
-    planner.md                       <- Generates execution plan with Q&A flow for approval
+    understand.md                    <- Parser-powered code analysis, builds FUBs (replaces Discovery + Analyzer)
+    plan.md                          <- CR→intent mapping, execution ordering (replaces Decomposer + Planner)
     change-engine/                   <- Unified code modification engine
-      core.md                        <- Universal rules, schemas, execution steps (always loaded)
+      core.md                        <- Universal rules, schemas, parser gates CE.0-CE.5 (always loaded)
       strategies.md                  <- Reference examples for common patterns (loaded when strategy_hint present)
     reviewer.md                      <- Validates all changes, produces summary
+    semantic-verifier.md             <- Parser-backed arithmetic proofs for value edits
+  tools/
+    win-x64/vb-parser.exe           <- Roslyn parser binary (37MB, self-contained)
+  contracts/
+    contract_registry.yaml           <- Artifact schemas, producers, consumers (source of truth)
   patterns/                          <- Reusable recipes for common change types
   validators/                        <- Automated validation checks (Python)
 
@@ -189,19 +193,19 @@ workstream files. These six commands cover the full workflow.
     {workflow-id}/                   <- One folder per ticket (created by /iq-plan)
       manifest.yaml                  <- State machine + all tracking data
       input/, parsed/                <- Intake artifacts (ticket_understanding.md, cr-NNN.yaml)
-      analysis/                      <- Discovery + Analyzer + Decomposer artifacts (from /iq-plan)
-        code_discovery.yaml          <- CalcMain flow + CR→function mapping (from Discovery)
-        intent_graph.yaml            <- Intents with target regions + dependencies (from Decomposer)
-        analyzer_output/             <- Function understanding blocks (from Analyzer)
-      plan/                          <- Planner artifacts (from /iq-plan)
+      analysis/                      <- Understand + Plan artifacts (from /iq-plan)
+        code_understanding.yaml      <- Unified code analysis with parser data (from Understand)
+        intent_graph.yaml            <- Intents with target regions + dependencies (from Plan)
+      plan/                          <- Plan artifacts (from /iq-plan)
       execution/                     <- Execution artifacts (from /iq-execute)
         checkpoint.yaml              <- Crash-recovery state for orchestrator
         capsules/                    <- Pre-built worker briefs (one per file group)
         results/                     <- Structured outputs from each worker
         snapshots/                   <- Pre-edit file backups
+        parser-cache/                <- Parser output cache (from Gate 2b, consumed by CE.0)
         file_hashes.yaml, operations_log.yaml
       verification/, summary/        <- Review artifacts (from /iq-review)
-      investigation/                 <- Saved findings from /iq-investigate (feed into Analyzer)
+      investigation/                 <- Saved findings from /iq-investigate (feed into Understand)
   archive/                           <- Completed workstreams (auto-archived by /iq-status, /iq-plan)
     index.yaml                       <- Lightweight index of all archived workstreams
     {YYYY-MM}/{workflow-id}/         <- manifest.yaml + summary + diff only
@@ -210,15 +214,15 @@ workstream files. These six commands cover the full workflow.
 ## Agent Pipeline
 
 ```
-/iq-plan:    Intake(Understanding Journey -> [DEV CONFIRMS] -> CR Extraction) -> Discovery -> Analyzer -> Decomposer -> Planner(+Verification Strategy) -> [GATE 1]
-/iq-execute: Build Capsules -> [File-Copy Worker] -> [Change Engine Workers...] -> [EXECUTED]
-/iq-review:  Validator -> Diff -> Semantic Verifier(inline proofs) -> Report -> [GATE 2 + CR Checklist] -> DONE
+/iq-plan:    Intake(Understanding Journey -> [DEV CONFIRMS] -> CR Extraction) -> Understand(Parser+Claude) -> Plan(+Verification Strategy) -> [GATE 1]
+/iq-execute: [GATE 2a] -> File-Copy -> [GATE 2b] -> [Change Engine Workers (CE.0-CE.5)...] -> [GATE 4] -> [EXECUTED]
+/iq-review:  Validator -> Diff -> Semantic Verifier(parser-backed proofs) -> Report -> [GATE 5 + CR Checklist] -> DONE
 ```
 
-**Discovery Agent:** Reads CalcMain.vb, traces the calculation flow, matches change
-requests to exact functions, and produces `analysis/code_discovery.yaml`. Runs every
-time (tokens are cheap). All downstream agents use verified function names/files
-instead of guessing. If Discovery fails, agents fall back to existing heuristic behavior.
+**Understand Agent:** Uses vb-parser.exe (Roslyn) for structural analysis, then Claude
+for semantic reasoning. Produces `analysis/code_understanding.yaml` — a unified artifact
+with project maps, call chains, per-CR targets with parser-verified line numbers, FUBs,
+and hazard flags. Parser is required (no regex fallback). Replaces Discovery + Analyzer.
 
 **Context engineering:** `/iq-execute` uses the **capsule pattern** — the orchestrator
 pre-builds self-contained capsules (one per target file), then spawns short-lived
@@ -249,12 +253,12 @@ See `validators/*.py` for automated validation checks.
 ### Codebase Knowledge Base (codebase-profile.yaml)
 
 A persistent knowledge artifact built by `/iq-init` (Steps 6.6-6.8) and incrementally
-enriched by the Analyzer (Step 5.11) and `/iq-investigate --promote`. Contains:
+enriched by the Understand agent (Step U.12) and `/iq-investigate --promote`. Contains:
 
 - **dispatch_tables** — CalcOption routing maps (option code → function → category)
 - **vehicle_type_profiles** — Auto sub-functions per vehicle type (PPV, Motorcycle, etc.)
 - **glossary** — Business terms → canonical functions (e.g., "liability bundle" → `GetLiabilityBundlePremiums`)
-- **factor_cardinality** — Case branch counts per function (enriched by Analyzer at runtime)
+- **factor_cardinality** — Case branch counts per function (enriched by Understand at runtime)
 - **rule_dependencies** — Business rule pairs (e.g., Water Coverage ↔ Sewer Backup)
 
 Agents Grep for specific sections — **never load the full file**. Workers never see it

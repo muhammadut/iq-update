@@ -41,7 +41,9 @@ Return schema:
     }
 """
 
+import json as _json
 import re
+import subprocess
 from pathlib import Path
 
 from _helpers import (
@@ -78,13 +80,13 @@ def _check_ops_log(ops_log, findings):
     """
     for entry in ops_log.get("operations", []):
         change_type = entry.get("change_type", "")
-        if change_type not in ("value_editing", "structure_insertion"):
+        if change_type not in ("value_editing", "structure_insertion", "flow_modification"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
 
         filepath = entry.get("file", "")
-        operation_id = entry.get("operation", "")
+        operation_id = entry.get("intent_id", entry.get("operation", ""))
 
         for change in entry.get("changes", []):
             before_line = change.get("before", "") or ""
@@ -582,6 +584,87 @@ def _find_snapshot_arg_count(snapshot_lines, var_name, case_label):
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: Parser-Based Syntax Verification (optional)
+# ---------------------------------------------------------------------------
+
+def _check_parser_syntax(inventory, carrier_root, vb_parser_path, findings):
+    """Run vb-parser on each modified file and flag any parse errors.
+
+    If vb-parser reports parseErrors in its JSON output, each error is
+    appended as a CRITICAL finding.  Requires vb_parser_path to point to
+    a working vb-parser executable; skipped silently when None.
+
+    Args:
+        inventory: File inventory dict from build_inventory().
+        carrier_root: Path to the carrier codebase root.
+        vb_parser_path: Absolute path to vb-parser.exe (str or Path), or None.
+        findings: List to append finding dicts to (mutated in place).
+    """
+    if not vb_parser_path:
+        return
+
+    vb_parser_path = str(vb_parser_path)
+
+    for filepath in sorted(inventory["all_files"]):
+        try:
+            full_path = check_path_containment(filepath, carrier_root)
+        except ValueError:
+            continue  # Already caught by Phase 2
+        if not full_path.exists():
+            continue
+
+        try:
+            result = subprocess.run(
+                [vb_parser_path, "parse", str(full_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                findings.append({
+                    "file": filepath,
+                    "line": 0,
+                    "type": "parse_error",
+                    "severity": "CRITICAL",
+                    "issue": "parser_nonzero_exit",
+                    "expected": "vb-parser exits 0",
+                    "actual": f"exit code {result.returncode}: {result.stderr.strip()[:200]}",
+                })
+                continue
+
+            data = _json.loads(result.stdout)
+            parse_errors = data.get("parseErrors", [])
+            for err in parse_errors:
+                findings.append({
+                    "file": filepath,
+                    "line": err.get("line", 0),
+                    "type": "parse_error",
+                    "severity": "CRITICAL",
+                    "issue": "parse_error",
+                    "expected": "no parse errors",
+                    "actual": err.get("message", str(err)),
+                })
+        except subprocess.TimeoutExpired:
+            findings.append({
+                "file": filepath,
+                "line": 0,
+                "type": "parse_error",
+                "severity": "CRITICAL",
+                "issue": "parser_timeout",
+                "expected": "vb-parser completes within 30s",
+                "actual": "parser timed out",
+            })
+        except Exception as e:
+            findings.append({
+                "file": filepath,
+                "line": 0,
+                "type": "parse_error",
+                "severity": "CRITICAL",
+                "issue": "parser_error",
+                "expected": "vb-parser runs successfully",
+                "actual": str(e),
+            })
+
+
+# ---------------------------------------------------------------------------
 # Message Builder
 # ---------------------------------------------------------------------------
 
@@ -633,7 +716,7 @@ def _count_total_array6_calls(ops_log, inventory, carrier_root):
     # Count from ops log
     for entry in ops_log.get("operations", []):
         change_type = entry.get("change_type", "")
-        if change_type not in ("value_editing", "structure_insertion"):
+        if change_type not in ("value_editing", "structure_insertion", "flow_modification"):
             continue
         if entry.get("status") != "COMPLETED":
             continue
@@ -663,17 +746,22 @@ def _count_total_array6_calls(ops_log, inventory, carrier_root):
 # Main Entry Point
 # ---------------------------------------------------------------------------
 
-def validate(manifest_path: str) -> dict:
+def validate(manifest_path: str, vb_parser_path: str = None) -> dict:
     """Validate Array6() syntax in all modified files.
 
-    Runs a two-phase validation:
+    Runs a two- or three-phase validation:
       Phase 1: Scan the operations log for before/after Array6 issues.
       Phase 2: Full-file scan of every modified file for corrupt Array6 calls.
+      Phase 3: (optional) Run vb-parser on each modified file to detect parse errors.
 
     Args:
         manifest_path: Absolute path to the workflow manifest.yaml file.
                        Used to locate the operations_log.yaml, snapshots,
                        and modified source files.
+        vb_parser_path: Optional absolute path to the vb-parser executable.
+                        When provided, Phase 3 runs Roslyn-based syntax
+                        verification on each modified file.  When None,
+                        Phase 3 is skipped.
 
     Returns:
         dict with keys: passed (bool), severity (str), findings (list).
@@ -727,6 +815,19 @@ def validate(manifest_path: str) -> dict:
             "expected": "full-file scan succeeds",
             "actual": f"Phase 2 crashed: {e}",
         })
+
+    # Phase 3: Parser-based syntax verification (optional)
+    if vb_parser_path:
+        try:
+            _check_parser_syntax(inventory, carrier_root, vb_parser_path, findings)
+        except Exception as e:
+            findings.append({
+                "file": "",
+                "line": 0,
+                "issue": "phase3_error",
+                "expected": "parser syntax check succeeds",
+                "actual": f"Phase 3 crashed: {e}",
+            })
 
     # Deduplicate findings (same file + line + issue)
     findings = _deduplicate_findings(findings)

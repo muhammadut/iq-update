@@ -68,7 +68,18 @@ EXECUTING.
 
 Read the selected manifest.yaml fully:
 
-1. **State must be PLANNED or EXECUTING.** Any other state: STOP.
+1. **State must be PLANNED, EXECUTING, or FAILED.** Any other state: STOP.
+   - **FAILED state recovery:** If state is FAILED, offer the developer a choice:
+     ```
+     Workstream {id} is in FAILED state: {manifest.failure_reason}
+     Options:
+       1. Restore from snapshots and retry execution (recommended)
+       2. Return to /iq-plan to re-plan
+       3. Discard workstream
+     ```
+     On option 1: Restore all files from `execution/snapshots/`, delete stale
+     execution artifacts (checkpoint.yaml, capsules/, results/), set state to PLANNED,
+     then proceed normally. On option 2/3: set state accordingly, STOP.
 2. **Gate 1 must be approved:** `phase_status.gate_1.status == "approved"`.
    If not: STOP, tell developer to run /iq-plan to approve first.
 3. **Required files must exist:**
@@ -77,9 +88,9 @@ Read the selected manifest.yaml fully:
    - `execution/file_hashes.yaml`
    If any missing: STOP, tell developer to run /iq-plan to regenerate.
 
-   **Optional file:** `analysis/files_to_copy.yaml` — may not exist when no file
-   copies are needed (e.g., Workflow 2 where copies were already made). If absent,
-   skip the file-copy phase entirely.
+   **File copy data:** `analysis/code_understanding.yaml` may contain entries with
+   `needs_copy: true` under `change_requests.{cr_id}`. If no CR has `needs_copy`,
+   skip the file-copy phase entirely (e.g., Workflow 2 where copies were already made).
 
 If all pass, proceed to Section 3.
 
@@ -103,8 +114,21 @@ Check if `execution/checkpoint.yaml` exists in the workstream directory.
    - If result file exists AND validates: treat capsule as completed,
      update checkpoint, advance to next capsule
    - If result file exists but INVALID: delete it, will re-spawn worker
-   - If no result file: normal resume, will spawn worker
-3. Identify: total capsules, completed capsules, current capsule, next action
+   - If no result file: normal resume — but check for PARTIAL completion first
+     (see Smart Resume below)
+3. SMART RESUME — Partial Capsule Recovery:
+   If a worker crashed mid-capsule (some intents applied, others not), the file
+   is in a half-modified state. Before re-spawning the capsule worker:
+   a. For each intent in the capsule, read the target file and check:
+      - If intent's EXPECTED AFTER content exists in the file → already applied, mark SKIP
+      - If intent's EXPECTED BEFORE content exists in the file → not yet applied, include
+      - If NEITHER matches → file is in an unexpected state
+   b. If all intents are SKIP: mark capsule as completed, advance
+   c. If some SKIP + some pending: rebuild the capsule with only pending intents
+   d. If NEITHER matches for any intent: restore file from snapshot and re-apply ALL
+      intents from scratch (clean slate)
+   This prevents double-application of already-applied edits on resume.
+4. Identify: total capsules, completed capsules, current capsule, next action
 4. Report to developer:
    "Resuming execution. {N} of {M} file groups complete.
     Next: {next_action}"
@@ -143,6 +167,23 @@ This is where the orchestrator does its heavy work — reading the full executio
 plan and building self-contained capsules for each worker. After this section,
 the orchestrator NEVER needs to re-read the full plan.
 
+### Step 4.0: Handoff Validation (Plan → Execute)
+
+Before doing any execution work, validate that /iq-plan produced complete and
+well-formed artifacts. This catches malformed handoffs BEFORE any file operations:
+
+```bash
+{python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" plan
+{python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" planner
+```
+
+If either result contains `"passed": false`:
+  STOP with: `"ERROR: Handoff validation failed. Run /iq-plan to fix plan artifacts."`
+  Show the findings from the validator result.
+
+This ensures intent_graph.yaml, execution_order.yaml, and file_hashes.yaml all
+exist and have the required fields before the orchestrator attempts to read them.
+
 ### Step 4.1: Pre-Execution Validation
 
 ```
@@ -159,14 +200,24 @@ the orchestrator NEVER needs to re-read the full plan.
 ### Step 4.2: Group Intents by File
 
 ```
-1. Read plan/execution_order.yaml (full intent execution sequence)
-2. Read analysis/intent_graph.yaml for intent details
+1. Read plan/execution_order.yaml (structured plan document — v0.4.0 dict format)
+   - eo = YAML.load(plan/execution_order.yaml)
+   - intent_list = eo["execution_sequence"]    # flat list of intent dicts
+   - file_copies = eo.get("file_copies", [])   # consumed by file-copy worker (Step 3)
+   - file_ops    = eo.get("file_operation_order", {})  # per-file bottom-to-top order
+   NOTE: execution_order.yaml is a dict with plan_version, execution_sequence,
+         file_copies, phases, file_operation_order, etc. — NOT a flat list.
+         See contract_registry.yaml and agents/plan.md for the full schema.
+
+2. Read analysis/intent_graph.yaml for intent details (cr, function, capability)
+
 3. Group intents by target file:
    - file_groups = {}
-   - For each intent in execution_order:
+   - For each intent in intent_list:
        file = intent["file"]
        file_groups[file].append(intent)
    - Intents within each group retain their bottom-to-top order
+     (use file_operation_order from execution_order.yaml for authoritative ordering)
 
 4. **MAX INTENTS PER CAPSULE: 20.**
    If a file group has more than 20 intents (e.g., 48 territory Array6 changes),
@@ -207,7 +258,7 @@ determine capsule execution order.
    - End with internal-review capsule (always last)
 
 3. If dependency cycle detected: ABORT with error showing the cycle.
-   This should never happen -- the Planner should have caught it.
+   This should never happen -- the Plan agent should have caught it.
 
 4. Write resolved capsule_order to checkpoint (Step 4.7)
 ```
@@ -241,30 +292,31 @@ reasons about each change from the code and the intent description.
 ### Step 4.3b: Resolve FUBs for Tier 2/3 Capsules
 
 For each file group containing Tier 2 or Tier 3 intents, resolve Function
-Understanding Blocks (FUBs) from the Analyzer's output. FUBs provide
-workers with structural understanding of the target function (branch tree, hazards,
-adjacent context) so they can modify code accurately.
+Understanding Blocks (FUBs) from `analysis/code_understanding.yaml`. FUBs are stored
+under `change_requests.{cr_id}.fub` and provide workers with structural understanding
+of the target function (branch tree, hazards, adjacent context) so they can modify
+code accurately.
 
 **This step is fully automated — no developer interaction.**
 
 ```python
-def resolve_fubs_for_capsule(intents, workstream_path, analyzer_output, codebase_root):
+def resolve_fubs_for_capsule(intents, workstream_path, code_understanding, codebase_root):
     """Resolve FUBs for intents that need enriched context.
 
     For Tier 1: skip (no FUB needed)
-    For Tier 2/3: read FUB from analyzer output (direct `fub:` or resolve `fub_ref:`)
+    For Tier 2/3: read FUB from code_understanding.yaml (under change_requests.{cr_id}.fub)
     For Tier 3: also collect peer function bodies and cross-file context
 
     Args:
         intents: list of intents in this capsule's file group
         workstream_path: path to workstream directory
-        analyzer_output: dict of function -> loaded analyzer YAML data
+        code_understanding: dict loaded from analysis/code_understanding.yaml
 
     Returns: dict of intent_id -> {fub, canonical_patterns, peer_function_bodies, cross_file_context}
 
     IMPORTANT: The returned dict is used to INJECT these fields into per-intent
     entries within the capsule YAML. Workers read enriched fields from their
-    capsule intent entry, NOT from the Analyzer's output files. The capsule
+    capsule intent entry, NOT from code_understanding.yaml. The capsule
     builder (Step 4.5) must merge these fields into each intent's capsule entry.
     """
     fub_data = {}
@@ -276,14 +328,17 @@ def resolve_fubs_for_capsule(intents, workstream_path, analyzer_output, codebase
             continue  # Tier 1: thin capsule, no FUB
 
         intent_id = intent["id"]
-        intent_data = analyzer_output.get(intent_id, {})
+        # Look up FUB from code_understanding → change_requests.{cr_id}.fub
+        cr_id = intent.get("cr_id", intent.get("cr"))
+        cr_data = code_understanding.get("change_requests", {}).get(cr_id, {})
+        intent_data = cr_data
 
         # Resolve FUB (direct or via reference)
         fub = intent_data.get("fub")
         if not fub and intent_data.get("fub_ref"):
-            # Resolve reference: read FUB from the referenced intent's function
-            ref_data = analyzer_output.get(intent_data["fub_ref"], {})
-            fub = ref_data.get("fub")
+            # Resolve reference: read FUB from the referenced CR's data
+            ref_cr_data = code_understanding.get("change_requests", {}).get(intent_data["fub_ref"], {})
+            fub = ref_cr_data.get("fub")
             # Apply adjacent_context_override if this intent has its own target line
             if fub and intent_data.get("adjacent_context_override"):
                 fub = dict(fub)  # Shallow copy to avoid mutating shared FUB
@@ -307,7 +362,7 @@ def resolve_fubs_for_capsule(intents, workstream_path, analyzer_output, codebase
                 fub, intent_data, workstream_path, codebase_root
             )
             result["cross_file_context"] = collect_cross_file_context(
-                intent_data, analyzer_output
+                intent_data, code_understanding
             )
 
         fub_data[intent_id] = result
@@ -356,13 +411,13 @@ def collect_peer_bodies(fub, intent_data, workstream_path, codebase_root):
     sorted by call_sites (highest first). Only includes ACTIVE/HIGH_USE peers.
 
     Sources checked (in order):
-    1. fub["nearby_functions"] — lightweight entries from Analyzer
-    2. code_patterns["peer_functions"] — richer entries from Analyzer
+    1. fub["nearby_functions"] — lightweight entries from code_understanding.yaml
+    2. code_patterns["peer_functions"] — richer entries from code_understanding.yaml
        (FALLBACK when nearby_functions is empty)
 
     Args:
         fub: the Function Understanding Block (or None)
-        intent_data: the intent's analyzer data
+        intent_data: the intent's data from code_understanding.yaml
         workstream_path: path to workstream directory
         codebase_root: absolute path to carrier root (from manifest.yaml)
 
@@ -406,11 +461,11 @@ def collect_peer_bodies(fub, intent_data, workstream_path, codebase_root):
     return peers
 
 
-def collect_cross_file_context(intent_data, analyzer_output):
+def collect_cross_file_context(intent_data, code_understanding):
     """Collect cross-file dependency context for Tier 3 capsules.
 
     For intents with depends_on pointing to a different file, include
-    the dependent intent's FUB summary.
+    the dependent intent's FUB summary. Reads from code_understanding.yaml.
 
     Returns: list of {dep_intent, dep_summary}
     """
@@ -418,7 +473,12 @@ def collect_cross_file_context(intent_data, analyzer_output):
     target_file = intent_data.get("target_file")
 
     for dep_id in intent_data.get("depends_on", []):
-        dep_data = analyzer_output.get(dep_id, {})
+        # Look up dependent CR data in code_understanding
+        dep_data = {}
+        for cr_id, cr_data in code_understanding.get("change_requests", {}).items():
+            if cr_data.get("intent_id") == dep_id or dep_id in str(cr_data):
+                dep_data = cr_data
+                break
         if dep_data.get("target_file") != target_file:
             cross_ctx.append({
                 "dep_intent": dep_id,
@@ -454,7 +514,8 @@ capsule is built without FUB data (equivalent to current behavior).
 
 ### Step 4.4: Build File Copy Capsule
 
-If `analysis/files_to_copy.yaml` has entries, create a file-copy capsule:
+If `analysis/code_understanding.yaml` has any CRs with `needs_copy: true`, create a file-copy capsule.
+Read `source_file` and `target_file` from each CR's entry in `code_understanding.yaml`:
 
 ```yaml
 # execution/capsules/capsule-file-copy.yaml
@@ -583,7 +644,7 @@ intents:
     strategy_hint: "case_block_insertion"
     confidence: 0.9
     tier: 2
-    fub:                                        # From Analyzer (via Step 4.3b)
+    fub:                                        # From code_understanding.yaml (via Step 4.3b)
       function: "GetRateTableID"
       file: "Saskatchewan/Code/mod_Common_SKHab20260101.vb"
       line_start: 405
@@ -792,6 +853,65 @@ Capsules:    {K} Change Engine workers will be spawned
 
 ---
 
+## 4.8: Gate 2a — Source Preflight
+
+**When:** After capsules are built, BEFORE file copy begins.
+**Purpose:** Verify that source files parse cleanly and that target counts match
+the plan. Catches stale plans and corrupted source files BEFORE any destructive
+operations.
+
+```
+vb_parser = read paths.md → vb_parser path
+
+For each capsule in execution_order:
+  IF capsule has needs_copy targets:
+    # For needs_copy files: verify SOURCE file (target doesn't exist yet)
+    source_file = capsule.source_file  # from code_understanding.yaml or capsule
+    source_path = codebase_root + "/" + source_file
+    result = bash: {vb_parser} parse {source_path}
+
+    ASSERT: result.parseErrors == []
+      → ABORT capsule: "Source file has parse errors. Cannot copy."
+
+    # Validate target counts against SOURCE (targets will be same after copy)
+    For each unique function in capsule.intents:
+      func = bash: {vb_parser} function {source_path} {function_name}
+      target_kind = intent.target_kind   # call|assignment|constant|case_label
+      parser_count = count_by_kind(func, target_kind)
+      planned_count = count targets in capsule for this function
+      IF parser_count != planned_count:
+        WARN: "Source has {parser_count} {target_kind} targets, plan has {planned_count}"
+
+  ELSE:
+    # Target already exists — validate it directly
+    target_path = codebase_root + "/" + capsule.target_file
+    result = bash: {vb_parser} parse {target_path}
+    ASSERT: result.parseErrors == []
+      → ABORT capsule: "Target file has parse errors before editing."
+
+  Print: "Gate 2a ✓ Capsule {capsule_id}: source validated"
+```
+
+**`count_by_kind` helper (target_kind dispatch):**
+```
+def count_by_kind(parser_output, target_kind):
+  if target_kind == "call":
+    return len([c for c in func.calls if c.parentContext == "assignment"])
+  elif target_kind == "assignment":
+    return len(func.assignments)
+  elif target_kind == "constant":
+    return len(file.constants)
+  elif target_kind == "case_label":
+    return sum(len(sc.cases) for sc in func.selectCases)
+  elif target_kind == "code_block":
+    return len(func.controlFlow)
+```
+
+**On ABORT:** Mark capsule as `GATE_2A_FAILED` in checkpoint. Skip this capsule
+in subsequent phases. Report to developer at completion.
+
+---
+
 ## 5. Phase 1: File Copy
 
 ### Step 5.1: Read Checkpoint (Crash-Safe Entry)
@@ -878,6 +998,63 @@ Agent(name: "file-copy-worker", subagent_type: "general-purpose", prompt: <above
    - On retry: update checkpoint retry_count, re-spawn worker
    - On abort: leave state EXECUTING, tell developer to investigate
 ```
+
+---
+
+## 5.5: Gate 2b — Target Preflight
+
+**When:** AFTER file copy completes, BEFORE any Change Engine workers spawn.
+**Purpose:** Verify that actual target files (now existing post-copy) parse
+cleanly, and cache the parser output for CE.0 to consume. This eliminates
+duplicate parser calls and ensures CE.0 operates on identical data.
+
+```
+vb_parser = read paths.md → vb_parser path
+cache_dir = workstream_dir + "/execution/parser-cache/"
+mkdir -p {cache_dir}
+
+For each capsule in execution_order (Change Engine capsules only):
+  target_path = codebase_root + "/" + capsule.target_file
+
+  # Verify file exists (should have been created by file-copy if needed)
+  IF NOT file_exists(target_path):
+    ABORT capsule: "Target file does not exist: {capsule.target_file}. "
+                   "File copy may have failed. Check checkpoint.yaml."
+
+  For each unique function in capsule.intents:
+    # Parse ACTUAL target file
+    result = bash: {vb_parser} function {target_path} {function_name}
+
+    # Check 1: Function exists
+    IF result.error:
+      ABORT capsule: "Function {function_name} not found in target. "
+                     "Copy may have produced a different file."
+
+    # Check 2: Target count (target_kind aware)
+    target_kind = intent.target_kind
+    parser_count = count_by_kind(result, target_kind)
+    planned_count = count targets in capsule for this function
+    IF planned_count != parser_count:
+      IF parser_count > planned_count:
+        WARN + capsule.needs_review = true
+      ELSE:
+        WARN: "Fewer targets than plan. CE.1 will attempt re-location."
+
+    # Cache parser output for CE.0 (avoids duplicate calls)
+    file_hash = sha256(read_file(target_path))
+    func_signature = function_name + "(" + ",".join(param_types) + ")"
+    cache_key = normalize(target_path) + "_" + file_hash + "_" + func_signature
+    Write result to {cache_dir}/{cache_key}.json
+
+  Print: "Gate 2b ✓ Capsule {capsule_id}: {n} targets verified, parser cache written"
+```
+
+**On ABORT:** Mark capsule as `GATE_2B_FAILED` in checkpoint. Skip this capsule.
+Report to developer at completion.
+
+**Cache key format (Codex F6):** `{normalized_path}_{file_hash}_{function_signature}`
+ensures no collision even for overloaded functions or files with the same name
+in different directories.
 
 ---
 
@@ -1054,15 +1231,64 @@ Agent(name: "worker-{capsule_id}", subagent_type: "general-purpose", prompt: <ab
    - Update execution/file_hashes.yaml with file_hash_after from result
    - Transform worker result into operations_log.yaml format:
      For each intent in result.intents:
-       Map to the rich schema expected by /iq-review:
-       - Copy: intent_id → operation
-       - Map status: "success" → "COMPLETED", "failed" → "FAILED",
-                     "skipped" → "SKIPPED", "needs_review" → "NEEDS_REVIEW"
-       - Copy: target_file → file, edits_applied[], summary
-       - Add: capability from intent_graph.yaml → change_type
-       - Add: description from intent_graph.yaml
+       Look up the matching intent in intent_graph.yaml by intent_id.
+       Map to the rich schema expected by /iq-review (per contract_registry.yaml):
+
+       FIELD-BY-FIELD MAPPING (CE result → operations_log entry):
+       ┌────────────────────────┬────────────────────────┬──────────────────────────────────┐
+       │ CE result field        │ ops_log field           │ Source / Transform               │
+       ├────────────────────────┼────────────────────────┼──────────────────────────────────┤
+       │ intent_id              │ intent_id              │ Copy as-is (do NOT rename)       │
+       │ (n/a)                  │ cr                     │ intent_graph intent["cr"]        │
+       │ status                 │ status                 │ Uppercase: success→COMPLETED,    │
+       │                        │                        │ failed→FAILED, skipped→SKIPPED,  │
+       │                        │                        │ needs_review→NEEDS_REVIEW        │
+       │ (capsule) target_file  │ file                   │ Copy from capsule-level field    │
+       │ (n/a)                  │ function               │ intent_graph intent["function"]  │
+       │ (n/a)                  │ change_type            │ intent_graph intent["capability"]│
+       │ (n/a)                  │ description            │ intent_graph intent["description"]│
+       │ edits_applied[]        │ changes[]              │ Rename array + map child fields: │
+       │   .old_string          │   .before              │ Rename field                     │
+       │   .new_string          │   .after               │ Rename field                     │
+       │   .line                │   .line                │ Copy as-is                       │
+       │   .description         │   .description         │ Copy as-is                       │
+       │   (n/a)                │   .values_changed      │ Count changed Array6 args        │
+       │ summary                │ summary                │ Copy as-is                       │
+       └────────────────────────┴────────────────────────┴──────────────────────────────────┘
+
+     Pseudocode for the transform:
+     ```python
+     intent_graph_intents = {i["id"]: i for i in intent_graph["intents"]}
+
+     for ce_intent in result.intents:
+       ig = intent_graph_intents[ce_intent["intent_id"]]
+       ops_entry = {
+         "intent_id": ce_intent["intent_id"],
+         "cr":        ig.get("cr", ig.get("cr_id")),
+         "status":    UPPERCASE(ce_intent["status"]),
+         "file":      result.target_file,
+         "function":  ig["function"],
+         "change_type": ig["capability"],
+         "description": ig.get("description", ""),
+         "changes": [
+           {
+             "before": edit["old_string"],
+             "after":  edit["new_string"],
+             "line":   edit["line"],
+             "description": edit.get("description", ""),
+             "values_changed": count_changed_args(edit["old_string"], edit["new_string"]),
+           }
+           for edit in ce_intent.get("edits_applied", [])
+         ],
+         "summary": ce_intent.get("summary", {}),
+       }
+       operations_log["operations"].append(ops_entry)
+     ```
+
      Append the transformed entries to execution/operations_log.yaml
    **Operations log status values MUST be UPPERCASE** — the Python validators require uppercase.
+   **intent_id field MUST be named "intent_id"** — do NOT rename to "operation".
+   **cr and function fields are REQUIRED** — the registry (contract_registry.yaml) mandates them.
    - Update CR intent statuses in manifest
    - ATOMIC CHECKPOINT UPDATE:
      a. Write checkpoint to execution/checkpoint.yaml.tmp
@@ -1070,7 +1296,10 @@ Agent(name: "worker-{capsule_id}", subagent_type: "general-purpose", prompt: <ab
      c. Rename checkpoint.yaml.tmp -> checkpoint.yaml
      This prevents corrupt checkpoint if session interrupted during write.
 
-4. For FAILED:
+4. For FAILED (Gate 3 enforcement):
+   Gate 3 (post_edit_verify) is agent-enforced: the Change Engine's CE.4 step
+   runs inside each worker. When CE.4 fails, the worker returns status: FAILED.
+   The orchestrator MUST halt before dispatching the next dependent capsule.
    - Read errors[] from result for structured diagnostics
    - Show errors to developer with context
    - Options: retry (re-spawn worker), skip file, abort
@@ -1086,8 +1315,12 @@ Agent(name: "worker-{capsule_id}", subagent_type: "general-purpose", prompt: <ab
 
 **Result-to-operations_log mapping:** The worker result schema is lean (optimized for
 worker context), while `/iq-review` expects the rich operations_log format. The
-orchestrator bridges this gap during Step 6.3 by reading the intent_graph.yaml
-for description fields and building the full log entries.
+orchestrator bridges this gap during Step 6.3 by:
+1. Reading `intent_graph.yaml` for `cr`, `function`, `capability`, and `description`
+2. Renaming `edits_applied[]` → `changes[]` with field mapping (`old_string→before`,
+   `new_string→after`)
+3. Computing `values_changed` per change entry (count of Array6 args that differ)
+See the field-by-field mapping table in Step 6.3 above.
 
 ### Step 6.4: Update Checkpoint After Each Worker
 
@@ -1105,17 +1338,56 @@ updated_at: "{now}"
 
 ### Step 6.5: All Change Engine Workers Complete
 
-When all Change Engine capsules are completed, proceed directly to Section 8
-(Completion). No separate internal review phase — `/iq-review` handles validation.
+When all Change Engine capsules are completed, proceed to Gate 4.
 
 ```yaml
 phase_status.change_engine: {status: "COMPLETED", summary: "{N} intents, {M} files"}
 ```
 
-Report:
+---
+
+## 6.6: Gate 4 — Aggregate Verification
+
+**When:** AFTER all Change Engine workers complete, BEFORE marking state as EXECUTED.
+**Purpose:** Final structural integrity check across ALL modified files. Catches
+issues that individual CE.4 checks might miss (e.g., a file modified by multiple
+capsules, cross-file consistency).
+
 ```
-Changes complete: {N} intents applied across {M} files.
+vb_parser = read paths.md → vb_parser path
+
+total_planned = sum of all target counts across all capsules
+total_edited = sum of all successfully edited targets from worker results
+files_modified = list of files with status != SKIPPED
+
+For each modified file in files_modified:
+  file_path = codebase_root + "/" + file
+  result = bash: {vb_parser} parse {file_path}
+
+  IF result.parseErrors is not empty:
+    CRITICAL: "File {file} has {len(result.parseErrors)} parse errors after execution."
+    gate_4_status = "FAILED"
+
+# Clean up parser cache (no longer needed)
+# Leave cache in place for /iq-review to inspect if needed
+
+# Report
+Print: "Gate 4 — Aggregate Results:"
+Print: "  Files modified: {len(files_modified)}"
+Print: "  Targets planned: {total_planned}"
+Print: "  Targets edited:  {total_edited}"
+Print: "  Parse errors:    {error_count}"
+
+IF total_planned == total_edited AND error_count == 0:
+  Print: "  Status: ✓ PASS"
+ELSE:
+  Print: "  Status: ⚠ REVIEW NEEDED"
+  Print: "  Details: {mismatch_details}"
 ```
+
+**On FAIL:** Do NOT roll back — the individual CE.4 checks already handled
+per-file restores. Gate 4 failures indicate cross-file issues that need
+developer investigation. Mark execution as `EXECUTED_WITH_WARNINGS`.
 
 ---
 
@@ -1207,6 +1479,27 @@ This works because:
 - Capsules are self-contained (don't depend on orchestrator memory)
 - Results are on disk (not in context)
 - Checkpoint tracks exact progress
+
+### Unrecoverable Failure → FAILED State
+
+When an error cannot be resolved (parser binary missing, disk full, corrupt
+checkpoint that can't be repaired, 2+ retries exhausted on the same capsule):
+
+```
+1. Set manifest state: "FAILED"
+2. Set manifest failure_reason: "{description of the unrecoverable error}"
+3. Set manifest updated_at: "{now}"
+4. Set phase_status.change_engine.status: "failed"
+5. Print:
+   EXECUTION FAILED: {error description}
+   Workstream marked as FAILED. To recover:
+     - Run /iq-execute again (will offer to restore from snapshots)
+     - Or run /iq-plan to re-plan from scratch
+     - Or run /iq-status to see all workstreams
+```
+
+This ensures stuck pipelines get a clean FAILED state instead of staying in
+EXECUTING forever. /iq-status will flag FAILED workstreams prominently.
 
 ### Complete Rollback
 

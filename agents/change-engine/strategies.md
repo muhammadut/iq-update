@@ -588,7 +588,7 @@ arithmetic.
 
 When the intent's target lines have `has_expressions: true`:
 
-1. **Use `evaluated_args`** from the Analyzer (pre-computed values for each arg)
+1. **Use `evaluated_args`** from the Understand agent (pre-computed values for each arg)
 2. **Multiply the evaluated values** by the factor
 3. **Replace the entire expression** with the computed result
 
@@ -608,8 +608,8 @@ artifacts and don't need to be preserved in updated rate tables.
 ### Fallback Without evaluated_args
 
 If `evaluated_args` is not present, use `safe_eval_arithmetic()` (AST-based)
-to evaluate each expression at edit time. This is less reliable — the Analyzer
-should have provided pre-evaluated values.
+to evaluate each expression at edit time. This is less reliable — the Understand
+agent should have provided pre-evaluated values.
 
 ### Disambiguation: Expression vs Negative Number
 
@@ -747,7 +747,7 @@ works for any TBW/IntelliQuote carrier with manufactured rating.
 | `pattern-library.yaml` | Function registry with params/return types | From /iq-init |
 | `codebase-profile.yaml` | Dispatch tables, vehicle profiles, glossary | From /iq-init |
 | `.vbproj` files | Authoritative file references | Parsed at runtime |
-| FUB | Branch tree, hazards, adjacent context | From Analyzer |
+| FUB | Branch tree, hazards, adjacent context | From Understand agent |
 | Peer examples | Active function bodies for structural reference | From capsule |
 
 ### When No Strategy Matches

@@ -11,19 +11,19 @@ The Intake agent accepts any input format: pasted text, ADO ticket content
 (from fetch-ticket.sh), Jira exports, plain developer notes, formal "Summary of
 Changes" documents, or conversational descriptions. It extracts WHAT needs to
 change and captures concrete values (percentages, dollar amounts, old→new values)
-without forcing the change into a category. Downstream agents (Discovery, Analyzer,
-Decomposer) determine HOW to implement it based on actual code understanding.
+without forcing the change into a category. Downstream agents (Understand, Plan)
+determine HOW to implement it based on actual code understanding.
 
 ## Pipeline Position
 
 ```
-[INPUT] --> INTAKE --> Discovery --> Analyzer --> Decomposer --> Planner --> [GATE 1]
+[INPUT] --> INTAKE --> Understand --> Plan --> [GATE 1]
             ^^^^^^
 ```
 
 - **Upstream:** `/iq-plan` skill (provides target folders, raw input)
-- **Downstream:** Discovery agent (uses change requests to target code tracing),
-  then Decomposer (forms intents from change requests + code understanding)
+- **Downstream:** Understand agent (parser-powered code analysis + FUBs),
+  then Plan agent (CR→intent mapping, execution ordering)
 
 ## Input Schema
 
@@ -310,13 +310,13 @@ The ticket understanding document shows the **reasoning journey** — not just a
 polished summary, but the step-by-step evidence trail that led to each conclusion.
 The developer sees exactly what came from the description, what was corrected by
 comments, and what was extracted from images. This transparency catches
-misunderstandings early AND gives downstream agents (Discovery, Analyzer, Planner)
+misunderstandings early AND gives downstream agents (Understand, Plan)
 a rich evidence chain to link code changes back to ticket evidence.
 
 **ALWAYS write the file first, THEN present it.** Use the Write tool to create
 `parsed/ticket_understanding.md` BEFORE presenting it to the developer or returning
-to the orchestrator. This file is read by downstream agents (Discovery, Analyzer,
-Planner) — if it doesn't exist, the plan will show "(ticket_understanding.md not
+to the orchestrator. This file is read by downstream agents (Understand, Plan)
+— if it doesn't exist, the plan will show "(ticket_understanding.md not
 available)". Write it with this structure:
 
 ```markdown
@@ -769,7 +769,7 @@ the actual VB code.
 Rule: Set `rounding_hint: null` unless the developer explicitly mentions rounding.
 - "round to nearest dollar" → `rounding_hint: "banker"`
 - "keep exact decimals" → `rounding_hint: "none"`
-- No mention of rounding → `rounding_hint: null` (Analyzer decides later)
+- No mention of rounding → `rounding_hint: null` (Understand agent decides later)
 
 #### 4.5 Scope Detection
 
@@ -900,7 +900,7 @@ change request), with the full per-request schema.
          - {M} out-of-scope (DAT file)
          - {K} ambiguities
 
-         Next: Discovery will trace the codebase to find relevant functions.
+         Next: Understand agent will trace the codebase to find relevant functions.
 ```
 
 ---
@@ -1079,7 +1079,7 @@ domain_hints:
   involves_new_code: true
 complexity_estimate: "COMPLEX"
 ambiguity_flag: true
-ambiguity_note: "Cap logic doesn't exist yet — Discovery needs to find where to add it"
+ambiguity_note: "Cap logic doesn't exist yet — Understand agent needs to find where to add it"
 ```
 
 ---
@@ -1095,7 +1095,7 @@ do NOT create requests for those items. Only create requests for actual changes.
 
 If the developer says "increase all deductible factors by 10%", create ONE request
 with method=multiply, scope=all. Do NOT split per Case value — that is the
-Decomposer's job after reading the code.
+Plan agent's job after reading the code.
 
 But if the developer gives individual old→new values for each Case, create
 individual requests because each has its own explicit target value.
@@ -1112,7 +1112,7 @@ If two items contradict, flag both and ask:
 
 ### Case 4: Developer provides a specific function name
 
-Record in `extracted.target_function_hint`. Discovery and Analyzer will use this
+Record in `extracted.target_function_hint`. The Understand agent will use this
 as a search hint but still verify the function exists.
 
 ### Case 5: Territory-specific values table
@@ -1127,4 +1127,4 @@ If values do NOT match a single multiplier:
 ### Case 6: Change mentions a file path
 
 If the developer says "in CalcOption_SKHome20260101.vb", record it in
-`extracted.target_file_hint`. The Analyzer verifies.
+`extracted.target_file_hint`. The Understand agent verifies.

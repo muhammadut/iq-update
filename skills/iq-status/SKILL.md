@@ -127,7 +127,7 @@ If nothing archived, skip this message silently.
 Classify each workstream:
 
 **In-flight** (needs developer action):
-- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING
+- CREATED, ANALYZING, PLANNED, EXECUTING, EXECUTED, VALIDATING, FAILED
 
 **Terminal** (no action needed):
 - COMPLETED, DISCARDED
@@ -144,10 +144,26 @@ For each in-flight workstream, derive the next action from state:
 | EXECUTING | Run /iq-execute (will resume) |
 | EXECUTED | Run /iq-review |
 | VALIDATING | Run /iq-review (will resume) |
+| FAILED | Recovery needed (see below) |
 
 Note: GATE_1_REJECTED and GATE_2_REJECTED are reserved states not currently
 produced by any command. Gate rejections use revision loops (PLANNED) or
 rework paths (VALIDATING → PLANNED) instead.
+
+**FAILED state recovery:** When a workstream is FAILED, it means an unrecoverable
+error occurred during execution or validation (parser crash, disk full, corrupt
+checkpoint). The developer has three options:
+1. **Re-execute:** Restore from snapshots and re-run /iq-execute (resets to PLANNED)
+   `/iq-execute` detects FAILED state and offers: "Restore snapshots and retry?"
+2. **Re-plan:** Return to /iq-plan to regenerate the plan
+3. **Discard:** Abandon the workstream
+
+Flag FAILED workstreams prominently:
+```
+FAILED: {workstream-id} -- {error_summary from manifest.failure_reason}
+  Last updated: {time ago}
+  Recovery: Run /iq-execute to retry, or /iq-plan to re-plan
+```
 
 ### Step 3.5: Detect Staleness
 

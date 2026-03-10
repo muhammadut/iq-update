@@ -9,11 +9,10 @@ Purpose:
     agent fails with a cryptic KeyError.
 
 Handoff boundaries checked:
-    1. Intake → Discovery:    parsed/change_requests.yaml
-    2. Discovery → Analyzer:  analysis/code_discovery.yaml
-    3. Analyzer → Decomposer: analysis/analyzer_output/ (FUB directory)
-    4. Decomposer → Planner:  analysis/intent_graph.yaml
-    5. Planner → Execute:     plan/execution_order.yaml + execution/file_hashes.yaml
+    1. Intake → Understand:   parsed/change_requests.yaml
+    2. Understand → Plan:     analysis/code_understanding.yaml
+    3. Plan → Execute:        analysis/intent_graph.yaml
+    4. Planner → Execute:     plan/execution_order.yaml + execution/file_hashes.yaml
 
 Usage:
     # Check all handoffs that have artifacts present:
@@ -34,7 +33,7 @@ Each finding is a dict:
     {
         "severity": "BLOCKER" | "WARNING",
         "message": "human-readable description",
-        "phase": "intake→discovery" | "discovery→analyzer" | ...,
+        "phase": "intake→understand" | "understand→plan" | ...,
         "file": "relative path to the artifact file",
     }
 
@@ -68,8 +67,8 @@ def _load_yaml(path):
 # Individual Handoff Checks
 # ---------------------------------------------------------------------------
 
-def _check_intake_to_discovery(ws, findings):
-    """Handoff 1: Intake → Discovery.
+def _check_intake_to_understand(ws, findings):
+    """Handoff 1: Intake → Understand.
 
     File: parsed/change_requests.yaml
     Top-level: workflow_id or province (WARNING if missing), ticket_id or ticket_ref (WARNING if missing)
@@ -77,7 +76,7 @@ def _check_intake_to_discovery(ws, findings):
     Each CR requires: cr_id (or id), title (or summary), extracted (dict)
     change_type is optional (Intake does not produce it)
     """
-    phase = "intake→discovery"
+    phase = "intake→understand"
     rel_path = "parsed/change_requests.yaml"
     full_path = ws / "parsed" / "change_requests.yaml"
 
@@ -204,15 +203,16 @@ def _check_intake_to_discovery(ws, findings):
                 })
 
 
-def _check_discovery_to_analyzer(ws, findings):
-    """Handoff 2: Discovery → Analyzer.
+def _check_understand_to_plan(ws, findings):
+    """Handoff 2: Understand → Plan.
 
-    File: analysis/code_discovery.yaml
-    Required top-level: workflow_id, discovery_complete (bool), functions (list or dict)
+    File: analysis/code_understanding.yaml
+    Required top-level: workflow_id, change_requests (dict with at least one CR)
+    Each CR should have: fub (dict), target_file
     """
-    phase = "discovery→analyzer"
-    rel_path = "analysis/code_discovery.yaml"
-    full_path = ws / "analysis" / "code_discovery.yaml"
+    phase = "understand→plan"
+    rel_path = "analysis/code_understanding.yaml"
+    full_path = ws / "analysis" / "code_understanding.yaml"
 
     if not full_path.exists():
         findings.append({
@@ -242,8 +242,8 @@ def _check_discovery_to_analyzer(ws, findings):
         })
         return
 
-    # Required top-level keys
-    for key in ("workflow_id", "discovery_complete", "functions"):
+    # Required top-level keys (v0.4.0 schema)
+    for key in ("schema_version", "project_map", "entry_point", "change_requests"):
         if key not in data:
             findings.append({
                 "severity": "BLOCKER",
@@ -252,73 +252,57 @@ def _check_discovery_to_analyzer(ws, findings):
                 "file": rel_path,
             })
 
-    # discovery_complete should be a bool
-    dc = data.get("discovery_complete")
-    if dc is not None and not isinstance(dc, bool):
-        findings.append({
-            "severity": "WARNING",
-            "message": f"'discovery_complete' should be bool, got {type(dc).__name__}",
-            "phase": phase,
-            "file": rel_path,
-        })
-
-    # functions should be a list or dict
-    funcs = data.get("functions")
-    if funcs is not None and not isinstance(funcs, (list, dict)):
+    # Required top-level key: change_requests (dict)
+    crs = data.get("change_requests")
+    if crs is None:
         findings.append({
             "severity": "BLOCKER",
-            "message": f"'functions' must be a list or dict, got {type(funcs).__name__}",
+            "message": "Missing required top-level key: 'change_requests'",
             "phase": phase,
             "file": rel_path,
         })
-
-
-def _check_analyzer_to_decomposer(ws, findings):
-    """Handoff 3: Analyzer → Decomposer.
-
-    Directory: analysis/analyzer_output/
-    Must exist and contain at least one .yaml file (FUB files).
-    """
-    phase = "analyzer→decomposer"
-    rel_path = "analysis/analyzer_output/"
-    full_path = ws / "analysis" / "analyzer_output"
-
-    if not full_path.exists():
+    elif not isinstance(crs, dict):
         findings.append({
             "severity": "BLOCKER",
-            "message": f"Missing directory: {rel_path}",
+            "message": f"'change_requests' must be a dict, got {type(crs).__name__}",
             "phase": phase,
             "file": rel_path,
         })
-        return
-
-    if not full_path.is_dir():
+    elif len(crs) == 0:
         findings.append({
             "severity": "BLOCKER",
-            "message": f"Expected directory but found a file: {rel_path}",
+            "message": "'change_requests' is empty — Understand agent produced no CR analyses",
             "phase": phase,
             "file": rel_path,
         })
-        return
+    else:
+        # Validate each CR entry has fub data
+        for cr_id, cr_data in crs.items():
+            if not isinstance(cr_data, dict):
+                findings.append({
+                    "severity": "BLOCKER",
+                    "message": f"change_requests['{cr_id}'] is not a dict",
+                    "phase": phase,
+                    "file": rel_path,
+                })
+                continue
+            if "fub" not in cr_data:
+                findings.append({
+                    "severity": "WARNING",
+                    "message": f"change_requests['{cr_id}'] missing 'fub' (Function Understanding Block)",
+                    "phase": phase,
+                    "file": rel_path,
+                })
 
-    yaml_files = list(full_path.glob("*.yaml")) + list(full_path.glob("*.yml"))
-    if len(yaml_files) == 0:
-        findings.append({
-            "severity": "BLOCKER",
-            "message": "analyzer_output/ directory exists but contains no .yaml files (no FUBs produced)",
-            "phase": phase,
-            "file": rel_path,
-        })
 
-
-def _check_decomposer_to_planner(ws, findings):
-    """Handoff 4: Decomposer → Planner.
+def _check_plan_to_execute(ws, findings):
+    """Handoff 3: Plan → Execute.
 
     File: analysis/intent_graph.yaml
     Required top-level: workflow_id, intents (list)
     Each intent requires: intent_id, cr_id, capability, target_file, function
     """
-    phase = "decomposer→planner"
+    phase = "plan→execute"
     rel_path = "analysis/intent_graph.yaml"
     full_path = ws / "analysis" / "intent_graph.yaml"
 
@@ -373,16 +357,16 @@ def _check_decomposer_to_planner(ws, findings):
         elif len(intents) == 0:
             findings.append({
                 "severity": "BLOCKER",
-                "message": "'intents' list is empty — Decomposer produced no intents",
+                "message": "'intents' list is empty — Plan agent produced no intents",
                 "phase": phase,
                 "file": rel_path,
             })
         else:
             # Validate each intent entry
             # Accept both naming conventions:
-            #   intent_id / id  (Decomposer agent uses "id")
-            #   target_file / file  (Decomposer agent uses "file")
-            #   cr_id / cr  (Decomposer agent uses "cr")
+            #   intent_id / id  (Plan agent uses "id")
+            #   target_file / file  (Plan agent uses "file")
+            #   cr_id / cr  (Plan agent uses "cr")
             #   capability, function — no known aliases
             for idx, intent in enumerate(intents):
                 if not isinstance(intent, dict):
@@ -401,7 +385,7 @@ def _check_decomposer_to_planner(ws, findings):
                         "phase": phase,
                         "file": rel_path,
                     })
-                # cr_id OR cr (Decomposer agent uses "cr")
+                # cr_id OR cr (Plan agent uses "cr")
                 if not (intent.get("cr_id") or intent.get("cr")):
                     findings.append({
                         "severity": "BLOCKER",
@@ -436,12 +420,12 @@ def _check_decomposer_to_planner(ws, findings):
 
 
 def _check_planner_to_execute(ws, findings):
-    """Handoff 5: Planner → Execute.
+    """Handoff 4: Plan → Execute (execution_order + file_hashes).
 
-    File: plan/execution_order.yaml — must be non-empty, each entry needs intent_id
+    File: plan/execution_order.yaml — v0.4.0 dict with execution_sequence, or legacy flat list
     File: execution/file_hashes.yaml — must exist
     """
-    phase = "planner→execute"
+    phase = "plan→execute"
 
     # --- execution_order.yaml ---
     eo_rel = "plan/execution_order.yaml"
@@ -488,13 +472,18 @@ def _check_planner_to_execute(ws, findings):
                             "file": eo_rel,
                         })
         elif isinstance(data, dict):
-            # Some formats wrap in a dict with an "order" key
-            order = data.get("order", data.get("execution_order"))
+            # v0.4.0 format: dict with "execution_sequence" key (preferred)
+            # Legacy formats: dict with "order" or "execution_order" key
+            order = (
+                data.get("execution_sequence")
+                or data.get("order")
+                or data.get("execution_order")
+            )
             if order is not None and isinstance(order, list):
                 if len(order) == 0:
                     findings.append({
                         "severity": "BLOCKER",
-                        "message": "execution_order list is empty",
+                        "message": "execution_sequence list is empty",
                         "phase": phase,
                         "file": eo_rel,
                     })
@@ -503,12 +492,18 @@ def _check_planner_to_execute(ws, findings):
                         if isinstance(entry, dict) and "intent_id" not in entry:
                             findings.append({
                                 "severity": "BLOCKER",
-                                "message": f"execution_order[{idx}] missing required field: 'intent_id'",
+                                "message": f"execution_sequence[{idx}] missing required field: 'intent_id'",
                                 "phase": phase,
                                 "file": eo_rel,
                             })
-            # If it's a dict without an order key, we treat it as valid
-            # (some planner formats store metadata at top level)
+            elif order is None:
+                # Dict without any recognized intent-list key
+                findings.append({
+                    "severity": "BLOCKER",
+                    "message": "execution_order.yaml dict missing required key: 'execution_sequence'",
+                    "phase": phase,
+                    "file": eo_rel,
+                })
         else:
             findings.append({
                 "severity": "BLOCKER",
@@ -535,19 +530,17 @@ def _check_planner_to_execute(ws, findings):
 # ---------------------------------------------------------------------------
 
 _PHASE_CHECKERS = {
-    "intake":     _check_intake_to_discovery,
-    "discovery":  _check_discovery_to_analyzer,
-    "analyzer":   _check_analyzer_to_decomposer,
-    "decomposer": _check_decomposer_to_planner,
+    "intake":     _check_intake_to_understand,
+    "understand": _check_understand_to_plan,
+    "plan":       _check_plan_to_execute,
     "planner":    _check_planner_to_execute,
 }
 
 # Files that indicate a phase has produced output (used for auto-detection)
 _PHASE_INDICATORS = {
     "intake":     "parsed/change_requests.yaml",
-    "discovery":  "analysis/code_discovery.yaml",
-    "analyzer":   "analysis/analyzer_output",
-    "decomposer": "analysis/intent_graph.yaml",
+    "understand": "analysis/code_understanding.yaml",
+    "plan":       "analysis/intent_graph.yaml",
     "planner":    "plan/execution_order.yaml",
 }
 
@@ -564,7 +557,7 @@ def validate_handoff(workstream_dir, phase=None):
             (e.g., .iq-workstreams/changes/ticket-25545).
         phase: Optional specific phase to check. If None, checks all phases
                that have artifacts present.
-               Values: "intake", "discovery", "analyzer", "decomposer", "planner"
+               Values: "intake", "understand", "plan", "planner"
 
     Returns:
         dict: Standard make_result() envelope with keys:

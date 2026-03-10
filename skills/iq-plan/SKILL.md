@@ -1,6 +1,6 @@
 ---
 name: iq-plan
-description: Analyze a ticket and build an execution plan. Runs Intake, Discovery, Analyzer, Decomposer, and Planner agents, then presents Gate 1 for developer approval.
+description: Analyze a ticket and build an execution plan. Runs Intake, Understand, and Plan agents, then presents Gate 1 for developer approval.
 user-invocable: true
 ---
 
@@ -9,8 +9,8 @@ user-invocable: true
 ## 1. Purpose & Trigger
 
 Start a new workflow or resume an existing one. This is the analysis
-orchestrator that drives the 5-agent analysis pipeline (Intake → Discovery →
-Analyzer → Decomposer → Planner) through Gate 1 approval. After the developer types `/iq-plan`,
+orchestrator that drives the 3-agent analysis pipeline (Intake → Understand →
+Plan) through Gate 1 approval. After the developer types `/iq-plan`,
 everything else is conversational: the developer approves, rejects, asks questions,
 provides corrections, and the orchestrator routes work to agents, manages state,
 and produces the execution plan. Execution and review are handled by `/iq-execute`
@@ -200,7 +200,7 @@ Options:
 ### On Resume: Dirty File Detection
 
 When the developer chooses to resume, perform hash verification **only if
-`execution/file_hashes.yaml` exists.** This file is created by the Planner
+`execution/file_hashes.yaml` exists.** This file is created by the Plan agent
 (during /iq-plan) — it does not exist for CREATED or early ANALYZING states.
 If the file does not exist, skip hash verification entirely and proceed to
 state-based continuation.
@@ -237,7 +237,7 @@ and the current file, show the differences, then re-present the options.
 
 **If option 2 (re-analyze):** Set state back to CREATED, discard the old plan and
 analysis directories (keep input/ and parsed/), and re-run the pipeline from the
-Analyzer step.
+Understand step.
 
 **If option 3 (start over):** Tell the developer to `svn revert` the affected files
 first, then set state to CREATED and restart the entire pipeline.
@@ -271,7 +271,7 @@ Read manifest.yaml -> phase_status section
 
 1. Find the last phase with status: "completed"
 2. Resume from the NEXT phase in sequence:
-   intake -> discovery -> analyzer -> decomposer -> planner -> gate_1 -> change_engine -> reviewer -> gate_2
+   intake -> understand -> plan -> gate_1 -> change_engine -> reviewer -> gate_2
 
 3. Also read developer_decisions to avoid re-asking questions:
    "Developer already confirmed: {list of decisions}"
@@ -279,7 +279,8 @@ Read manifest.yaml -> phase_status section
 
 4. Read the completed phase summaries to understand context:
    "Intake found: {intake.summary}"
-   "Decomposer produced: {decomposer.summary}"
+   "Understand produced: {understand.summary}"
+   "Plan produced: {plan.summary}"
    etc.
 
 5. Launch the next agent using the current execution_mode
@@ -291,10 +292,9 @@ Read manifest.yaml -> phase_status section
 ```
 If parsed/ticket_understanding.md does NOT exist -> resume at Intake (Step 0: comprehension)
 If parsed/change_requests.yaml does NOT exist    -> resume at Intake (Step 1: CR extraction)
-If analysis/code_discovery.yaml does NOT exist   -> resume at Discovery
-If analysis/blast_radius.md does NOT exist       -> resume at Analyzer
-If analysis/intent_graph.yaml does NOT exist     -> resume at Decomposer
-If plan/execution_plan.md does NOT exist         -> resume at Planner
+If analysis/code_understanding.yaml does NOT exist -> resume at Understand
+If analysis/intent_graph.yaml does NOT exist     -> resume at Plan
+If plan/execution_plan.md does NOT exist         -> resume at Plan
 ```
 
 **For EXECUTING state, determine sub-state from operations log:**
@@ -675,10 +675,10 @@ WARNING: .vbproj references OLD-dated Code/ files:
   {old_file2} ...
 
 These files need new dated copies before edits can be applied.
-The Analyzer will generate files_to_copy.yaml for this.
+The Understand agent embeds file copy info in code_understanding.yaml (needs_copy/source_file/target_file per CR).
 ```
 
-This is informational only — the Analyzer handles the actual copy list. But surfacing
+This is informational only — the Understand agent handles the actual copy list. But surfacing
 it early gives the developer visibility into what the pipeline will do.
 
 **Workflow 3 -- Multi-Folder Habitational:**
@@ -737,7 +737,6 @@ Using the workstream name from Step 4.1, create the full directory structure:
   parsed/
     requests/
   analysis/
-    analyzer_output/
   plan/
   execution/
     snapshots/
@@ -747,7 +746,7 @@ Using the workstream name from Step 4.1, create the full directory structure:
 
 Use the Bash tool to create directories:
 ```bash
-mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis/analyzer_output,plan,execution/snapshots,verification,summary}
+mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis,plan,execution/snapshots,verification,summary}
 ```
 
 Write the developer's raw input (held from Step 4.2) to `input/source.md`.
@@ -859,7 +858,7 @@ not a requirement.
 
 ## 6. The Agent Pipeline
 
-This is the CORE of the orchestrator. The orchestrator coordinates 5 analysis
+This is the CORE of the orchestrator. The orchestrator coordinates 3 analysis
 agents through a pipeline: it launches each agent as a **separate process**,
 relays developer questions, collects results, and presents the plan at Gate 1.
 
@@ -879,19 +878,19 @@ Pipeline flow:
             |
     Steps 1-6: CR extraction from confirmed understanding
             |
-  Step 1.5: Discovery -> Step 2: Analyzer -> Step 3: Decomposer -> Step 4: Planner
-                                                                       |
-                                                                 [GATE 1: developer approves plan]
-                                                                       |
-                                                                 state: PLANNED -- /iq-plan ends here
-                                                                       |
+  Step 1.5: Understand -> Step 2: Plan
+                                       |
+                                 [GATE 1: developer approves plan]
+                                       |
+                                 state: PLANNED -- /iq-plan ends here
+                                       |
   (Execution and review handled by /iq-execute and /iq-review respectively)
 ```
 
 **Two developer checkpoints in /iq-plan:**
 1. **Ticket Understanding Checkpoint** (after Intake Step 0) — "Do I understand
    the ticket correctly?" — catches misunderstandings BEFORE the pipeline runs
-2. **Gate 1** (after Planner) — "Is the execution plan correct?" — catches
+2. **Gate 1** (after Plan) — "Is the execution plan correct?" — catches
    implementation errors BEFORE files are modified
 
 ### Execution Modes
@@ -906,23 +905,29 @@ Before Step 1, the orchestrator creates an agent team:
 
 ```
 1. TeamCreate(team_name="iq-{workstream-name}")
-2. Create 5 tasks with sequential dependencies:
+2. Create 3 tasks with sequential dependencies:
    - "Run Intake agent"       (no blockers)
-   - "Run Discovery agent"    (blocked by Intake)
-   - "Run Analyzer agent"     (blocked by Discovery)
-   - "Run Decomposer agent"   (blocked by Analyzer)
-   - "Run Planner agent"      (blocked by Decomposer)
+   - "Run Understand agent"   (blocked by Intake)
+   - "Run Plan agent"         (blocked by Understand)
 3. For each step: spawn a teammate agent (see Agent Launch Protocol)
 4. Developer questions are relayed via SendMessage:
    agent -> orchestrator -> developer -> orchestrator -> agent
-5. After all 5 complete: TeamDelete(), proceed to Gate 1
+5. After all 3 complete: TeamDelete(), proceed to Gate 1
 ```
 
 Requires: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in Claude Code settings.
-If TeamCreate fails, automatically fall back to sequential mode and log:
+
+**Fallback detection:** If ANY of these conditions are true, use sequential mode:
+1. TeamCreate tool is not available (tool call returns error or is not listed)
+2. TeamCreate returns an error (permissions, unsupported version)
+3. TeamCreate times out (10+ seconds with no response)
+
+On fallback, log and print:
 ```
+Team mode unavailable — falling back to sequential execution.
 error_log entry: {type: "team_mode_unavailable", resolution: "Falling back to sequential"}
 ```
+Do NOT retry TeamCreate or sleep-loop. Switch to sequential immediately.
 
 **Sequential mode (fallback):**
 
@@ -949,7 +954,7 @@ Task tool:
 
 ### Agent Launch Protocol
 
-For each agent in Steps 1-5 (Intake, Discovery, Analyzer, Decomposer, Planner),
+For each agent in Steps 1-2 (Intake, Understand, Plan),
 the orchestrator launches it with the Task tool.
 
 **Team mode** — include `team_name`:
@@ -1158,220 +1163,118 @@ The Intake agent reads `{plugin_root}/agents/intake.md` and autonomously:
    - `updated_at: "{now}"`
    - Append any developer Q&A to `developer_decisions`
 
+**Handoff validation (Intake → Understand):**
+Run validate_handoff to ensure Intake produced valid artifacts before proceeding:
+```bash
+{python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" intake
+```
+If the result contains `"passed": false`, STOP and show the findings to the developer.
+The most common failure is malformed `parsed/change_requests.yaml` (missing CR fields).
+
 **If the developer says "I forgot to mention X" AFTER intake:** Add the new
 information to `input/source.md`, re-launch the Intake agent (or launch a
 supplemental run). Create additional CRs and update the manifest accordingly.
 
 ---
 
-### Step 1.5: DISCOVERY
+### Step 1.5: UNDERSTAND
 
-**Manifest update:** Set `phase_status.discovery.status: "in_progress"`,
+**Manifest update:** Set `phase_status.understand.status: "in_progress"`,
 `updated_at: "{now}"`
 
-**Launch the Discovery agent** using the Agent Launch Protocol:
+**Launch the Understand agent** using the Agent Launch Protocol:
 
 ```
-Agent:  discovery
-Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
-        target .vbproj files, CalcMain.vb, Code/ files,
-        .iq-workstreams/config.yaml
-Output: analysis/code_discovery.yaml
+Agent:  understand
+Input:  parsed/change_requests.yaml,
+        .iq-workstreams/config.yaml,
+        .iq-workstreams/paths.md,
+        .iq-workstreams/codebase-profile.yaml
+Output: analysis/code_understanding.yaml
 ```
 
-The Discovery agent reads `{plugin_root}/agents/discovery.md` and autonomously:
-- Reads CalcMain.vb and traces the full calculation flow
-- Reads the primary shared code files (mod_Common, mod_Algorithms, etc.)
-- Matches each change request to its exact target function by reading actual code
-- Identifies related functions and peer templates for downstream agents
-- Extracts CalcOption dispatch tables (if endorsement CRs exist)
+The Understand agent reads `{plugin_root}/agents/understand.md` and autonomously:
+- Uses the vb-parser tool to parse target .vbproj files and VB.NET source code
+- Traces CalcMain calculation flow and matches CRs to exact functions
+- Reads actual code to build function understanding blocks with branch trees
+- Identifies files to copy, blast radius, shared module impacts
+- Resolves ambiguous targets (asks developer when multiple candidates exist)
+- Produces a single comprehensive code understanding artifact
 
 **After the agent completes:**
 
-1. Read `analysis/code_discovery.yaml` to verify the results.
+1. Read `analysis/code_understanding.yaml` to verify the results.
 
 2. Show the developer what was discovered:
 
    ```
-   Code Discovery Complete:
-     Entry point: {main_function} in {CalcMain path}
-     Calculation flow: {N} functions traced from CalcMain
-     CR targets resolved:
-       CR-001: {title} → {function} in {file}
-       CR-002: {title} → {function} in {file}
-     Related functions flagged: {N}
-     Peer templates found: {N}
-   ```
-
-   If any CR has `resolved: false`:
-   ```
-   NOTE: CR-{NNN} could not be mapped to a specific function.
-   The Decomposer will fall back to heuristic matching for this CR.
+   Code Understanding Complete:
+     CR targets resolved: {N}/{total}
+     Functions analyzed: {N} across {N} files
+     Files to copy: {N}
+     Blast radius: {N} LOBs affected
    ```
 
 3. Update manifest:
-   - `phase_status.discovery.status: "completed"`
-   - `phase_status.discovery.summary: "{N}/{total} CRs resolved, {N} flow steps"`
-   - `updated_at: "{now}"`
-
-**If Discovery fails entirely** (e.g., CalcMain not found, .vbproj unreadable):
-Log the error, set `phase_status.discovery.status: "skipped"`, and proceed to
-Step 2. All downstream agents have graceful degradation — they fall back to
-existing heuristic behavior when `code_discovery.yaml` is absent.
-
----
-
-### Step 2: ANALYZER
-
-**Manifest update:** Set `phase_status.analyzer.status: "in_progress"`,
-`updated_at: "{now}"`
-
-**Launch the Analyzer agent** using the Agent Launch Protocol:
-
-```
-Agent:  analyzer
-Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
-        analysis/code_discovery.yaml (from Discovery, if exists),
-        target .vbproj files, actual Code/ source files,
-        .iq-workstreams/config.yaml
-Output: analysis/analyzer_output/ (function understanding blocks, target mapping),
-        analysis/files_to_copy.yaml, analysis/blast_radius.md
-```
-
-The Analyzer agent reads `{plugin_root}/agents/analyzer.md` and autonomously:
-- Reads actual VB.NET source files to find exact function locations
-- Identifies function boundaries, Array6 calls, Select Case blocks
-- Builds Function Understanding Blocks (FUBs) with branch trees, hazards, context
-- Determines which Code/ files need new dated copies
-- Runs reverse .vbproj lookup for hidden blast radius
-- Computes TOCTOU file hashes
-
-**DEVELOPER INTERACTION — the Analyzer is the most interactive agent:**
-
-The Analyzer's "show, don't guess" principle means it will ask the developer
-to choose when it finds multiple candidates for a target (e.g., 4 Select Case
-blocks matching "deductible", or 2 functions matching "GetBasePrem*").
-
-- **Team mode:** The Analyzer sends `DEVELOPER_QUESTION:` messages via
-  SendMessage. The orchestrator receives these, presents them to the developer,
-  and relays the answer back. Expect 3-5 questions for a typical hab workflow.
-  Each question includes candidate details formatted per the Analyzer's .md spec.
-
-- **Sequential mode:** The Analyzer writes candidates to output YAML with
-  `status: "pending_confirmation"` and returns. The orchestrator reads all
-  pending confirmations, presents them to the developer in batch:
-
-  ```
-  The Analyzer found ambiguous targets that need your input:
-
-    CR-001: 4 candidates for "deductible" Select Case
-      Candidate 1: SetDisSur_Deductible() at line 1205
-      Candidate 2: SetDisSur_Deductible() at line 1340 (farm path)
-      ...
-    Which one? (enter number, or "all")
-
-    CR-002: 2 candidates for "GetBasePremium"
-      ...
-  ```
-
-  After the developer answers, write their choices to
-  `analysis/developer_choices.yaml` and re-launch the Analyzer with an
-  additional prompt line:
-  ```
-  DEVELOPER CHOICES: Read analysis/developer_choices.yaml for resolved
-  ambiguities. Apply these choices instead of asking again.
-  ```
-
-**After the agent completes:**
-
-1. Read `analysis/blast_radius.md` and show the developer:
-
-   ```
-   Blast radius:
-     {N} file(s) to copy (new dated versions)
-     {N} shared module change(s) (affects {N} LOBs)
-     {N} LOB-specific change(s)
-     {N} target functions analyzed across {N} files
-
-   {Any warnings from reverse lookup or cross-LOB detection}
-   ```
-
-2. Update manifest:
-   - `phase_status.analyzer.status: "completed"`
-   - `phase_status.analyzer.summary: "{N} files, {N} functions analyzed, {warnings}"`
-   - `updated_at: "{now}"`
-   - Append all developer Q&A to `developer_decisions`
-
----
-
-### Step 3: DECOMPOSER
-
-**Manifest update:** Set `phase_status.decomposer.status: "in_progress"`,
-`updated_at: "{now}"`
-
-**Launch the Decomposer agent** using the Agent Launch Protocol:
-
-```
-Agent:  decomposer
-Input:  parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
-        analysis/code_discovery.yaml (from Discovery, if exists),
-        analysis/analyzer_output/ (from Analyzer),
-        analysis/blast_radius.md,
-        target .vbproj files, .iq-workstreams/config.yaml
-Output: analysis/intent_graph.yaml
-```
-
-The Decomposer agent reads `{plugin_root}/agents/decomposer.md` and autonomously:
-- Breaks each change request into intents grounded in discovered code
-- Uses Analyzer output to map intents to verified target regions
-- Builds the intent graph with dependencies and open questions
-- Tags each intent with a strategy_hint (optional) for the Change Engine
-
-**After the agent completes:**
-
-1. Read `analysis/intent_graph.yaml` to verify intent count.
-
-2. Update manifest:
-   - Update each CR status to `ANALYZING`
-   - `phase_status.decomposer.status: "completed"`
-   - `phase_status.decomposer.summary: "{N} intents across {N} files"`
+   - `phase_status.understand.status: "completed"`
+   - `phase_status.understand.summary: "{N}/{total} CRs resolved, {N} functions analyzed"`
    - `updated_at: "{now}"`
    - Append any developer Q&A to `developer_decisions`
 
+**Handoff validation (Understand → Plan):**
+Run validate_handoff to ensure Understand produced valid artifacts before proceeding:
+```bash
+{python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" understand
+```
+If the result contains `"passed": false`, STOP and show the findings to the developer.
+The most common failure is missing `analysis/code_understanding.yaml` or empty CR targets.
+
+**If Understand fails** (parser error, CalcMain not found, .vbproj unreadable):
+The parser is required for v0.4.0 — there is no fallback. Log the error, set
+`phase_status.understand.status: "failed"`, and STOP with an error message:
+```
+ERROR: Understand agent failed: {error}
+The vb-parser tool is required. Check that vb-parser.exe exists at the path
+specified in paths.md and that target files are accessible.
+```
+
 ---
 
-### Step 4: PLANNER
+### Step 2: PLAN
 
-**Manifest update:** Set `phase_status.planner.status: "in_progress"`,
+**Manifest update:** Set `phase_status.plan.status: "in_progress"`,
 `updated_at: "{now}"`
 
-**Launch the Planner agent** using the Agent Launch Protocol:
+**Launch the Plan agent** using the Agent Launch Protocol:
 
 ```
-Agent:  planner
-Input:  analysis/intent_graph.yaml,
-        analysis/files_to_copy.yaml, analysis/blast_radius.md,
-        analysis/analyzer_output/,
-        parsed/ticket_understanding.md, parsed/change_requests.yaml,
-        actual Code/ source files
-Output: plan/execution_plan.md, plan/execution_order.yaml,
+Agent:  plan
+Input:  analysis/code_understanding.yaml,
+        parsed/change_requests.yaml,
+        .iq-workstreams/config.yaml,
+        .iq-workstreams/paths.md,
+        .iq-workstreams/pattern-library.yaml
+Output: analysis/intent_graph.yaml,
+        plan/execution_plan.md, plan/execution_order.yaml,
         execution/file_hashes.yaml
 ```
 
-The Planner agent reads `{plugin_root}/agents/planner.md` and autonomously:
+The Plan agent reads `{plugin_root}/agents/plan.md` and autonomously:
+- Breaks change requests into intents grounded in the code understanding
+- Builds the intent graph with dependencies and strategy hints
 - Orders operations bottom-to-top within each file (prevents line drift)
 - Groups operations into readable phases with dependency ordering
 - Computes risk level (LOW/MEDIUM/HIGH)
 - Generates the human-readable execution plan and machine-readable order
 
-The Planner has NO developer interaction — it is fully automated.
+The Plan agent has NO developer interaction — it is fully automated.
 
 **After the agent completes:**
 
 1. Update manifest (NOTE: do NOT set `state: "PLANNED"` yet — that happens after
-   the pre-Gate-1 validation in step 4):
-   - `phase_status.planner.status: "completed"`
-   - `phase_status.planner.summary: "{N} phases, {risk} risk"`
+   the pre-Gate-1 validation in step 2):
+   - `phase_status.plan.status: "completed"`
+   - `phase_status.plan.summary: "{N} phases, {risk} risk"`
    - `updated_at: "{now}"`
 
 2. In team mode: TeamDelete() to clean up the analysis team.
@@ -1384,31 +1287,31 @@ The Planner has NO developer interaction — it is fully automated.
    a. Parse each target .vbproj (from footprint) and extract all `<Compile Include>`
       Code/ file references with their 8-digit dates.
    b. If ANY Code/ file reference has a date older than the target version folder date,
-      check that `analysis/files_to_copy.yaml` exists and covers that file.
-      The `files_to_copy.yaml` schema has entries with `source` (old-dated path) and
-      `target` (new-dated path) — verify the old-dated file appears as a `source`.
-   c. If old-dated files are referenced but `files_to_copy.yaml` is missing or
-      incomplete, **STOP — do not present Gate 1**:
+      check `analysis/code_understanding.yaml` and verify the relevant CR entry has
+      `needs_copy: true` with `source_file` (old-dated path) and `target_file` (new-dated path)
+      — verify the old-dated file appears as a `source_file`.
+   c. If old-dated files are referenced but `code_understanding.yaml` is missing copy info
+      (no `needs_copy`/`source_file`/`target_file` for the affected CRs), **STOP — do not present Gate 1**:
       ```
       ERROR: .vbproj references old-dated Code/ files but no copy plan exists:
         {file} (date: {old_date}, target: {target_date})
 
-      The Analyzer should have created analysis/files_to_copy.yaml.
+      The Understand agent should have set needs_copy/source_file/target_file in code_understanding.yaml.
       Re-running analysis pipeline to fix this...
       ```
-      Then re-run the **Analyzer → Decomposer → Planner** pipeline (all three agents,
-      not just the Analyzer) with the Analyzer receiving an additional prompt:
-      `"CRITICAL: .vbproj references old-dated files. You MUST produce files_to_copy.yaml."`
-      The Decomposer and Planner must re-run because their outputs (intent_graph.yaml,
-      execution_plan.md) were built on the incomplete Analyzer output and are now stale.
-      After re-run, re-validate. If still missing after 2 re-runs (i.e., the Analyzer
-      has now run 3 times total), present the error to the developer and ask how to proceed.
-   d. If all Code/ file dates match the target date (or files_to_copy.yaml is
-      complete), proceed to step 3b.
+      Then re-run the **Understand → Plan** pipeline (both agents, not just
+      Understand) with the Understand agent receiving an additional prompt:
+      `"CRITICAL: .vbproj references old-dated files. You MUST set needs_copy/source_file/target_file in code_understanding.yaml for affected CRs."`
+      The Plan agent must re-run because its outputs (intent_graph.yaml,
+      execution_plan.md) were built on the incomplete Understand output and are now stale.
+      After re-run, re-validate. If still missing after 2 re-runs (i.e., the Understand
+      agent has now run 3 times total), present the error to the developer and ask how to proceed.
+   d. If all Code/ file dates match the target date (or `code_understanding.yaml` has
+      complete copy info for all affected CRs), proceed to step 3b.
 
 3b. **PRE-GATE-1 VALIDATION — Symbol Reference Check:**
 
-   Scan the Planner's output for any code snippets that introduce NEW symbols
+   Scan the Plan agent's output for any code snippets that introduce NEW symbols
    (constants, enums, function calls, Case values) that don't appear in the
    original code. This catches hallucinated references before the developer sees
    them. Pattern extrapolation applies to ALL symbol types, not just constants.
@@ -1437,7 +1340,7 @@ The Planner has NO developer interaction — it is fully automated.
       WARNING: Unresolved symbol in plan — may be hallucinated:
         {symbol_name} ({symbol_type}) in intent {intent_id}
         Not found in codebase.
-        The Planner may have extrapolated this from a pattern in the file.
+        The Plan agent may have extrapolated this from a pattern in the file.
 
       Review this carefully at Gate 1.
       ```
@@ -1445,7 +1348,19 @@ The Planner has NO developer interaction — it is fully automated.
       Do NOT block Gate 1 — the developer may confirm it's valid. But surface
       it prominently.
 
-4. Validation passed. Update manifest: `state: "PLANNED"`, `updated_at: "{now}"`.
+4. Validation passed.
+
+   **Handoff validation (Plan → Execute):**
+   Run validate_handoff to ensure Plan produced valid artifacts:
+   ```bash
+   {python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" plan
+   {python_cmd} {plugin_root}/validators/validate_handoff.py "{workstream_dir}" planner
+   ```
+   If either result contains `"passed": false`, STOP and show the findings. The most
+   common failures are: missing intents in `intent_graph.yaml`, missing
+   `execution_order.yaml`, or missing `file_hashes.yaml`.
+
+   Update manifest: `state: "PLANNED"`, `updated_at: "{now}"`.
 
 4b. **INDEPENDENT CODE REVIEW — Cross-Model or Self-Review**
 
@@ -1455,7 +1370,7 @@ The Planner has NO developer interaction — it is fully automated.
    removed function references, incomplete coverage.
 
    **Why this exists:** Claude's pipeline builds understanding incrementally
-   (Intake → Discovery → Analyzer → Decomposer → Planner). Each agent passes
+   (Intake → Understand → Plan). Each agent passes
    findings to the next. If an early agent misunderstands something (wrong function,
    missed subtotal, overlooked caller), that error propagates through all agents.
    An independent review — reading the code fresh with zero inherited assumptions —
@@ -1624,7 +1539,7 @@ The Planner has NO developer interaction — it is fully automated.
    ```
 
    The sub-agent gets a FRESH context window — it has never seen the pipeline's
-   intermediate artifacts (Discovery output, Analyzer FUBs, Decomposer intents).
+   intermediate artifacts (Understand output, code understanding).
    It only sees the plan, the ticket, and the raw source files. Its job is to
    read the actual code at the highest reasoning level and trace the logic
    independently — the same thing Codex would do.
@@ -1783,8 +1698,8 @@ fresh context window. Do NOT attempt to run modifier agents.
 
 **HARD RULE — AGENT OUTPUT IMMUTABILITY:**
 The orchestrator MUST NEVER directly edit files in these directories:
-- `plan/` — owned by Planner agent
-- `analysis/` — owned by Analyzer and Decomposer agents
+- `plan/` — owned by Plan agent
+- `analysis/` — owned by Understand and Plan agents
 - `parsed/` — owned by Intake agent
 
 These files are **agent outputs**. The only way to change them is to re-run
@@ -1809,19 +1724,18 @@ fix the value in the YAML," STOP — use the structured update loop below.
    ┌─────────────────────────────────────────────────────────┐
    │ Correction Type    │ Re-run From     │ Example          │
    ├────────────────────┼─────────────────┼──────────────────┤
-   │ value              │ Decomposer →    │ "Territory 1     │
-   │ (rate/factor wrong)│ Planner         │  should be .0935"│
+   │ value              │ Plan            │ "Territory 1     │
+   │ (rate/factor wrong)│                 │  should be .0935"│
    ├────────────────────┼─────────────────┼──────────────────┤
-   │ target             │ Analyzer →      │ "Wrong function, │
-   │ (wrong file/func)  │ Decomposer →    │  it's in SetDed" │
-   │                    │ Planner         │                  │
+   │ target             │ Understand →    │ "Wrong function, │
+   │ (wrong file/func)  │ Plan            │  it's in SetDed" │
    ├────────────────────┼─────────────────┼──────────────────┤
    │ scope              │ Intake →        │ "Also change the │
    │ (add/remove CRs)   │ full pipeline   │  NB deductibles" │
    ├────────────────────┼─────────────────┼──────────────────┤
-   │ approach           │ Analyzer →      │ "The whole        │
-   │ (strategy wrong)   │ Decomposer →    │  approach is      │
-   │                    │ Planner         │  wrong"           │
+   │ approach           │ Understand →    │ "The whole        │
+   │ (strategy wrong)   │ Plan            │  approach is      │
+   │                    │                 │  wrong"           │
    └─────────────────────────────────────────────────────────┘
 
 3. RE-RUN the identified agent (and ALL downstream agents):
@@ -1936,7 +1850,7 @@ When the developer runs `/iq-plan` later:
 1. Resume detection finds the workflow with DEFERRED CRs
 2. Present: "Found workflow {id} with {N} deferred CR(s): {list}"
 3. Developer provides updated information for rejected CRs
-4. Pipeline re-runs from Analyzer (for the deferred CRs only)
+4. Pipeline re-runs from Understand (for the deferred CRs only)
 5. New plan includes only the deferred intents
 6. Gate 1 approval as normal
 ```
@@ -2044,7 +1958,7 @@ developer's question using the codebase.
      source: "investigation_subagent"
      timestamp: "{now}"
    ```
-   This is important — downstream agents (Discovery, Analyzer) will see this
+   This is important — downstream agents (Understand, Plan) will see this
    finding and use it instead of re-discovering the same information.
 3. Return to the current position:
    ```
@@ -2075,8 +1989,8 @@ If the developer adds new changes mid-workflow:
 ```
 If before Gate 1 (state: ANALYZING or PLANNED):
   1. Add new CRs to the change requests
-  2. Re-run from Analyzer with the expanded set
-  3. Re-run Decomposer and Planner
+  2. Re-run from Understand with the expanded set
+  3. Re-run Plan agent
   4. Present updated plan at Gate 1
 
 If after Gate 1 (state: PLANNED, developer about to /iq-execute):
@@ -2120,9 +2034,7 @@ manifest.yaml              — state: PLANNED, all CRs, phase_status, developer_
 parsed/change_requests.yaml — structured change requests
 parsed/requests/cr-*.yaml  — individual CR details
 analysis/intent_graph.yaml — intents with target regions and dependencies
-analysis/analyzer_output/  — function understanding blocks, code analysis
-analysis/files_to_copy.yaml
-analysis/blast_radius.md
+analysis/code_understanding.yaml — code analysis, function understanding, blast radius, file copy info (needs_copy/source_file/target_file per CR)
 analysis/developer_choices.yaml — resolved ambiguities (if any)
 execution/file_hashes.yaml — TOCTOU baseline
 plan/execution_plan.md     — human-readable approved plan
@@ -2165,7 +2077,7 @@ was reviewing the plan.
 
 **Recovery:** Hash-check catches this on resume. Options:
 1. Show diff between expected and actual state
-2. Re-analyze from current state (re-run Analyzer)
+2. Re-analyze from current state (re-run Understand)
 3. Start over (svn revert first)
 4. Accept new state (update hashes, re-plan)
 
@@ -2314,16 +2226,10 @@ phase_status:
   intake:
     status: "completed"                           # pending | in_progress | completed | failed
     summary: "3 CRs parsed, no DAT warnings"
-  discovery:
-    status: "completed"                           # pending | in_progress | completed | skipped | failed
-    summary: "3/3 CRs resolved, 20 flow steps from TotPrem"
-  analyzer:
-    status: "completed"
-    summary: "All verified, 3 files, 6 LOBs blast radius, mixed rounding on CR-003"
-  decomposer:
-    status: "completed"
-    summary: "7 intents (2 shared, 5 LOB-specific), no conflicts, no inter-CR deps"
-  planner:
+  understand:
+    status: "completed"                           # pending | in_progress | completed | failed
+    summary: "3/3 CRs resolved, 3 files, 6 LOBs blast radius, 20 functions analyzed"
+  plan:
     status: "completed"
     summary: "7 intents in execution plan, bottom-to-top in 3 files, no partial approval issues"
   gate_1:
@@ -2352,11 +2258,11 @@ developer_decisions: []
 #   question: "Should all 6 SK hab LOBs be included?"
 #   answer: "Yes, all 6"
 # - timestamp: "2026-01-15T11:10:00Z"
-#   phase: "analyzer"
+#   phase: "understand"
 #   question: "SetDisSur_Deductible has farm and non-farm paths. Which is the target?"
 #   answer: "Farm path"
 # - timestamp: "2026-01-15T11:30:00Z"
-#   phase: "analyzer"
+#   phase: "understand"
 #   question: "CR-003 has mixed rounding (42 banker + 6 decimal lines). Proceed?"
 #   answer: "Yes, proceed with per-line rounding"
 
@@ -2419,7 +2325,7 @@ Special states:
 |------|----|-----|-----|
 | (new) | CREATED | /iq-plan | Creates workflow |
 | CREATED | ANALYZING | /iq-plan | Developer provides input |
-| ANALYZING | PLANNED | /iq-plan | Planner completes, developer approves at Gate 1 |
+| ANALYZING | PLANNED | /iq-plan | Plan agent completes, developer approves at Gate 1 |
 | PLANNED | PLANNED | /iq-plan | Developer rejects at Gate 1 (revision loop) |
 | PLANNED | GATE_1_REJECTED | /iq-plan | Developer rejects plan outright at Gate 1 |
 | GATE_1_REJECTED | ANALYZING | /iq-plan | Developer re-runs /iq-plan with corrections |
@@ -2532,7 +2438,7 @@ After EVERY agent completes, the orchestrator MUST update manifest.yaml:
 2. **Append to `developer_decisions`** if the developer answered any questions:
    - Record the question, answer, phase, and timestamp
    - These are the ONLY record of conversational decisions
-   - Example: `{phase: "analyzer", question: "Farm or non-farm path?", answer: "Farm"}`
+   - Example: `{phase: "understand", question: "Farm or non-farm path?", answer: "Farm"}`
    - On resume, the orchestrator reads these to avoid re-asking
 
 3. **Update `state`** to reflect the new workflow state.
@@ -2547,7 +2453,7 @@ the next `/iq-plan` invocation reads manifest.yaml and knows EVERYTHING:
 ### Execution Mode
 
 The manifest includes `execution_mode` ("team" or "sequential"). This controls
-how Steps 1-5 (Intake, Discovery, Analyzer, Decomposer, Planner) are launched.
+how Steps 1-2 (Intake, Understand, Plan) are launched.
 Change Engine workers and Reviewer always run inline regardless of this setting.
 
 **Team mode (default):**
@@ -2559,12 +2465,10 @@ Each agent gets its own context window — the main window stays light.
 ```
 Team lifecycle:
   1. TeamCreate(team_name="iq-{workstream-name}")
-  2. TaskCreate: 5 tasks with sequential dependencies
+  2. TaskCreate: 3 tasks with sequential dependencies
      - "Run Intake agent"       (no blockers)
-     - "Run Discovery agent"    (blocked by Intake)
-     - "Run Analyzer agent"     (blocked by Discovery)
-     - "Run Decomposer agent"   (blocked by Analyzer)
-     - "Run Planner agent"      (blocked by Decomposer)
+     - "Run Understand agent"   (blocked by Intake)
+     - "Run Plan agent"         (blocked by Understand)
   3. For each task:
      a. Spawn teammate via Task tool (with team_name parameter)
      b. Monitor for messages:
@@ -2572,8 +2476,8 @@ Team lifecycle:
         - "AGENT_COMPLETE: ..."     → update manifest, shutdown agent
         - "AGENT_ERROR: ..."        → log error, present recovery options
      c. After agent completes: TaskUpdate(status="completed")
-  4. After all 5 complete: TeamDelete()
-  5. Proceed to Gate 1 with Planner's output
+  4. After all 3 complete: TeamDelete()
+  5. Proceed to Gate 1 with Plan agent's output
 ```
 
 Communication protocol:
@@ -2599,7 +2503,7 @@ Launch each analysis agent one at a time as a sub-agent via the Task tool
 
 ```
 Sequential lifecycle:
-  For each agent (Intake, Discovery, Analyzer, Decomposer, Planner):
+  For each agent (Intake, Understand, Plan):
     1. Launch via Task tool (no team_name)
     2. Agent runs autonomously, returns when done
     3. If agent returned pending_confirmation items:
@@ -2610,7 +2514,7 @@ Sequential lifecycle:
     5. Proceed to next agent
 ```
 
-No inter-agent communication. Cheaper but the Analyzer's developer interaction
+No inter-agent communication. Cheaper but the Understand agent's developer interaction
 is batched (all questions at once after the agent returns) rather than
 real-time (one at a time during agent execution).
 
@@ -2649,7 +2553,7 @@ On Windows, use:
 ### Creating workflow directories
 Use Bash with mkdir -p:
 ```bash
-mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis/analyzer_output,plan,execution/snapshots,verification,summary}
+mkdir -p ".iq-workstreams/changes/{workstream-name}"/{input/attachments,parsed/requests,analysis,plan,execution/snapshots,verification,summary}
 ```
 
 ### Writing YAML files
@@ -2681,17 +2585,15 @@ date -u +"%Y-%m-%dT%H:%M:%SZ"
 
 ## Downstream Agent References
 
-The /iq-plan orchestrator launches these 5 analysis agents. Each agent's .md file
+The /iq-plan orchestrator launches these 3 analysis agents. Each agent's .md file
 contains its complete interface contract, input/output schemas, execution steps,
 and edge cases. The orchestrator does NOT read these files — the agents read them.
 
 | Agent | File | When Called | What It Produces |
 |-------|------|-------------|-----------------|
 | Intake | `{plugin_root}/agents/intake.md` | Step 1 | `parsed/change_requests.yaml`, `parsed/requests/cr-NNN.yaml` |
-| Discovery | `{plugin_root}/agents/discovery.md` | Step 1.5 | `analysis/code_discovery.yaml` |
-| Analyzer | `{plugin_root}/agents/analyzer.md` | Step 2 | `analysis/analyzer_output/`, `analysis/blast_radius.md`, `analysis/files_to_copy.yaml` |
-| Decomposer | `{plugin_root}/agents/decomposer.md` | Step 3 | `analysis/intent_graph.yaml` |
-| Planner | `{plugin_root}/agents/planner.md` | Step 4 | `plan/execution_plan.md`, `plan/execution_order.yaml`, `execution/file_hashes.yaml` |
+| Understand | `{plugin_root}/agents/understand.md` | Step 1.5 | `analysis/code_understanding.yaml` |
+| Plan | `{plugin_root}/agents/plan.md` | Step 2 | `analysis/intent_graph.yaml`, `plan/execution_plan.md`, `plan/execution_order.yaml`, `execution/file_hashes.yaml` |
 
 The Change Engine is launched by `/iq-execute`.
 Review agent (Reviewer) is launched by `/iq-review`.
@@ -2717,10 +2619,8 @@ For reference, the complete directory structure created per workflow:
       ...
   analysis/
     blast_radius.md                <- Full blast radius report
-    code_discovery.yaml            <- CalcMain flow + CR→function mapping (from Discovery)
-    intent_graph.yaml              <- Intents with target regions and dependencies
-    files_to_copy.yaml             <- Code/ files needing new dated copies
-    analyzer_output/               <- Function understanding blocks, target analysis
+    code_understanding.yaml        <- Code analysis, function understanding, blast radius, file copy info (needs_copy/source_file/target_file per CR) (from Understand)
+    intent_graph.yaml              <- Intents with target regions and dependencies (from Plan)
   plan/
     execution_plan.md              <- Human-readable plan (GATE 1 document)
     execution_order.yaml           <- Machine-readable ordered intents

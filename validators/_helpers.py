@@ -631,19 +631,30 @@ def load_snapshot_lines(filepath, snapshots_dir):
 # Operation ID Parsing
 # ---------------------------------------------------------------------------
 
-def extract_cr_from_intent(intent_id):
+def extract_cr_from_intent(intent_id, operation_entry=None):
     """Extract CR ID from an intent ID.
 
-    Format:
+    Primary: uses explicit ``cr`` field from the operations_log entry (set by
+    the Change Engine). Fallback: infers from intent ID naming convention.
+
+    Format (fallback — DEPRECATED, intent-002 does NOT always belong to cr-002):
         "intent-001" -> "cr-001"
         "intent-012" -> "cr-012"
 
     Args:
         intent_id: Intent ID string (e.g., "intent-001").
+        operation_entry: Optional operations_log entry dict. When provided,
+            the explicit ``cr`` field is checked first.
 
     Returns:
         CR ID string (e.g., "cr-001"), or None if pattern doesn't match.
     """
+    # Primary: explicit CR field from operations_log (set by Change Engine)
+    if operation_entry and isinstance(operation_entry, dict):
+        cr = operation_entry.get("cr")
+        if cr:
+            return cr
+    # DEPRECATED fallback — intent-002 does NOT always belong to cr-002
     match = re.match(r'intent-(\d+)(?:-\d+)?', intent_id)
     if match:
         return f"cr-{match.group(1)}"

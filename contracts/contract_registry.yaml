@@ -1,0 +1,221 @@
+# IQ Update Plugin — Contract Registry (v0.4.0)
+#
+# This file is the SOURCE OF TRUTH for all inter-agent artifact schemas.
+# Inline schema examples in agent specs are illustrative only — if they
+# conflict with this registry, the registry wins. (See CLAUDE.md Rule 21)
+#
+# Updated: 2026-03-10
+
+version: "2.0"
+pipeline_version: "0.4.0"
+
+# ──────────────────────────────────────────────────────────────────────
+# Identity Rules — canonical naming and precision contracts
+# ──────────────────────────────────────────────────────────────────────
+
+identity_rules:
+  cr_ownership:
+    rule: "intent.cr is authoritative. NEVER infer CR from intent ID."
+    note: "intent-002 does NOT always belong to cr-002. Always read the explicit cr field."
+
+  function_key:
+    rule: "(target_file, function_name) is the unique key for functions"
+    note: "Replaces bare function_name which is ambiguous across files"
+
+  snapshot_naming:
+    rule: "filepath.replace('/', '__').replace('\\\\', '__') + '.snapshot'"
+    forbidden: "basename(filepath) + '.snapshot'"
+    note: "Path-encoded to avoid collisions when two files have the same basename"
+
+  numeric_precision:
+    rule: "Python Decimal with ROUND_HALF_EVEN everywhere"
+    applies_to:
+      - "plan.md previews"
+      - "change-engine arithmetic"
+      - "semantic-verifier proofs"
+
+# ──────────────────────────────────────────────────────────────────────
+# Enums — canonical value sets used across agents
+# ──────────────────────────────────────────────────────────────────────
+
+enums:
+  capability:
+    values: [value_editing, structure_insertion, file_creation, flow_modification]
+    note: "Broad labels, not constraints. A single intent may involve multiple."
+
+  target_kind:
+    values: [call, assignment, constant, case_label, code_block]
+    note: "Tells Gates and CE which parser collection to verify against."
+
+  intent_origin:
+    values: [direct_cr, caller_fix, rework]
+    note: "How the intent was generated — from CR, from caller chain fix, or from review feedback."
+
+  gate_names:
+    values: [plan_approval, source_preflight, target_preflight, post_edit_verify, aggregate_verify, review_approval]
+    display: [Gate 1, Gate 2a, Gate 2b, Gate 3, Gate 4, Gate 5]
+    enforcement:
+      Gate 1: "orchestrator-enforced (/iq-plan — developer prompt)"
+      Gate 2a: "orchestrator-enforced (/iq-execute — hash checks before file copy)"
+      Gate 2b: "orchestrator-enforced (/iq-execute — parser preflight after file copy)"
+      Gate 3: "agent-enforced (CE.4 post-edit verify per capsule; capsule status: failed halts orchestrator)"
+      Gate 4: "orchestrator-enforced (/iq-execute — aggregate all capsule results)"
+      Gate 5: "orchestrator-enforced (/iq-review — developer prompt)"
+    note: "Gate 3 is unique: it runs inside each Change Engine worker (CE.4 step), not as a separate orchestrator checkpoint. If CE.4 fails, the worker returns status: failed, and the orchestrator halts before dispatching the next capsule."
+
+# ──────────────────────────────────────────────────────────────────────
+# Artifacts — every inter-agent data product
+# ──────────────────────────────────────────────────────────────────────
+
+artifacts:
+  change_requests:
+    path: "parsed/change_requests.yaml"
+    producer: "intake"
+    consumers: ["understand", "plan"]
+    required_fields: [workflow_id, ticket_id, change_requests]
+    format: "yaml"
+
+  cr_individual:
+    path: "parsed/requests/cr-NNN.yaml"
+    producer: "intake"
+    consumers: ["understand", "plan"]
+    required_fields: [cr_id, title, summary]
+    format: "yaml"
+
+  code_understanding:
+    path: "analysis/code_understanding.yaml"
+    producer: "understand"
+    consumers: ["plan", "iq-execute orchestrator", "iq-review orchestrator", "reviewer", "semantic-verifier"]
+    required_fields: [schema_version, project_map, entry_point, change_requests]
+    format: "yaml"
+    note: "Replaces code_discovery.yaml + cr-NNN-analysis.yaml + files_to_copy.yaml in v0.4.0"
+
+  intent_graph:
+    path: "analysis/intent_graph.yaml"
+    producer: "plan"
+    consumers: ["iq-execute orchestrator", "iq-review orchestrator", "change-engine", "reviewer", "semantic-verifier"]
+    required_fields: [workflow_id, intents]
+    format: "yaml"
+
+  execution_plan:
+    path: "plan/execution_plan.md"
+    producer: "plan"
+    consumers: ["developer (Gate 1)", "iq-review orchestrator", "reviewer", "semantic-verifier"]
+    format: "markdown"
+
+  execution_order:
+    path: "plan/execution_order.yaml"
+    producer: "plan"
+    consumers: ["iq-execute orchestrator", "iq-review orchestrator", "reviewer", "semantic-verifier"]
+    required_fields: [phases]
+    format: "yaml"
+
+  file_hashes:
+    path: "execution/file_hashes.yaml"
+    producer: "plan"
+    lifecycle: "Created by Plan agent at plan time. Updated by iq-execute orchestrator as files change."
+    consumers: ["iq-execute orchestrator", "iq-review orchestrator", "change-engine", "validators"]
+    required_fields: [files]
+    format: "yaml"
+    note: "TOCTOU protection — hash at plan time vs hash at edit time"
+
+  operations_log:
+    path: "execution/operations_log.yaml"
+    producer: "iq-execute orchestrator (transforms change-engine results)"
+    consumers: ["iq-review orchestrator", "reviewer", "semantic-verifier", "validators"]
+    required_fields: [operations]
+    per_operation: [intent_id, cr, status, file, function, change_type, description, changes, summary]
+    changes_schema:
+      note: "Each entry in changes[] is mapped from change-engine edits_applied[]"
+      per_change: [before, after, line, description, values_changed]
+      field_mapping:
+        before: "CE edits_applied[].old_string"
+        after: "CE edits_applied[].new_string"
+        line: "CE edits_applied[].line"
+        description: "CE edits_applied[].description"
+        values_changed: "Computed: count of Array6 args that differ between before/after"
+    format: "yaml"
+
+  parser_cache:
+    path: "execution/parser-cache/{normalized_path}_{file_hash}_{function_signature}.json"
+    producer: "gate-2b (post-copy target preflight)"
+    consumers: ["change-engine (CE.0)"]
+    format: "vb-parser function JSON output"
+    lifecycle: "Created at Gate 2b, consumed during execution, deleted after Gate 4"
+
+  capsules:
+    path: "execution/capsules/capsule-{id}.yaml"
+    producer: "iq-execute orchestrator"
+    consumers: ["change-engine workers"]
+    format: "yaml"
+
+  snapshots:
+    path: "execution/snapshots/{path_encoded_filename}.snapshot"
+    producer: "iq-execute orchestrator"
+    consumers: ["change-engine (restore on fail)", "semantic-verifier (before values)", "reviewer"]
+    format: "raw VB.NET source copy"
+
+  checkpoint:
+    path: "execution/checkpoint.yaml"
+    producer: "iq-execute orchestrator"
+    consumers: ["iq-execute orchestrator (crash recovery)"]
+    format: "yaml"
+
+  validator_results:
+    path: "verification/validator_results.yaml"
+    producer: "validator agent (in /iq-review)"
+    consumers: ["diff agent", "report agent", "developer (Gate 5)"]
+    format: "yaml"
+
+  diff_report:
+    path: "verification/diff_report.md"
+    producer: "diff agent (in /iq-review)"
+    consumers: ["report agent", "developer (Gate 5)"]
+    format: "markdown"
+
+  changes_diff:
+    path: "verification/changes.diff"
+    producer: "diff agent (in /iq-review)"
+    consumers: ["developer (Gate 5)"]
+    format: "unified diff"
+
+  corrections:
+    path: "verification/corrections.yaml"
+    producer: "validator agent (in /iq-review, on self-correction)"
+    consumers: ["diff agent", "semantic-verifier"]
+    format: "yaml"
+    lifecycle: "Created only when validator self-corrects a BLOCKER. Optional artifact."
+
+  semantic_verification:
+    path: "verification/semantic_verification.yaml"
+    producer: "semantic-verifier"
+    consumers: ["report agent", "developer (Gate 5)"]
+    required_fields: [workflow_id, total_intents, matched, mismatched, results]
+    format: "yaml"
+
+  semantic_report:
+    path: "verification/semantic_report.md"
+    producer: "semantic-verifier"
+    consumers: ["report agent", "developer (Gate 5)"]
+    format: "markdown"
+
+  traceability_matrix:
+    path: "verification/traceability_matrix.md"
+    producer: "report agent (in /iq-review)"
+    consumers: ["developer (Gate 5)"]
+    format: "markdown"
+
+  change_summary:
+    path: "summary/change_summary.md"
+    producer: "report agent (in /iq-review)"
+    consumers: ["developer (Gate 5)"]
+    format: "markdown"
+    note: "Used as SVN commit message template"
+
+  manifest:
+    path: "manifest.yaml"
+    producer: "iq-plan orchestrator"
+    lifecycle: "Created by /iq-plan, updated by all /iq-* commands"
+    consumers: ["all orchestrators", "all agents"]
+    required_fields: [workflow_id, state, manifest_version]
+    format: "yaml"

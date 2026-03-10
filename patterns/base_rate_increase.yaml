@@ -29,7 +29,7 @@ parameters:
   - name: rounding
     type: enum[auto, banker, none]
     default: auto
-    description: "Set to 'auto' by Intake. Analyzer resolves to 'banker' (integer Array6) or 'none' (decimal/factor values)"
+    description: "Set to 'auto' by Intake. Understand agent resolves to 'banker' (integer Array6) or 'none' (decimal/factor values)"
 
 validators:
   - array6_syntax

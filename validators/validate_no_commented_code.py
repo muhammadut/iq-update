@@ -93,7 +93,7 @@ def validate(manifest_path: str) -> dict:
             continue
 
         filepath = entry.get("file", "")
-        op_id = entry.get("operation", "")
+        op_id = entry.get("intent_id", entry.get("operation", ""))
 
         for change in entry.get("changes", []):
             before_line = change.get("before")

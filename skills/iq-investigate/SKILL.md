@@ -16,7 +16,7 @@ and dead-code detection.
 **Key differentiator from raw Claude Code queries:** /iq-investigate understands the
 carrier structure (provinces, LOBs, Code/ directories), uses the Pattern Library for
 pre-indexed function data, and optionally saves findings that feed back into the
-Analyzer automatically.
+Understand agent automatically.
 
 ## Trigger
 
@@ -47,7 +47,7 @@ Examples:
 | Output | Location | Description |
 |--------|----------|-------------|
 | Investigation report | Console output | Structured answer with code snippets, call counts, file locations |
-| Finding file (optional) | `.iq-workstreams/changes/{ws}/investigation/finding-{NNN}.yaml` | Saved finding that feeds into Analyzer Step 5.9.7 |
+| Finding file (optional) | `.iq-workstreams/changes/{ws}/investigation/finding-{NNN}.yaml` | Saved finding that feeds into Understand agent (Step U.9) |
 
 ## No State Requirement
 
@@ -58,7 +58,7 @@ active workstream. It works in three modes:
    and direct file scanning. Findings are displayed but cannot be saved.
 
 2. **Workstream mode** — Active workstream exists. Investigations can be saved to
-   `investigation/finding-*.yaml` for automatic use by the Analyzer.
+   `investigation/finding-*.yaml` for automatic use by the Understand agent.
 
 3. **Degraded mode** — Neither Pattern Library nor config.yaml exists. Falls back to
    direct grep/glob scanning. Slower but functional.
@@ -389,7 +389,7 @@ Then fall back to Type 6 (GENERAL SEARCH) for the query.
 After displaying results, if an active workstream exists, offer to save the finding:
 
 ```
-Save this finding for the Analyzer to use automatically? [Y/n]
+Save this finding for the Understand agent to use automatically? [Y/n]
 ```
 
 If the developer says yes (or the finding is particularly useful — e.g., a canonical
@@ -407,7 +407,7 @@ pattern discovery or dead code confirmation):
 
 ```yaml
 # Investigation Finding
-# Saved by /iq-investigate — auto-consumed by Analyzer Step 5.9.7
+# Saved by /iq-investigate — auto-consumed by Understand agent (Step U.9)
 finding_id: "finding-{NNN}"
 saved_at: "{ISO 8601 timestamp}"
 question: "{original question}"
@@ -424,7 +424,7 @@ result:
   verdict: "{DEAD|ACTIVE|HIGH_USE|PATTERN_FOUND|NOT_FOUND}"
   summary: "{1-2 sentence summary}"
 
-  # For pattern searches (Type 2) — feeds directly into Analyzer canonical_access
+  # For pattern searches (Type 2) — feeds directly into Understand agent canonical_access
   canonical_pattern:
     need: "{access_need_id}"
     pattern: "{established accessor pattern}"
@@ -434,7 +434,7 @@ result:
     example_snippet: |
       {code snippet showing the canonical pattern}
 
-  # For dead code checks (Type 4) — feeds into Analyzer warnings
+  # For dead code checks (Type 4) — feeds into Understand agent warnings
   dead_code:
     function_name: "{name}"
     file: "{file}"
@@ -517,14 +517,14 @@ if finding.has_relationship:
 # 3. Factor cardinality (Case branch counts)
 if finding.has_cardinality:
     # Add to factor_cardinality section
-    # Same schema as Analyzer Step 5.11.1 but with provenance: "investigation"
+    # Same schema as Understand agent (Step U.12) but with provenance: "investigation"
 ```
 
 **Confirmation:**
 ```
 [Investigate] Promoted to codebase-profile.yaml:
   {list of items promoted}
-  These will be used automatically by Intake, Decomposer, and Analyzer
+  These will be used automatically by Intake, Understand agent, and Plan agent
   in all future workstreams.
 ```
 
@@ -539,7 +539,7 @@ After the investigation (and optional save/promote), suggest relevant next steps
 ─────────────────────────────────────────────────────
 Next steps:
   - Ask another question: /iq-investigate {new question}
-  - {If finding saved}: Run /iq-plan — the Analyzer will use this finding automatically
+  - {If finding saved}: Run /iq-plan — the Understand agent will use this finding automatically
   - {If finding promoted}: Knowledge is now in the Codebase Profile for all future work
   - {If dead code found}: The Pattern Library marks this as DEAD (0 callers)
   - {If no Pattern Library}: Run /iq-init --refresh to build the Pattern Library
@@ -560,7 +560,7 @@ Developer runs /iq-investigate "How are claims accessed?"
   → Saves finding to investigation/finding-001.yaml
                     │
 Developer runs /iq-plan
-  → Analyzer Step 5.9.7 reads investigation/finding-001.yaml
+  → Understand agent (Step U.9) reads investigation/finding-001.yaml
   → Matches access need "claims" → uses pre-validated pattern
   → Skips Pattern Library lookup + confirmation (developer already validated)
   → Change Engine gets the correct pattern in intent capsule
@@ -573,9 +573,9 @@ Developer runs /iq-investigate "What's related to Sewer Backup?"
   → Saves finding → Promotes to codebase-profile.yaml
                     │
 ANY future /iq-plan (any workstream, any ticket):
-  → Analyzer Step 11.5 reads rule_dependencies from profile
+  → Understand agent (Step U.12) reads rule_dependencies from profile
   → If targeting Water Coverage → warns about Sewer Backup
-  → Planner Step 9 elevates risk level to HIGH
+  → Plan agent (Section 8) elevates risk level to HIGH
   → Developer sees the warning BEFORE approving the plan
 ```
 

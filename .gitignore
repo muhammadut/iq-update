@@ -7,8 +7,7 @@ __pycache__/
 .env
 
 # Review / development artifacts (not part of production plugin)
-codex-reviews/
-codex-review-plan.md
+# (codex-reviews/ and codex-review-plan.md were deleted in v0.4.0 cleanup)
 
 # OS files
 .DS_Store

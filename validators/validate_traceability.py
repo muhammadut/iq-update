@@ -140,8 +140,8 @@ def _build_intent_cr_mapping(ops_log):
     all_intent_crs = {}   # intent_id -> cr_id
 
     for entry in ops_log.get("operations", []):
-        intent_id = entry.get("operation", "")
-        cr_id = extract_cr_from_intent(intent_id)
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
+        cr_id = extract_cr_from_intent(intent_id, operation_entry=entry)
         if cr_id:
             all_intent_crs[intent_id] = cr_id
             intents_by_cr.setdefault(cr_id, []).append(intent_id)
@@ -194,7 +194,7 @@ def _check_orphan_changes(ops_log, cr_ids, all_intent_crs, findings):
         findings: List to append finding dicts to (mutated in place).
     """
     for entry in ops_log.get("operations", []):
-        intent_id = entry.get("operation", "")
+        intent_id = entry.get("intent_id", entry.get("operation", ""))
 
         # Skip rework entries -- they don't map to CRs
         if intent_id.startswith("rework-"):

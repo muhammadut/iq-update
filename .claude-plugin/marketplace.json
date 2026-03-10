@@ -13,8 +13,8 @@
         "source": "github",
         "repo": "muhammadut/iq-update"
       },
-      "description": "8-agent pipeline: Intake, Discovery, Analyzer, Decomposer, Planner, Change Engine, Reviewer, Semantic Verifier. Understanding-driven — handles any ticket type with two human approval gates.",
-      "version": "0.3.3",
+      "description": "7-agent pipeline: Intake, Understand, Plan, Change Engine, Reviewer, Semantic Verifier. Parser-powered with 6 automated verification gates. Handles any ticket type with two human approval gates.",
+      "version": "0.4.0",
       "license": "MIT",
       "keywords": ["vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"]
     }

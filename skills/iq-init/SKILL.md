@@ -177,7 +177,10 @@ the whole init because one province is malformed).
    ```
 
    **Missing python:** STOP — validators and init_scan.py require Python with PyYAML.
-   **Missing bash/jq/curl:** WARN — fetch-ticket.sh won't work, but plugin functions fine.
+   **Missing system bash/jq/curl:** WARN — fetch-ticket.sh won't work, but plugin functions fine.
+   Note: The discovery script above runs via Claude Code's Bash tool (always available).
+   The `bash_path` in paths.md refers to a SYSTEM bash on PATH (for fetch-ticket.sh only).
+   The plugin's core pipeline does NOT require system bash — only Claude Code's Bash tool.
 
 6. **Azure DevOps connection check (`.env` file) — auto-populate flow.**
 
@@ -255,11 +258,38 @@ the whole init because one province is malformed).
    Azure DevOps:  ⚠ .env created but ADO_PAT is empty — /iq-plan will require manual ticket paste
    ```
 
+### Step 0.8: Parser Binary Detection (REQUIRED)
+
+The VB parser is a Roslyn-based binary that provides machine-verified structural
+analysis of VB.NET files. It is REQUIRED for v0.4.0 — there is no regex fallback.
+
+```
+parser_path = os.path.join(plugin_root, "tools", "win-x64", "vb-parser.exe")
+
+IF os.path.exists(parser_path):
+  # Quick validation: run parser with no args to check it's functional
+  result = subprocess.run([parser_path], capture_output=True, text=True, timeout=10)
+  IF "Usage:" in result.stdout or "Usage:" in result.stderr:
+    Print: "VB Parser:     Roslyn (exact) ✓"
+    # parser_path will be written to paths.md in Step 0.9
+  ELSE:
+    ERROR: "vb-parser.exe found but not functioning. Check binary integrity."
+    ERROR: "  Path: {parser_path}"
+    ERROR: "  Expected: Usage message on stdout/stderr"
+    STOP — cannot continue without working parser.
+ELSE:
+  ERROR: "vb-parser.exe not found."
+  ERROR: "  Expected at: {parser_path}"
+  ERROR: "  Plugin installation may be incomplete."
+  ERROR: "  The parser binary should be at: {plugin_root}/tools/win-x64/vb-parser.exe"
+  STOP — cannot continue without parser binary.
+```
+
 ### Step 0.9: Write paths.md (CRITICAL — enables all downstream commands)
 
 After completing Step 0, you have discovered: `plugin_root`, `carrier_root`, `python_cmd`,
-and tool paths (`jq`, `bash`, `curl`). Write ALL of these to `.iq-workstreams/paths.md`
-immediately — before doing anything else. This file is the SINGLE SOURCE OF TRUTH for
+tool paths (`jq`, `bash`, `curl`), and `parser_path`. Write ALL of these to
+`.iq-workstreams/paths.md` immediately — before doing anything else. This file is the SINGLE SOURCE OF TRUTH for
 every downstream `/iq-*` command.
 
 **Create `.iq-workstreams/` directory** if it does not exist yet.
@@ -285,13 +315,12 @@ jq: {absolute path to jq, or "NOT FOUND"}
 bash: {absolute path to bash, or "NOT FOUND"}
 curl: {absolute path to curl, or "NOT FOUND"}
 codex: {absolute path to codex, or "NOT FOUND"}
+vb_parser: {plugin_root}/tools/win-x64/vb-parser.exe
 
 ## Agent Specs (absolute paths — use with Read tool)
 intake: {plugin_root}/agents/intake.md
-discovery: {plugin_root}/agents/discovery.md
-analyzer: {plugin_root}/agents/analyzer.md
-decomposer: {plugin_root}/agents/decomposer.md
-planner: {plugin_root}/agents/planner.md
+understand: {plugin_root}/agents/understand.md
+plan: {plugin_root}/agents/plan.md
 reviewer: {plugin_root}/agents/reviewer.md
 semantic_verifier: {plugin_root}/agents/semantic-verifier.md
 change_engine_core: {plugin_root}/agents/change-engine/core.md
@@ -375,7 +404,7 @@ For each province directory found in Pass 1, list its subdirectories and classif
 | Tenant | TENANT | true |
 | Mobile Home | MH | true |
 
-**IMPORTANT — Discovery-first LOB code suffix:**
+**IMPORTANT — Discover-first LOB code suffix:**
 
 The "Default Code Suffix" column above is a FALLBACK only. For each LOB directory,
 the init MUST attempt to discover the actual suffix from `.vbproj` filenames:
@@ -604,8 +633,8 @@ hab_lob_names:
   - "Mobile Home"
 
 # -- Function Name Search Patterns --------------------------------------------
-# Function names are NOT consistent across provinces. The Analyzer must search
-# by pattern, not by hardcoded name.
+# Function names are NOT consistent across provinces. The Understand agent must
+# search by pattern, not by hardcoded name.
 
 function_patterns:
   base_rate_hab:
@@ -722,7 +751,7 @@ If this is a RE-INIT, also show what changed:
 ### Step 6: Build Pattern Library
 
 After config.yaml is written and the summary is displayed, build the Pattern Library.
-This is a one-time function registry with call-site counts, used by the Analyzer for
+This is a one-time function registry with call-site counts, used by the Understand agent for
 dead-code detection and canonical pattern discovery. Analogous to Aider's repository
 map but simpler (regex + grep, no PageRank needed at this codebase scale).
 
@@ -873,7 +902,7 @@ Write the Pattern Library to `.iq-workstreams/pattern-library.yaml`:
 # IQ Rate Update Plugin -- Pattern Library (Function Registry)
 # ============================================================================
 # Auto-generated by /iq-init Step 6. One-time scan of all .vb files.
-# Used by the Analyzer for dead-code detection and canonical pattern discovery.
+# Used by the Understand agent for dead-code detection and canonical pattern discovery.
 #
 # To rebuild: run /iq-init --refresh
 # ============================================================================
@@ -918,7 +947,7 @@ functions:
 
 # -- Accessor Index -----------------------------------------------------------
 # Keywords → commonly-used accessor patterns with call counts.
-# The Analyzer queries this index for instant pattern lookups.
+# The Understand agent queries this index for instant pattern lookups.
 accessor_index:
   claims:
     - pattern: "{accessor pattern, e.g., allIQCovItem.GetClaimsVehicles}"
@@ -959,7 +988,7 @@ After writing pattern-library.yaml, append to the console summary:
  Saved to:                 .iq-workstreams/pattern-library.yaml
 
  The Pattern Library helps agents detect dead code and find established
- patterns. The Analyzer uses it for instant lookups during /iq-plan.
+ patterns. The Understand agent uses it for instant lookups during /iq-plan.
 ```
 
 #### Rebuild Triggers
@@ -980,7 +1009,7 @@ The Pattern Library is rebuilt when:
 |--------|--------------|
 | Scan time | ~30-60 seconds for 500-2000 .vb files |
 | Output size | ~50-200KB YAML |
-| Memory usage | Never loaded fully into context — Analyzer queries specific entries |
+| Memory usage | Never loaded fully into context — Understand agent queries specific entries |
 
 ### Step 6.6: Extract Dispatch Tables (Codebase Profile)
 
@@ -1235,7 +1264,7 @@ After writing `codebase-profile.yaml`, append to the console summary:
 
  The Codebase Knowledge Base gives agents domain vocabulary, dispatch
  routing, and vehicle type awareness. It is enriched automatically by
- the Analyzer during /iq-plan and manually via /iq-investigate --promote.
+ the Understand agent during /iq-plan and manually via /iq-investigate --promote.
 ```
 
 ### Profile Rebuild Triggers
@@ -1251,9 +1280,9 @@ The Codebase Profile is rebuilt when:
   This warning appears in /iq-plan's pre-flight checks (not in /iq-init itself).
 
 **Incremental enrichment (NOT from /iq-init):**
-- **Analyzer Step 5.11** adds `factor_cardinality` and `rule_dependencies` entries
+- **Understand agent (Step U.12)** adds `factor_cardinality` and `rule_dependencies` entries
 - **/iq-investigate --promote** adds validated glossary entries and rule dependencies
-- These enrichments have `provenance: "analyzer"` or `provenance: "investigation"`
+- These enrichments have `provenance: "understand"` or `provenance: "investigation"`
   and are NEVER overwritten by /iq-init rebuilds (init only overwrites
   `provenance: "init"` entries)
 
@@ -1328,8 +1357,8 @@ echo -n "{concatenated sorted paths}" | sha256sum | cut -d' ' -f1
 **config.yaml** is read by:
 - `/iq-plan` -- to validate target folders and detect workflow type
 - **Intake agent** -- to map province/LOB mentions in the Summary of Changes to real paths
-- **Analyzer agent** -- to find Code/ files, detect shared modules, check blast radius
-- **Planner agent** -- to build execution plans with correct paths
+- **Understand agent** -- to find Code/ files, detect shared modules, check blast radius
+- **Plan agent** -- to build execution plans with correct paths
 - **Change Engine** -- to locate files and construct new filenames
 - **Reviewer** -- to validate completeness across all affected LOBs
 
@@ -1337,16 +1366,16 @@ If config.yaml is wrong, EVERY downstream agent will fail. This is why /iq-init
 must be accurate.
 
 **pattern-library.yaml** is read by:
-- **Analyzer agent** (Steps 5.9, 5.10) -- to look up function call counts, detect dead code, find canonical accessor patterns, and enrich Function Understanding Blocks with param_types/return_type/purpose_hint
+- **Understand agent** (Steps U.9, U.10) -- to look up function call counts, detect dead code, find canonical accessor patterns, and enrich Function Understanding Blocks with param_types/return_type/purpose_hint
 - `/iq-investigate` -- for instant call-site lookups and pattern searches
 - `/iq-plan` pre-flight -- to check staleness (>30 days → warning)
 
 **codebase-profile.yaml** is read by:
 - **Intake agent** (Step 2.5) -- glossary lookup to resolve business terms to functions before keyword matching
-- **Decomposer agent** (Step 5) -- dispatch table for endorsement/coverage category, vehicle type enumeration for Auto
-- **Analyzer agent** (Step 5.11) -- enriches factor_cardinality and rule_dependencies (WRITE)
-- **Analyzer agent** (Step 12) -- rule_dependencies for blast radius warnings
-- **Planner agent** (Step 9) -- rule_dependencies for risk flag elevation
+- **Plan agent** (Section 3) -- dispatch table for endorsement/coverage category, vehicle type enumeration for Auto
+- **Understand agent** (Step U.12) -- enriches factor_cardinality and rule_dependencies (WRITE)
+- **Understand agent** (Step U.12) -- rule_dependencies for blast radius warnings
+- **Plan agent** (Section 8) -- rule_dependencies for risk flag elevation
 - `/iq-investigate` -- profile queries (Type 7) and --promote pathway (WRITE)
 - `/iq-plan` pre-flight -- to check staleness (>30 days → warning)
 

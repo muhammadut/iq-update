@@ -878,10 +878,10 @@ def test_non_value_editing_change_type_skipped():
         )
 
         result = validate(manifest_path)
-        # flow_modification ops are not checked by _check_ops_log
-        # and this file is not in value_files inventory
-        assert result["passed"] is True
-        assert len(result["findings"]) == 0
+        # v0.4.0: flow_modification is now included in Array6 checks (A5 fix).
+        # The before has 3 args, after has 2 — validator correctly flags this.
+        assert result["passed"] is False
+        assert len(result.get("findings", [])) > 0
 
 
 # ===========================================================================

@@ -1,6 +1,6 @@
 ---
 name: iq-review
-description: Validate all changes and produce a summary report. Runs 8 validators, generates diffs, performs semantic verification, and presents Gate 2 for developer approval.
+description: Validate all changes and produce a summary report. Runs 8 validators, generates diffs, performs semantic verification, and presents Gate 5 for developer approval.
 user-invocable: true
 ---
 
@@ -10,7 +10,7 @@ user-invocable: true
 
 Run the RIGOROUS final review after /iq-execute has applied all modifications.
 This is the third and final command in the plugin's workflow -- it validates
-everything, generates comprehensive reports, and presents Gate 2 for developer
+everything, generates comprehensive reports, and presents Gate 5 for developer
 approval. The orchestrator launches the review agent team, runs all 8 validators,
 produces diffs and traceability reports, and walks the developer through approval
 or rework.
@@ -74,7 +74,7 @@ Confirm these exist in the workstream directory:
 ```
 From /iq-plan:  manifest.yaml, input/source.md, parsed/change_requests.yaml,
                 parsed/requests/ (1+ files), analysis/intent_graph.yaml,
-                analysis/analyzer_output/ (1+ files),
+                analysis/code_understanding.yaml,
                 plan/execution_plan.md, plan/execution_order.yaml
 From /iq-execute: execution/operations_log.yaml, execution/file_hashes.yaml,
                   execution/snapshots/ (1+ .snapshot files)
@@ -109,14 +109,23 @@ Proceed to Section 4.
 
 ### State: VALIDATING (Resume)
 
-Check which review artifacts exist: `verification/validator_results.yaml`,
-`verification/diff_report.md`, `summary/change_summary.md`.
+Check which review artifacts exist. ALL 6 are required for a valid resume:
 
-- **ALL exist AND file hashes match:** Skip to Gate 2 (Section 6).
+```
+verification/validator_results.yaml
+verification/diff_report.md
+verification/semantic_verification.yaml
+verification/semantic_report.md
+verification/traceability_matrix.md
+summary/change_summary.md
+```
+
+- **ALL 6 exist AND file hashes match:** Skip to Gate 5 (Section 6).
   `"Previous review results still valid. Skipping to approval."`
 - **Hashes changed:** `"Files changed since last review. Re-running full review."`
   Proceed to Section 4.
-- **Artifacts incomplete:** Proceed to Section 4 (safer to re-run everything).
+- **Any artifact missing:** Proceed to Section 4 (safer to re-run everything).
+  `"Review artifacts incomplete ({N}/6 present). Re-running full review."`
 
 ---
 
@@ -146,10 +155,17 @@ Read `execution_mode` from manifest.yaml ("team" or "sequential").
    - "Run report agent"              (blocked by semantic verifier)
 3. Spawn each agent (see Agent Launch Protocol below)
 4. Monitor for DEVELOPER_QUESTION, AGENT_COMPLETE, AGENT_ERROR messages
-5. After all 4 complete: TeamDelete(), proceed to Gate 2
+5. After all 4 complete: TeamDelete(), proceed to Gate 5
 ```
 
-If TeamCreate fails, fall back to sequential mode. Log to error_log.
+**Fallback detection:** If ANY of these conditions are true, use sequential mode:
+1. TeamCreate tool is not available (tool call returns error or is not listed)
+2. TeamCreate returns an error (permissions, unsupported version)
+3. TeamCreate times out (10+ seconds with no response)
+
+On fallback: print `"Team mode unavailable — falling back to sequential execution."`
+Log to error_log: `{type: "team_mode_unavailable", resolution: "sequential"}`.
+Do NOT retry TeamCreate or sleep-loop. Switch to sequential immediately.
 
 **Sequential mode (fallback):**
 ```
@@ -227,7 +243,7 @@ ON COMPLETION: Return summary with output counts, issues, warnings.
 
 **Input:** execution/operations_log.yaml, execution/file_hashes.yaml,
 execution/snapshots/*.snapshot, parsed/change_requests.yaml, parsed/requests/cr-NNN.yaml,
-analysis/intent_graph.yaml, analysis/files_to_copy.yaml, all modified source
+analysis/intent_graph.yaml, analysis/code_understanding.yaml, all modified source
 files, all target .vbproj files.
 
 **Output:** verification/validator_results.yaml
@@ -317,7 +333,7 @@ verification/corrections.yaml (if exists), all modified source files.
 the change matches the original intent description. Produce a reasoning chain
 showing arithmetic checks (for value edits) and structural checks (for insertions).
 
-**Input:** analysis/intent_graph.yaml, analysis/analyzer_output/cr-NNN-analysis.yaml,
+**Input:** analysis/intent_graph.yaml, analysis/code_understanding.yaml,
 execution/operations_log.yaml, execution/snapshots/*.snapshot, plan/execution_order.yaml,
 parsed/requests/cr-NNN.yaml, verification/corrections.yaml (if exists — from validator
 self-corrections), all modified source files.
@@ -391,11 +407,11 @@ verification/semantic_verification.yaml, verification/semantic_report.md.
 1. Read traceability_matrix.md, change_summary.md, and semantic_report.md
 2. Team mode: TeamDelete()
 3. Update manifest: `phase_status.reviewer.status: "completed"`, summary, updated_at
-4. Proceed to Gate 2
+4. Proceed to Gate 5
 
 ---
 
-## 6. Gate 2: Result Approval
+## 6. Gate 5: Result Approval
 
 ```
 REVIEW: {Province_Name} {LOB(s)} {effective_date}
@@ -474,9 +490,15 @@ Developer says: "territory 5 values are wrong" / "fix the Array6 in territory 12
 1. CAPTURE: Which file, line/function/territory, correct value
 2. TOCTOU CHECK: Compare file hash. Warn on mismatch.
 3. APPLY FIX: Edit tool, preserve VB.NET formatting
-4. LOG: Append "rework-{NNN}" entry to operations_log.yaml. Update file hashes.
+4. ARTIFACT UPDATE (all 4 are required for consistent re-validation):
+   a. Append "rework-{NNN}" entry to execution/operations_log.yaml
+   b. Re-compute and update execution/file_hashes.yaml for the edited file
+   c. Refresh snapshot: copy the CURRENT file state to a new snapshot
+      (the original pre-edit snapshot is already consumed; the new snapshot
+      reflects the state just before this rework edit)
+   d. If rework changed a .vbproj: update the vbproj snapshot too
 5. RE-VALIDATE: Re-launch all 4 review agents (or inline if simple)
-6. RE-PRESENT at Gate 2 with updated results
+6. RE-PRESENT at Gate 5 with updated results
 ```
 
 ### Complex Rework (Re-Execution Needed)
@@ -486,13 +508,22 @@ Multiple files, shifted line numbers, scope change, or re-analysis needed:
 ```
 "This requires re-planning. Saving rework notes to manifest."
 1. Set state: PLANNED with rework_notes
-2. Delete stale execution artifacts to prevent /iq-execute from resuming old work:
+2. Delete ALL stale execution artifacts (complete cleanup checklist):
    - Delete execution/checkpoint.yaml
    - Delete execution/capsules/*.yaml
    - Delete execution/results/*.yaml
-   (Keep execution/snapshots/ — those are the pre-edit backups)
-3. Developer runs /iq-execute (reads rework_notes, rebuilds capsules fresh)
-4. Developer runs /iq-review again
+   - Delete execution/operations_log.yaml
+   - Delete execution/parser-cache/*.json
+   - Delete verification/ (all review artifacts are stale)
+   - Delete summary/ (change_summary is stale)
+3. Restore original source files from execution/snapshots/:
+   Copy each .snapshot file back to its original path.
+   (Snapshots are taken from the ORIGINAL pre-edit state.)
+4. Regenerate execution/file_hashes.yaml by hashing the restored files.
+   (Or delete file_hashes.yaml — /iq-execute will regenerate at Step 4.1.)
+5. Keep execution/snapshots/ as the clean baseline for the next run.
+6. Developer runs /iq-execute (reads rework_notes, rebuilds capsules fresh)
+7. Developer runs /iq-review again
 ```
 
 Manifest update on complex rework:
@@ -504,7 +535,7 @@ rework_notes:
     context: "{details}"
 phase_status:
   reviewer: {status: "pending", summary: "Rework requested -- returned to PLANNED"}
-  gate_2: {status: "rework_requested", summary: "{description}"}
+  gate_5: {status: "rework_requested", summary: "{description}"}
 ```
 
 ### Rework Loop Limit
@@ -516,7 +547,7 @@ fresh /iq-plan, or continue (cycle N+1).
 
 ## 8. The Done Moment
 
-On developer approval at Gate 2, read `summary/change_summary.md`,
+On developer approval at Gate 5, read `summary/change_summary.md`,
 `plan/execution_plan.md` (for the Verification Strategy), and
 `verification/semantic_verification.yaml` (for per-intent results).
 Present the CR-linked completion checklist:
@@ -616,7 +647,7 @@ lifecycle:
   archived_at: null
 phase_status:
   reviewer: {status: "completed", summary: "{N}/8 passed, {b} BLOCKERs, {w} WARNINGs"}
-  gate_2: {status: "approved", summary: "Developer approved{. SVN rNNN if provided}"}
+  gate_5: {status: "approved", summary: "Developer approved{. SVN rNNN if provided}"}
 ```
 
 **Lifecycle fields:** When state transitions to COMPLETED, set `lifecycle.completed_at`
@@ -634,7 +665,7 @@ Tell developer: `"Workstream complete. Run /iq-status to see all workstreams, or
 ### Session Interrupted During Review
 
 On next `/iq-review`: precondition checks find state: VALIDATING. Resume detection
-(Section 3) checks artifacts. Valid = skip to Gate 2. Stale/incomplete = re-run.
+(Section 3) checks artifacts. Valid = skip to Gate 5. Stale/incomplete = re-run.
 
 ### Validator Agent Fails
 
@@ -672,7 +703,7 @@ Abort rework write. Report mismatch. Offer: re-capture hashes, show changes, abo
 | APPROVE | "approve", "yes", "looks good", "LGTM", "ship it", "OK", "accept" | Done Moment (Sec 8) | YES -> COMPLETED |
 | REJECT | "no", "wrong", "reject", "incorrect", "nope" | Ask what to fix, rework loop (Sec 7) | NO |
 | CORRECT | "change X to Y", "value should be Z", "territory 5 is wrong" | Apply rework, re-validate | NO |
-| INVESTIGATE | "show me...", "what does...", any question mark | Answer, return to Gate 2 | NO |
+| INVESTIGATE | "show me...", "what does...", any question mark | Answer, return to Gate 5 | NO |
 | RE-VALIDATE | "re-run validation", "validate again", "check again" | Re-launch review team | NO |
 | SHOW DIFF | "show diff", "show changes", "what changed" | Display diff_report.md | NO |
 | STATUS | "status?", "where are we?", "what's left?" | Show state + validator results | NO |
@@ -680,7 +711,7 @@ Abort rework write. Report mismatch. Offer: re-capture hashes, show changes, abo
 
 ### Context-Dependent Behavior
 
-| Phrase | At Gate 2 | During Rework | After Approval |
+| Phrase | At Gate 5 | During Rework | After Approval |
 |--------|-----------|---------------|----------------|
 | "yes" | Approve | Confirm rework | Acknowledge |
 | "no" | Reject | Cancel rework | N/A |
@@ -716,18 +747,18 @@ phase_status.reviewer: {status: "completed", summary: "{N}/8 passed, ..."}
 ```
 
 ### On Minor Rework
-Append to developer_decisions (phase: "gate_2", rejected with details).
+Append to developer_decisions (phase: "gate_5", rejected with details).
 Append to error_log if applicable. State remains VALIDATING.
 
 ### On Complex Rework
 State -> PLANNED with rework_notes. phase_status.reviewer -> pending.
 
 ### On Approval
-State -> COMPLETED. svn_revision set. gate_2 -> approved.
+State -> COMPLETED. svn_revision set. gate_5 -> approved.
 Append approval to developer_decisions.
 
 ### On Discard
-State -> DISCARDED. gate_2 -> discarded. Note: files NOT reverted.
+State -> DISCARDED. gate_5 -> discarded. Note: files NOT reverted.
 Also set `lifecycle.completed_at` = now, `lifecycle.archive_after` = now + 7 days.
 
 ---
@@ -777,4 +808,4 @@ cp "execution/snapshots/{file}.snapshot" "{target_path}"
 1. Read state from files, not memory. Re-read manifest.yaml when needed.
 2. One agent at a time -- do not carry forward previous agent's details.
 3. Rely on YAML summaries, not raw agent outputs.
-4. Gate 2: read validator_results.yaml and change_summary.md fresh.
+4. Gate 5: read validator_results.yaml and change_summary.md fresh.

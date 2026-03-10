@@ -43,7 +43,7 @@ def _assert_envelope(result, expect_passed=None):
 
 
 def _build_full_workstream(ws_dir):
-    """Build a complete, valid workstream with all 5 handoff artifacts.
+    """Build a complete, valid workstream with all 4 handoff artifacts.
 
     Returns the workstream directory path (same as ws_dir).
     """
@@ -67,22 +67,38 @@ def _build_full_workstream(ws_dir):
         ],
     })
 
-    # Handoff 2: analysis/code_discovery.yaml
-    _write_yaml(str(ws_dir / "analysis" / "code_discovery.yaml"), {
-        "workflow_id": "20260101-SK-Hab-rate-update",
-        "discovery_complete": True,
-        "functions": [
-            {"name": "GetBaseRate", "file": "mod_Common_SKHab20260101.vb", "line": 400},
-        ],
+    # Handoff 2: analysis/code_understanding.yaml (v0.4.0 schema)
+    _write_yaml(str(ws_dir / "analysis" / "code_understanding.yaml"), {
+        "schema_version": "0.4.0",
+        "project_map": {
+            "Saskatchewan/Code/mod_Common_SKHab20260101.vb": {
+                "functions": ["GetBaseRate"],
+            },
+        },
+        "entry_point": "Saskatchewan/20260101/Cssi.IntelliQuote.PORTSKHab20260101.vbproj",
+        "change_requests": {
+            "cr-001": {
+                "fub": {
+                    "function": "GetBaseRate",
+                    "file": "mod_Common_SKHab20260101.vb",
+                    "line_start": 400,
+                    "line_end": 500,
+                },
+                "target_file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
+            },
+            "cr-002": {
+                "fub": {
+                    "function": "GetBaseRate",
+                    "file": "mod_Common_SKHab20260101.vb",
+                    "line_start": 400,
+                    "line_end": 500,
+                },
+                "target_file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
+            },
+        },
     })
 
-    # Handoff 3: analysis/analyzer_output/ with at least one FUB
-    _write_yaml(str(ws_dir / "analysis" / "analyzer_output" / "cr-001-analysis.yaml"), {
-        "cr_id": "cr-001",
-        "functions_analyzed": ["GetBaseRate"],
-    })
-
-    # Handoff 4: analysis/intent_graph.yaml
+    # Handoff 3: analysis/intent_graph.yaml
     _write_yaml(str(ws_dir / "analysis" / "intent_graph.yaml"), {
         "workflow_id": "20260101-SK-Hab-rate-update",
         "intents": [
@@ -103,7 +119,7 @@ def _build_full_workstream(ws_dir):
         ],
     })
 
-    # Handoff 5: plan/execution_order.yaml + execution/file_hashes.yaml
+    # Handoff 4: plan/execution_order.yaml + execution/file_hashes.yaml
     _write_yaml(str(ws_dir / "plan" / "execution_order.yaml"), [
         {"intent_id": "intent-001", "file": "mod_Common_SKHab20260101.vb"},
         {"intent_id": "intent-002", "file": "mod_Common_SKHab20260101.vb"},
@@ -149,25 +165,25 @@ def test_missing_workflow_id_in_change_requests(tmp_path):
     warning_findings = [f for f in findings if "workflow_id" in f["message"] or "province" in f["message"]]
     assert len(warning_findings) >= 1
     assert warning_findings[0]["severity"] == "WARNING"
-    assert findings[0]["phase"] == "intake\u2192discovery"
+    assert findings[0]["phase"] == "intake\u2192understand"
 
 
 # ===========================================================================
 # Test 3: Missing file produces BLOCKER
 # ===========================================================================
 
-def test_missing_code_discovery_file(tmp_path):
-    """analysis/code_discovery.yaml does not exist. Should produce BLOCKER."""
+def test_missing_code_understanding_file(tmp_path):
+    """analysis/code_understanding.yaml does not exist. Should produce BLOCKER."""
     ws = tmp_path / "ws"
     os.makedirs(str(ws), exist_ok=True)
-    # No analysis/code_discovery.yaml — but we explicitly ask for discovery phase
-    result = validate_handoff(str(ws), phase="discovery")
+    # No analysis/code_understanding.yaml — but we explicitly ask for understand phase
+    result = validate_handoff(str(ws), phase="understand")
     _assert_envelope(result, expect_passed=False)
     findings = result["findings"]
     assert len(findings) == 1
     assert findings[0]["severity"] == "BLOCKER"
     assert "Missing artifact" in findings[0]["message"]
-    assert findings[0]["phase"] == "discovery\u2192analyzer"
+    assert findings[0]["phase"] == "understand\u2192plan"
 
 
 # ===========================================================================
@@ -244,40 +260,48 @@ def test_non_dict_extracted_produces_warning(tmp_path):
 
 
 # ===========================================================================
-# Test 7: Analyzer output directory missing produces BLOCKER
+# Test 7: code_understanding.yaml missing required top-level keys produces BLOCKER
 # ===========================================================================
 
-def test_missing_analyzer_output_dir(tmp_path):
-    """analysis/analyzer_output/ does not exist. BLOCKER."""
+def test_understand_missing_required_keys(tmp_path):
+    """code_understanding.yaml missing schema_version/project_map/entry_point/change_requests. BLOCKER."""
     ws = tmp_path / "ws"
-    os.makedirs(str(ws), exist_ok=True)
+    # File exists but has none of the required keys
+    _write_yaml(str(ws / "analysis" / "code_understanding.yaml"), {
+        "workflow_id": "test-wf",
+    })
 
-    result = validate_handoff(str(ws), phase="analyzer")
+    result = validate_handoff(str(ws), phase="understand")
     _assert_envelope(result, expect_passed=False)
     findings = result["findings"]
-    assert len(findings) == 1
-    assert findings[0]["severity"] == "BLOCKER"
-    assert "Missing directory" in findings[0]["message"]
+    blocker_msgs = [f["message"] for f in findings if f["severity"] == "BLOCKER"]
+    # Should flag all four missing required keys
+    assert any("schema_version" in m for m in blocker_msgs)
+    assert any("project_map" in m for m in blocker_msgs)
+    assert any("entry_point" in m for m in blocker_msgs)
+    assert any("change_requests" in m for m in blocker_msgs)
 
 
 # ===========================================================================
-# Test 8: Analyzer output directory empty (no .yaml files) produces BLOCKER
+# Test 8: code_understanding.yaml with empty change_requests dict produces BLOCKER
 # ===========================================================================
 
-def test_empty_analyzer_output_dir(tmp_path):
-    """analysis/analyzer_output/ exists but has no .yaml files. BLOCKER."""
+def test_understand_empty_change_requests(tmp_path):
+    """code_understanding.yaml with change_requests: {} should produce BLOCKER."""
     ws = tmp_path / "ws"
-    ao_dir = ws / "analysis" / "analyzer_output"
-    os.makedirs(str(ao_dir), exist_ok=True)
-    # Create a non-yaml file so the directory isn't empty on disk
-    (ao_dir / "readme.txt").write_text("placeholder")
+    _write_yaml(str(ws / "analysis" / "code_understanding.yaml"), {
+        "schema_version": "0.4.0",
+        "project_map": {"file.vb": {"functions": ["Func1"]}},
+        "entry_point": "Province/20260101/project.vbproj",
+        "change_requests": {},
+    })
 
-    result = validate_handoff(str(ws), phase="analyzer")
+    result = validate_handoff(str(ws), phase="understand")
     _assert_envelope(result, expect_passed=False)
     findings = result["findings"]
-    assert len(findings) == 1
-    assert findings[0]["severity"] == "BLOCKER"
-    assert "no .yaml files" in findings[0]["message"]
+    blockers = [f for f in findings if f["severity"] == "BLOCKER"]
+    assert len(blockers) == 1
+    assert "empty" in blockers[0]["message"].lower()
 
 
 # ===========================================================================
@@ -300,7 +324,7 @@ def test_intent_missing_capability(tmp_path):
         ],
     })
 
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=False)
     blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
     assert any("capability" in b["message"] for b in blockers)
@@ -318,7 +342,7 @@ def test_empty_intents_list(tmp_path):
         "intents": [],
     })
 
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=False)
     blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
     assert len(blockers) == 1
@@ -381,9 +405,9 @@ def test_auto_detect_only_checks_present_artifacts(tmp_path):
     # No other artifacts — auto-detect should only check intake
     result = validate_handoff(str(ws))
     _assert_envelope(result, expect_passed=True)
-    # All findings should be from intake->discovery phase
+    # All findings should be from intake->understand phase
     for f in result["findings"]:
-        assert f["phase"] == "intake\u2192discovery"
+        assert f["phase"] == "intake\u2192understand"
 
 
 # ===========================================================================
@@ -445,23 +469,29 @@ def test_multiple_missing_cr_fields(tmp_path):
 
 
 # ===========================================================================
-# Test 17: discovery_complete as string produces WARNING
+# Test 17: CR entry missing 'fub' in code_understanding.yaml produces WARNING
 # ===========================================================================
 
-def test_discovery_complete_wrong_type(tmp_path):
-    """discovery_complete as string should produce WARNING."""
+def test_understand_cr_missing_fub(tmp_path):
+    """A CR entry in code_understanding.yaml missing 'fub' should produce WARNING."""
     ws = tmp_path / "ws"
-    _write_yaml(str(ws / "analysis" / "code_discovery.yaml"), {
-        "workflow_id": "test-wf",
-        "discovery_complete": "yes",  # should be bool
-        "functions": [],
+    _write_yaml(str(ws / "analysis" / "code_understanding.yaml"), {
+        "schema_version": "0.4.0",
+        "project_map": {"file.vb": {"functions": ["Func1"]}},
+        "entry_point": "Province/20260101/project.vbproj",
+        "change_requests": {
+            "cr-001": {
+                # "fub" deliberately omitted
+                "target_file": "some_file.vb",
+            },
+        },
     })
 
-    result = validate_handoff(str(ws), phase="discovery")
+    result = validate_handoff(str(ws), phase="understand")
     _assert_envelope(result)
     warnings = [f for f in result["findings"] if f["severity"] == "WARNING"]
     assert len(warnings) == 1
-    assert "discovery_complete" in warnings[0]["message"]
+    assert "fub" in warnings[0]["message"]
 
 
 # ===========================================================================
@@ -502,31 +532,79 @@ def test_execution_order_dict_format(tmp_path):
 
 
 # ===========================================================================
+# Test 19b: execution_order.yaml as v0.4.0 dict with execution_sequence key
+# ===========================================================================
+
+def test_execution_order_v040_dict_format(tmp_path):
+    """v0.4.0 execution_order.yaml with 'execution_sequence' key should work."""
+    ws = tmp_path / "ws"
+    _write_yaml(str(ws / "plan" / "execution_order.yaml"), {
+        "plan_version": "3.0",
+        "execution_sequence": [
+            {"intent_id": "intent-001", "file": "file1.vb", "phase": 1},
+        ],
+        "file_copies": [],
+        "phases": [{"phase": 1, "intents": ["intent-001"]}],
+    })
+    _write_yaml(str(ws / "execution" / "file_hashes.yaml"), {"files": {}})
+
+    result = validate_handoff(str(ws), phase="planner")
+    _assert_envelope(result, expect_passed=True)
+    blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
+    assert len(blockers) == 0
+
+
+# ===========================================================================
+# Test 19c: execution_order.yaml as dict WITHOUT execution_sequence → BLOCKER
+# ===========================================================================
+
+def test_execution_order_dict_missing_sequence(tmp_path):
+    """v0.4.0 dict without execution_sequence/order key should produce BLOCKER."""
+    ws = tmp_path / "ws"
+    _write_yaml(str(ws / "plan" / "execution_order.yaml"), {
+        "plan_version": "3.0",
+        "file_copies": [],
+        "phases": [{"phase": 1}],
+        # Missing execution_sequence — this is the bug the Codex review found
+    })
+    _write_yaml(str(ws / "execution" / "file_hashes.yaml"), {"files": {}})
+
+    result = validate_handoff(str(ws), phase="planner")
+    _assert_envelope(result, expect_passed=False)
+    blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
+    assert any("execution_sequence" in b["message"] for b in blockers)
+
+
+# ===========================================================================
 # Test 20: Full workstream with specific phase check
 # ===========================================================================
 
 def test_full_workstream_specific_phase(tmp_path):
-    """Full workstream, checking only 'decomposer' phase. Zero findings."""
+    """Full workstream, checking only 'plan' phase. Zero findings."""
     ws = _build_full_workstream(tmp_path / "ws")
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=True)
     assert result["findings"] == []
 
 
 # ===========================================================================
-# Test 21: Analyzer output with .yml extension also accepted
+# Test 21: code_understanding.yaml with change_requests as list (wrong type) produces BLOCKER
 # ===========================================================================
 
-def test_analyzer_output_yml_extension(tmp_path):
-    """analyzer_output/ with .yml files should pass."""
+def test_understand_change_requests_wrong_type(tmp_path):
+    """change_requests as a list instead of dict in code_understanding.yaml should produce BLOCKER."""
     ws = tmp_path / "ws"
-    ao_dir = ws / "analysis" / "analyzer_output"
-    os.makedirs(str(ao_dir), exist_ok=True)
-    _write_yaml(str(ao_dir / "cr-001-analysis.yml"), {"cr_id": "cr-001"})
+    _write_yaml(str(ws / "analysis" / "code_understanding.yaml"), {
+        "schema_version": "0.4.0",
+        "project_map": {"file.vb": {"functions": ["Func1"]}},
+        "entry_point": "Province/20260101/project.vbproj",
+        "change_requests": [{"cr_id": "cr-001"}],  # should be a dict, not list
+    })
 
-    result = validate_handoff(str(ws), phase="analyzer")
-    _assert_envelope(result, expect_passed=True)
-    assert result["findings"] == []
+    result = validate_handoff(str(ws), phase="understand")
+    _assert_envelope(result, expect_passed=False)
+    blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
+    assert any("change_requests" in b["message"] and "dict" in b["message"] for b in blockers)
 
 
 # ===========================================================================
@@ -584,22 +662,22 @@ def test_requests_key_instead_of_change_requests(tmp_path):
 # ===========================================================================
 
 def test_intent_with_id_and_file_aliases(tmp_path):
-    """Decomposer uses 'id' and 'file' instead of 'intent_id' and 'target_file'. Should pass."""
+    """Plan agent uses 'id' and 'file' instead of 'intent_id' and 'target_file'. Should pass."""
     ws = tmp_path / "ws"
     _write_yaml(str(ws / "analysis" / "intent_graph.yaml"), {
         "workflow_id": "test-wf",
         "intents": [
             {
-                "id": "intent-001",        # Decomposer convention
+                "id": "intent-001",        # Plan agent convention
                 "cr_id": "cr-001",
                 "capability": "value_editing",
-                "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",  # Decomposer convention
+                "file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",  # Plan agent convention
                 "function": "GetBaseRate",
             },
         ],
     })
 
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=True)
     assert result["findings"] == [], f"Expected no findings, got: {result['findings']}"
 
@@ -624,7 +702,7 @@ def test_intent_missing_both_id_fields(tmp_path):
         ],
     })
 
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=False)
     blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
     assert any("intent_id" in b["message"] for b in blockers)
@@ -650,7 +728,7 @@ def test_intent_missing_both_file_fields(tmp_path):
         ],
     })
 
-    result = validate_handoff(str(ws), phase="decomposer")
+    result = validate_handoff(str(ws), phase="plan")
     _assert_envelope(result, expect_passed=False)
     blockers = [f for f in result["findings"] if f["severity"] == "BLOCKER"]
     assert any("target_file" in b["message"] for b in blockers)
@@ -697,20 +775,29 @@ def test_full_workstream_agent_convention_names(tmp_path):
         ],
     })
 
-    # Handoff 2: analysis/code_discovery.yaml
-    _write_yaml(str(ws / "analysis" / "code_discovery.yaml"), {
-        "workflow_id": "20260101-SK-Hab-rate-update",
-        "discovery_complete": True,
-        "functions": [{"name": "GetBaseRate", "file": "mod_Common_SKHab20260101.vb", "line": 400}],
+    # Handoff 2: analysis/code_understanding.yaml (v0.4.0 schema)
+    _write_yaml(str(ws / "analysis" / "code_understanding.yaml"), {
+        "schema_version": "0.4.0",
+        "project_map": {
+            "Saskatchewan/Code/mod_Common_SKHab20260101.vb": {
+                "functions": ["GetBaseRate"],
+            },
+        },
+        "entry_point": "Saskatchewan/20260101/Cssi.IntelliQuote.PORTSKHab20260101.vbproj",
+        "change_requests": {
+            "cr-001": {
+                "fub": {
+                    "function": "GetBaseRate",
+                    "file": "mod_Common_SKHab20260101.vb",
+                    "line_start": 400,
+                    "line_end": 500,
+                },
+                "target_file": "Saskatchewan/Code/mod_Common_SKHab20260101.vb",
+            },
+        },
     })
 
-    # Handoff 3: analysis/analyzer_output/
-    _write_yaml(str(ws / "analysis" / "analyzer_output" / "cr-001-analysis.yaml"), {
-        "cr_id": "cr-001",
-        "functions_analyzed": ["GetBaseRate"],
-    })
-
-    # Handoff 4: analysis/intent_graph.yaml (using agent conventions)
+    # Handoff 3: analysis/intent_graph.yaml (using agent conventions)
     _write_yaml(str(ws / "analysis" / "intent_graph.yaml"), {
         "workflow_id": "20260101-SK-Hab-rate-update",
         "intents": [
@@ -724,7 +811,7 @@ def test_full_workstream_agent_convention_names(tmp_path):
         ],
     })
 
-    # Handoff 5: plan/execution_order.yaml + execution/file_hashes.yaml
+    # Handoff 4: plan/execution_order.yaml + execution/file_hashes.yaml
     _write_yaml(str(ws / "plan" / "execution_order.yaml"), [
         {"intent_id": "intent-001", "file": "mod_Common_SKHab20260101.vb"},
     ])
