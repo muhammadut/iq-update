@@ -1408,10 +1408,12 @@ After init completes, show the developer the full workflow roadmap:
  commands with zero information loss -- all state is in the workstream
  files.
 {if codex found}
- Cross-model review: ENABLED (Codex CLI detected)
+ Independent review: GPT-5.4 via Codex CLI (cross-model)
    /iq-plan will run GPT-5.4 as an independent reviewer before Gate 1.
 {else}
- Cross-model review: not available (install Codex CLI to enable)
+ Independent review: Claude sub-agent (self-review)
+   /iq-plan will spawn a fresh Claude agent to review the plan before
+   Gate 1. Install Codex CLI for cross-model review with GPT-5.4.
 {end}
 
  Ready? Run /iq-plan to start your first rate change workflow.
