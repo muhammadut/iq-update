@@ -148,6 +148,7 @@ the whole init because one province is malformed).
    bash_path=$(which bash 2>/dev/null) && echo "BASH:$bash_path:$(bash --version 2>&1 | head -1)"
    jq_path=$(which jq 2>/dev/null) && echo "JQ:$jq_path:$(jq --version 2>&1)"
    curl_path=$(which curl 2>/dev/null) && echo "CURL:$curl_path:$(curl --version 2>&1 | head -1)"
+   codex_path=$(which codex 2>/dev/null) && echo "CODEX:$codex_path:$(codex --version 2>&1 | head -1)"
    ```
 
    **If no PYTHON_FOUND line in output**, also try listing conda envs dynamically:
@@ -282,6 +283,7 @@ python_cmd: {absolute path to python, or "NOT FOUND"}
 jq: {absolute path to jq, or "NOT FOUND"}
 bash: {absolute path to bash, or "NOT FOUND"}
 curl: {absolute path to curl, or "NOT FOUND"}
+codex: {absolute path to codex, or "NOT FOUND"}
 
 ## Agent Specs (absolute paths — use with Read tool)
 intake: {plugin_root}/agents/intake.md
@@ -532,6 +534,9 @@ tool_paths:
   jq: "{Full path to jq, e.g., /usr/bin/jq, or null}"
   bash: "{Full path to bash, e.g., /usr/bin/bash, or null}"
   curl: "{Full path to curl, e.g., /usr/bin/curl, or null}"
+  codex: "{Full path to codex, e.g., /opt/homebrew/bin/codex, or null}"
+  # If codex is available, /iq-plan will run an independent cross-model review
+  # using GPT-5.4 before presenting the plan at Gate 1.
 
 # -- Province Definitions -----------------------------------------------------
 # Each province has: code, full folder name, hab_code, LOBs, and SHARDCLASS presence.
@@ -1402,6 +1407,12 @@ After init completes, show the developer the full workflow roadmap:
  Each command runs in a fresh context window. You can /clear between
  commands with zero information loss -- all state is in the workstream
  files.
+{if codex found}
+ Cross-model review: ENABLED (Codex CLI detected)
+   /iq-plan will run GPT-5.4 as an independent reviewer before Gate 1.
+{else}
+ Cross-model review: not available (install Codex CLI to enable)
+{end}
 
  Ready? Run /iq-plan to start your first rate change workflow.
 ===========================================================================

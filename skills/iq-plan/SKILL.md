@@ -1447,6 +1447,182 @@ The Planner has NO developer interaction — it is fully automated.
 
 4. Validation passed. Update manifest: `state: "PLANNED"`, `updated_at: "{now}"`.
 
+4b. **CROSS-MODEL REVIEW (Optional — Codex CLI)**
+
+   Check if Codex CLI is available: `which codex`. If not found, skip to step 5.
+   If found, run an independent code review using GPT-5.4 with extended thinking.
+   This gives the developer a second opinion from a completely independent model
+   that reads the code fresh — no accumulated bias from the Claude pipeline.
+
+   **Why this exists:** Claude's pipeline builds understanding incrementally
+   (Intake → Discovery → Analyzer → Decomposer → Planner). Each agent passes
+   findings to the next. If an early agent misunderstands something (wrong function,
+   missed subtotal, overlooked caller), that error propagates. A second model
+   reading the code independently — with no inherited assumptions — catches errors
+   that the pipeline's sequential reasoning would miss.
+
+   **4b.1 Build the review prompt:**
+
+   Read these files and assemble them into a single prompt:
+   - `plan/execution_plan.md` — what Claude's pipeline plans to do
+   - `plan/execution_order.yaml` — the machine-readable execution plan
+   - `parsed/ticket_understanding.md` — what the ticket asks for
+   - `parsed/requests/cr-*.yaml` — the extracted change requests
+   - The actual source files listed in the execution plan (the VB.NET files being modified)
+
+   Write the assembled prompt to `plan/codex_review_prompt.md`:
+
+   ```markdown
+   # Independent Code Review Request
+
+   You are an independent code reviewer. A separate AI system has analyzed a
+   support ticket and produced an execution plan for modifying a VB.NET rating
+   engine codebase. Your job is to independently verify the plan is correct by
+   reading the actual code yourself.
+
+   ## Your Task
+
+   1. Read the TICKET UNDERSTANDING below to know what changes are requested
+   2. Read the EXECUTION PLAN below to see what the other system plans to do
+   3. Read the ACTUAL SOURCE FILES listed in the plan — trace the logic yourself
+   4. For each planned change, verify:
+      a. Is the correct function targeted? (trace CalcMain → target function)
+      b. Are ALL affected values covered? (check for subtotals, accumulators,
+         secondary calculations that use the same values)
+      c. Does the caller properly use the return value? (no post-processing overwrites)
+      d. Are there side effects? (other functions that read the changed values)
+      e. Will any existing function calls or references be broken?
+   5. Look for GAPS — things the plan should do but doesn't:
+      a. Missing subtotal/accumulation updates
+      b. Missing related functions (if liability changes, check extension too)
+      c. Missing resource ID or constant references
+      d. Values that flow to other calculations not covered by the plan
+
+   ## Codebase Structure
+
+   This is a TBW/IntelliQuote manufactured rating engine:
+   - Each province has LOB folders with dated version subfolders
+   - Code/ files are shared across versions (only changed files get new dated copies)
+   - Hab LOBs (Home, Condo, Tenant, FEC, Farm, Seasonal) share mod_Common files
+   - The .vbproj in each version folder references Code/ files via relative paths
+   - Array6() is a rate value function (accepts 1-14+ args, not just 6)
+   - CalcMain.vb contains the top-level calculation flow dispatching to functions
+
+   ## TICKET UNDERSTANDING
+
+   {content of parsed/ticket_understanding.md}
+
+   ## CHANGE REQUESTS
+
+   {content of each cr-*.yaml}
+
+   ## EXECUTION PLAN
+
+   {content of plan/execution_plan.md}
+
+   ## SOURCE FILES TO REVIEW
+
+   {for each unique source_file in execution_order.yaml, include its path}
+   Read each of these files yourself. Trace the calculation flow. Verify the plan.
+
+   ## Output Format
+
+   Respond with a structured review:
+
+   ### VERIFIED (plan is correct for these items)
+   - {item}: {why it's correct}
+
+   ### CONCERNS (potential issues found)
+   - {concern}: {what you found in the code, with line references}
+
+   ### GAPS (things the plan misses)
+   - {gap}: {what should be added and why, with code references}
+
+   ### VERDICT
+   One of: APPROVE / CONCERNS / REVISE
+   {brief justification}
+   ```
+
+   **4b.2 Run Codex CLI:**
+
+   ```bash
+   codex exec \
+     -m "gpt-5.4" \
+     -c 'reasoning.effort="xhigh"' \
+     -s read-only \
+     --ephemeral \
+     -C "{carrier_root}" \
+     -o "{workstream_dir}/plan/codex_review.md" \
+     "$(cat {workstream_dir}/plan/codex_review_prompt.md)"
+   ```
+
+   Flags explained:
+   - `-m "gpt-5.4"` — latest frontier model with strongest reasoning
+   - `-c 'reasoning.effort="xhigh"'` — maximum thinking depth
+   - `-s read-only` — Codex can read all files but cannot modify anything
+   - `--ephemeral` — no session persistence (clean review each time)
+   - `-C "{carrier_root}"` — working directory is the carrier root so Codex
+     can read all VB.NET source files independently
+   - `-o` — write the final response to a file we can read back
+
+   **Timeout:** Allow up to 5 minutes. If Codex times out or errors:
+   ```
+   [Cross-Model Review] Codex CLI did not complete. Proceeding without
+   independent review. Run /iq-plan again to retry.
+   ```
+   Do NOT block the pipeline on Codex failure.
+
+   **4b.3 Incorporate Codex findings:**
+
+   Read `plan/codex_review.md`. Parse the verdict:
+
+   **APPROVE:** Log it and proceed. Include a note in the plan:
+   ```
+   Cross-Model Review: GPT-5.4 independently verified this plan. No concerns.
+   ```
+
+   **CONCERNS:** Read each concern. For each one:
+   1. Investigate independently — read the file and line Codex references
+   2. If the concern is valid: add it to `plan/execution_plan.md` in a new
+      "Cross-Model Review Findings" section, and add to the plan's warnings
+   3. If the concern is NOT valid (Codex misread the code): note it as
+      "reviewed and dismissed" with a brief reason
+
+   **REVISE:** Read each gap Codex identified. For each one:
+   1. Investigate independently — trace the code path Codex describes
+   2. If the gap is real (e.g., missing subtotal update):
+      - Record it in manifest.yaml → `codex_findings`
+      - Add a prominent warning to `plan/execution_plan.md`:
+        ```
+        CROSS-MODEL REVIEW — GAP FOUND:
+          {description of what Codex found}
+          Source: {file}:{line}
+          Impact: {what would happen if this is not addressed}
+        ```
+      - Do NOT automatically re-run the pipeline. Present the finding to the
+        developer at Gate 1 and let them decide
+   3. If the gap is not real: note "reviewed and dismissed" with reason
+
+   **4b.4 Update the plan file:**
+
+   If Codex found valid concerns or gaps, append a "Cross-Model Review" section
+   to `plan/execution_plan.md`:
+
+   ```markdown
+   ---
+   ## Cross-Model Review (GPT-5.4)
+
+   An independent model reviewed this plan against the actual source code.
+
+   **Verdict:** {APPROVE | CONCERNS | REVISE}
+
+   **Findings:**
+   {list of valid concerns/gaps with code references}
+
+   **Dismissed:**
+   {list of concerns Claude investigated and found not applicable, with reasons}
+   ```
+
 5. Read `plan/execution_plan.md` and present it to the developer at Gate 1.
 
 **Present the execution plan to the developer (GATE 1):**
