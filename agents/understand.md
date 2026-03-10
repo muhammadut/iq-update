@@ -1492,15 +1492,27 @@ caller_chain_summary: |
   Fix inside target function will be NULLIFIED unless caller is also fixed.
 ```
 
-6. **Transitive caller check:** Walk up the call chain a maximum of 3 levels:
+6. **Transitive caller check:** Walk up the call chain until you reach the top
+(CalcMain/TotPrem) or find a problem. Do NOT impose a fixed level limit — trace
+the full chain. Premium values often flow through 4-6 levels of indirection
+(carrier code → interface wrapper → shared framework → implementation → totals).
 
 ```
-For level in 0..2:
+current = target_function
+level = 0
+WHILE current has a caller AND level < 10:  # safety cap only
   Check caller at this level for competing writes
   IF risk is HIGH: STOP — found the problem
   IF no more callers: STOP — reached top of chain
+  IF caller is in shared framework (outside carrier repo): KEEP GOING
+     — use parser on the shared file, do not stop at the carrier boundary
   Move up: caller becomes the new target
+  level += 1
 ```
+
+**Do not stop at the carrier repo boundary.** If the call chain leads into
+`Cssi.Net/Components/` or other shared TBW framework code, follow it.
+The parser works on any .vb file — use it on shared code just like carrier code.
 
 7. **ByRef parameter detection:** After the call site, check for function calls
 that pass result_variable as an argument:
@@ -2042,6 +2054,45 @@ IF all accounted for:
                are in the target list. No hidden blast radius.
 ```
 
+5. **Shared framework callee scan (BEYOND carrier boundary):**
+For every function the plan will modify, trace ALL outbound calls (callees)
+to check if they live in shared framework code outside the carrier:
+
+```
+For each CR target function:
+  callee_list = parser function.calls[]
+  For each callee in callee_list:
+    callee_file = find file containing callee
+    IF callee_file is OUTSIDE carrier_root:
+      # This is shared TBW framework code — trace into it
+      callee_data = {vb_parser} parse {callee_file}
+      callee_func = {vb_parser} function {callee_file} {callee.name}
+      READ callee function body
+
+      # Check for side effects:
+      #   - Object field assignments (obj.FIELD = value)
+      #   - Collection mutations (AddToArray, .Add)
+      #   - Further delegation (calls to another shared function)
+      # If callee delegates further, follow that too (recursive)
+
+      Record in blast_radius.shared_framework_calls:
+        - function: {callee.name}
+          file: {callee_file}
+          location: "shared_framework"
+          side_effects: [{list of stored fields, collections, etc.}]
+          further_delegates_to: [{next-level callees if any}]
+
+      # Flag for developer:
+      [Understand] Function {target} calls {callee.name} in shared framework
+                   ({callee_file}). Side effects: {list}.
+                   These affect downstream consumers.
+```
+
+This catches the ticket 21333 pattern: `AddToPPVCoverageArray` calls
+`oIQCommon.AddPolicyTermToPPVCoverageArray` → delegates to shared framework
+→ stores to `PREMIUMCOMP` → read by Totals function. Without this scan,
+the stored field dependency is invisible.
+
 ### Step U.15: Check for Cross-Province Shared Files
 
 **Action:** Verify no CR targets a cross-province shared file.
@@ -2127,6 +2178,8 @@ Upgrade to MEDIUM if ANY of:
 Upgrade to HIGH if ANY of:
   - Cross-province shared file warnings
   - Hidden blast radius (reverse lookup found unaccounted projects)
+  - Shared framework callee found (calls into code outside carrier repo)
+  - stored_field_propagation or hidden_consumer hazard detected
   - 10+ CRs total
   - Any CR targeting a file with 3,000+ lines
   - Rule dependency warnings

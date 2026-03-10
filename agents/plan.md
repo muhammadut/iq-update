@@ -990,9 +990,26 @@ record it in the intent's `assumptions` list. Examples:
 
 These assumptions flow through to the execution plan and review pipeline.
 
-### Step P.4: Caller Analysis and Additional Intent Generation
+### Step P.4: Caller Analysis, Side-Effect Verification, and Additional Intent Generation
 
-**Action:** Check each intent's understanding data for caller_analysis warnings.
+**Action:** Independently verify the Understand agent's caller analysis using the
+VB parser, then check for stored field propagation and hidden consumer hazards.
+
+**PARSER MANDATE:** The Plan agent MUST NOT blindly trust Understand's output for
+caller analysis. When P.4 needs to verify a caller relationship, a stored field,
+or a side effect, it MUST run the parser itself:
+- `{vb_parser} function {file} {function_name}` — to verify caller/callee structure
+- `{vb_parser} parse {file}` — to verify file structure
+
+Read the `vb_parser` path from paths.md (already loaded by the orchestrator in
+Check 1). This independent verification catches anything Understand may have missed.
+
+**When to use the parser in P.4:**
+- Verifying caller chain relationships (does caller X really call target Y?)
+- Checking ByVal/ByRef parameter passing (is this parameter really ByVal?)
+- Tracing stored field propagation (does the called function really store to a field?)
+- Any time the Plan agent reads VB.NET code for any reason
+
 When the Understand agent detected that a caller OVERWRITES the return value of
 a target function, the Plan agent MUST produce an additional flow_modification
 intent to fix the caller.

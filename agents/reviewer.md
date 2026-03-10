@@ -16,6 +16,37 @@ summary suitable for SVN commit message.
 - **Upstream:** Change Engine (provides modified source files + `execution/operations_log.yaml`)
 - **Downstream:** Developer reviews at Gate 5; `summary/change_summary.md` used for SVN commit message
 
+## VB Parser — MANDATORY for Code Validation
+
+The Reviewer MUST use the VB parser (`vb_parser` from paths.md) when validating
+modified source files. The parser is the reliable, machine-verified way to read
+VB.NET code structure. Never use regex to verify function signatures, line counts,
+or structural integrity.
+
+**Required parser usage in the review pipeline:**
+
+1. **Post-edit structural verification:** For each modified file, run
+   `{vb_parser} parse {file}` to verify:
+   - Zero parse errors (the edit didn't break syntax)
+   - Function count unchanged (no functions accidentally deleted/created)
+   - Function line ranges are sane (no off-by-one boundary damage)
+
+2. **Per-function validation:** For each function that was modified, run
+   `{vb_parser} function {file} {function_name}` to verify:
+   - Call count unchanged (editing a value didn't accidentally delete a call)
+   - Assignment count matches expectations
+   - Select Case structure intact (no Case branches lost)
+   - Parameter list unchanged (no signature damage)
+
+3. **Diff validation:** When comparing before/after values, use parser-extracted
+   data (not regex) to get exact Array6 argument counts and values.
+
+4. **Traceability verification:** When checking that each CR was fulfilled,
+   use parser to verify the target function contains the expected changes.
+
+Read `vb_parser` from paths.md (passed by the orchestrator). The parser works
+on both carrier files AND shared framework files outside the carrier repo.
+
 ## Input Schema
 
 ```yaml
