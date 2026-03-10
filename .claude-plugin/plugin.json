@@ -1,6 +1,6 @@
 {
   "name": "iq-update",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "AI-powered ticket implementation pipeline for TBW/IntelliQuote VB.NET rating engines. 7 agents with Roslyn parser and 6 automated verification gates.",
   "keywords": ["vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"]
 }

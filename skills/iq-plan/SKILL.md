@@ -1380,6 +1380,13 @@ The Plan agent has NO developer interaction — it is fully automated.
 
 4b. **INDEPENDENT CODE REVIEW — Cross-Model or Self-Review**
 
+   **CONTEXT PROTECTION RULE:** The orchestrator must NEVER investigate code
+   inline during this step. ALL code investigation (tracing call paths, reading
+   VB.NET files, searching for functions) MUST be delegated to a sub-agent via
+   the Agent tool. The orchestrator's job is to READ the review output, DELEGATE
+   verification to a sub-agent, and RECORD the findings. Investigating inline
+   fills the main context window and triggers compaction, losing pipeline state.
+
    An independent reviewer reads the actual VB.NET source code from scratch,
    traces the calculation flow, and verifies the plan is correct. This catches
    errors that the pipeline's sequential reasoning would miss — missed subtotals,
@@ -1633,14 +1640,25 @@ The Plan agent has NO developer interaction — it is fully automated.
    ```
 
    **CONCERNS:** Read each concern. For each one:
-   1. Investigate independently — read the file and line the reviewer references
+   1. **Spawn a sub-agent** (Agent tool, subagent_type: "general-purpose") to
+      verify the concern. Give it: the concern text, the file path, the line
+      number, the `vb_parser` path from paths.md, and the `carrier_root`. The
+      sub-agent uses the VB parser + Read to check if the concern is real, then
+      returns a brief verdict (valid/dismissed + evidence).
+      **Do NOT investigate inline — see CONTEXT PROTECTION RULE above.**
    2. If the concern is valid: add it to `plan/execution_plan.md` in a new
       "Independent Review Findings" section, and add to the plan's warnings
    3. If the concern is NOT valid (reviewer misread the code): note it as
-      "reviewed and dismissed" with a brief reason
+      "reviewed and dismissed" with the sub-agent's reason
 
    **REVISE:** Read each gap the reviewer identified. For each one:
-   1. Investigate independently — trace the code path described
+   1. **Spawn a sub-agent** (Agent tool, subagent_type: "general-purpose") to
+      verify the gap. Give it: the gap description, all file paths and function
+      names mentioned, the `vb_parser` path from paths.md, and `carrier_root`.
+      The sub-agent traces the code path using the VB parser + Read, checks if
+      the gap is real, and returns: verdict (real/dismissed), evidence (code
+      snippets, line numbers), and impact assessment.
+      **Do NOT investigate inline — see CONTEXT PROTECTION RULE above.**
    2. If the gap is real (e.g., missing subtotal update, removed function ref):
       - Record it in manifest.yaml → `independent_review_findings`
       - Add a prominent warning to `plan/execution_plan.md`:
@@ -1652,7 +1670,7 @@ The Plan agent has NO developer interaction — it is fully automated.
         ```
       - Do NOT automatically re-run the pipeline. Present the finding to the
         developer at Gate 1 and let them decide
-   3. If the gap is not real: note "reviewed and dismissed" with reason
+   3. If the gap is not real: note "reviewed and dismissed" with the sub-agent's reason
 
    **4b.4 Write the review section to the plan:**
 

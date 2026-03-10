@@ -7,7 +7,7 @@
 # Updated: 2026-03-10
 
 version: "2.0"
-pipeline_version: "0.5.1"
+pipeline_version: "0.5.2"
 
 # ──────────────────────────────────────────────────────────────────────
 # Identity Rules — canonical naming and precision contracts
