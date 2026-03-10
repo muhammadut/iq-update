@@ -18,6 +18,33 @@ carrier structure (provinces, LOBs, Code/ directories), uses the Pattern Library
 pre-indexed function data, and optionally saves findings that feed back into the
 Understand agent automatically.
 
+## Execution Model: ALWAYS Delegate to Sub-Agent
+
+**CRITICAL:** ALL code investigations MUST run in a sub-agent, never inline in the
+main context window. This applies to:
+- Explicit `/iq-investigate` calls
+- Ad-hoc developer questions about functions, call chains, or code structure
+  (e.g., "explain this function", "trace where this value comes from", "what does X do")
+
+**Why:** Investigations involve many parser calls and file reads that fill the context
+window rapidly. Running inline causes compaction and lost context for the developer's
+primary workflow.
+
+**How the orchestrator handles it:**
+```
+1. Developer asks a code question (via /iq-investigate or conversationally)
+2. Orchestrator reads paths.md to get vb_parser and carrier_root
+3. Orchestrator launches a sub-agent (Agent tool, subagent_type: "general-purpose"):
+   - Passes: the question, vb_parser path, carrier_root path, paths.md content
+   - The sub-agent loads this SKILL.md and executes Steps 0-6 in a fresh context
+   - The sub-agent does ALL parser calls, file reads, and tracing
+4. Sub-agent returns a concise report
+5. Orchestrator presents the findings to the developer
+```
+
+The main context window only sees the question and the final report — not the
+50+ tool calls the investigation required.
+
 ## Trigger
 
 Slash command: `/iq-investigate`
@@ -183,6 +210,29 @@ directories). If scope is detected, narrow the search:
   {Province}/Code/
   {Province}/{LOB}/{latest_version}/
 ```
+
+5. **Deep tracing scope (ALWAYS ON):** Investigation does NOT stop at the carrier
+   directory boundary. When tracing a call chain that leads to shared TBW framework
+   code, follow it:
+
+   - **Shared components:** The carrier's .vbproj files reference shared code via
+     relative paths (e.g., `..\..\..\..\CSSI\Cssi.Net\Components\`). Parse the
+     .vbproj to discover these paths, then trace into them.
+   - **Common locations for shared code:**
+     - `Cssi.Net/Components/Cssi.Legacy/` — TbwIQCommon, shared interfaces
+     - `Cssi.Net/Components/Cssi.Shared/` — shared engine classes
+     - `{carrier_root}/../` parent directories — cross-carrier shared modules
+   - **The parser works on ANY .vb file** — not just carrier files. Run
+     `{vb_parser} parse` and `{vb_parser} function` on shared framework files
+     just like carrier files.
+   - **Report the full chain** — show the developer every hop:
+     ```
+     Carrier code: AddToPPVCoverageArray() in mod_SumRep_ONAuto
+       → oIQCommon.AddPolicyTermToPPVCoverageArray() in cIQCommon.vb [SHARED]
+         → PolicyTerm_AddToPPVCoverageArray() in cIQCommonImpl.vb [SHARED]
+     ```
+   - If a function is in shared code that the plugin CANNOT modify (Rule 5),
+     note this clearly: `[SHARED — READ ONLY, plugin cannot modify]`
 
 ### Step 3: Execute Investigation
 
