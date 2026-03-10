@@ -1390,12 +1390,20 @@ The Plan agent has NO developer interaction — it is fully automated.
 
    **4b.1 Build the review prompt:**
 
+   Resolve these values from paths.md (already loaded in Check 1):
+   - `{vb_parser}` — absolute path to vb-parser.exe
+   - `{carrier_root}` — absolute path to the carrier root
+
    Read these files and assemble them into a single markdown prompt:
    - `plan/execution_plan.md` — what Claude's pipeline plans to do
    - `plan/execution_order.yaml` — the machine-readable execution plan
    - `parsed/ticket_understanding.md` — what the ticket asks for
    - `parsed/requests/cr-*.yaml` — the extracted change requests
    - The actual source files listed in the execution plan (the VB.NET files being modified)
+
+   **Substitute all `{vb_parser}` placeholders** in the prompt with the actual
+   absolute path before writing. The reviewer (Codex or Claude) will use this path
+   to run parser commands against the source files.
 
    Write the assembled prompt to `plan/cross_review_prompt.md`:
 
@@ -1413,9 +1421,23 @@ The Plan agent has NO developer interaction — it is fully automated.
 
    1. Read the TICKET UNDERSTANDING below to know what changes are requested
    2. Read the EXECUTION PLAN below to see what the other system plans to do
-   3. **READ THE ACTUAL SOURCE FILES.** This is the critical step:
-      - Open CalcMain.vb and trace the full calculation flow
-      - For each function the plan targets, read the ENTIRE function body
+   3. **READ THE ACTUAL SOURCE FILES using the VB parser.** This is the critical step.
+      Use the parser binary to get machine-verified structural data — do NOT rely
+      solely on reading raw VB.NET files by eye. The parser gives you exact function
+      boundaries, call inventories, Array6 argument counts, and Select Case structures.
+
+      **Parser commands (use these):**
+      ```
+      {vb_parser} parse {file_path}           -- full file structure (functions, calls, constants)
+      {vb_parser} function {file_path} {name}  -- single function detail (calls, assignments, cases)
+      ```
+
+      For each target file:
+      - Run `{vb_parser} parse {file}` to get the file structure
+      - Run `{vb_parser} function {file} {function_name}` for each target function
+      - Trace CalcMain.vb → target function using the parser's call inventory
+      - For each function the plan targets, verify the parser's call/assignment counts
+        match the plan's intent count
       - Read the CALLER of each target function — trace what happens to the
         return value after the call
       - Read any RELATED functions (subtotals, accumulators, secondary calcs)
@@ -1519,12 +1541,15 @@ The Plan agent has NO developer interaction — it is fully automated.
    - `-c 'reasoning.effort="xhigh"'` — maximum thinking depth
    - `--full-auto` — never ask for permissions, auto-approve all file reads
      and shell commands in a sandboxed environment (Codex equivalent of YOLO
-     mode). The reviewer needs to freely read files, run `find`, `grep`, etc.
-     without getting stuck on permission prompts.
+     mode). The reviewer needs to freely read files, run the VB parser, `find`,
+     `grep`, etc. without getting stuck on permission prompts.
    - `--ephemeral` — no session persistence (fresh context every time)
    - `-C "{carrier_root}"` — working directory is the carrier root so Codex
      can navigate and read all VB.NET source files independently
    - `-o` — write the final response as markdown to a file we read back
+
+   The prompt includes the absolute path to vb-parser.exe. Codex can run it
+   directly via shell commands (`--full-auto` enables this).
 
    **PATH B — Claude sub-agent (self-review fallback):**
 
@@ -1543,6 +1568,10 @@ The Plan agent has NO developer interaction — it is fully automated.
    It only sees the plan, the ticket, and the raw source files. Its job is to
    read the actual code at the highest reasoning level and trace the logic
    independently — the same thing Codex would do.
+
+   The prompt includes the absolute path to vb-parser.exe. The sub-agent can
+   run it via the Bash tool to get machine-verified structural data (function
+   boundaries, call inventories, Array6 counts) instead of eyeballing raw VB.NET.
 
    Write the sub-agent's response to `plan/cross_review.md`.
 
