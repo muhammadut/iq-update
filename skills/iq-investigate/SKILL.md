@@ -303,15 +303,21 @@ Recommendation: Use Pattern A ({accessor_pattern})
 
 1. Extract the function/class/variable name from the question
 2. **If Pattern Library is available:** Look up `functions[name]` for file and line
-3. **Verify with live scan:** Grep for the definition pattern:
-   - Functions/Subs: `^\s*(Public|Private|Friend)?\s*(Shared)?\s*(Function|Sub)\s+{name}`
-   - Constants: `\bConst\s+{name}\b`
-   - Variables: `\b(Dim|Public|Private)\s+{name}\b`
-4. **Parser deep-dive:** For each file containing a definition, run:
-   - `{vb_parser} parse {file}` — get full file structure (all functions, their line ranges)
-   - `{vb_parser} function {file} {name}` — get the target function's complete structure:
-     calls made, variables assigned, Select Case blocks, parameter list, line range.
-   This gives machine-verified data about the function, not just its location.
+3. **Find candidate files:** Grep `.vb` files in scope for `\b{name}\b` to locate
+   which files contain the name. This is file discovery only — do NOT use regex
+   patterns to parse function signatures.
+4. **Parser analysis (MANDATORY):** For EVERY candidate file, run the parser:
+   - `{vb_parser} parse {file}` — get full file structure (all functions, their
+     line ranges, signatures, parameters)
+   - `{vb_parser} function {file} {name}` — get the target function's complete
+     structure: calls made, variables assigned, Select Case blocks, parameter
+     list, line range.
+   - The parser output is the source of truth for function definitions — it handles
+     Partial modules, interface implementations (IIQCommon_ prefix), Shared members,
+     and overloaded functions correctly. Never rely on regex to determine function
+     boundaries or signatures.
+   - **Read the actual function body** with the Read tool using the parser's line
+     range. Parser gives structure, Read gives the actual code for semantic understanding.
 5. Show all definitions found (there may be multiple across provinces/dates):
 
 ```
@@ -662,29 +668,36 @@ Together they ensure the plugin gets smarter with every investigation.
 
 When executing this skill, use these specific tool strategies:
 
-### VB Parser — PRIMARY structural tool
-The VB parser (`vb_parser` from paths.md) is the go-to tool for understanding
-VB.NET code structure. Use it BEFORE reading files manually:
+### VB Parser — MANDATORY structural tool
+The VB parser (`vb_parser` from paths.md) is **mandatory** for ALL code reading.
+Do NOT use regex patterns to parse VB.NET function signatures, boundaries, or
+structure. Do NOT rely on grep to determine what a function does. The parser is
+the reliable, machine-verified way to read VB.NET code.
 
 ```
 {vb_parser} parse {file_path}            → full file structure (all functions, line ranges, constants)
 {vb_parser} function {file_path} {name}  → single function detail (calls, assignments, cases, params)
 ```
 
-**Strategy: Parser first, Read second.**
-1. Run the parser to get machine-verified structure (exact line ranges, call counts,
-   assignment inventories, Select Case block counts)
-2. Read the specific lines Claude needs for semantic understanding (business logic,
-   intent, relationships between values)
-3. Combine parser data + Claude reasoning for the answer
+**Strategy: Parser + Read. Always both. In that order.**
+1. **Parser first** — run it on every .vb file you need to understand. It gives
+   machine-verified structure: exact line ranges, call inventories, assignment
+   lists, Select Case block counts, parameter types. This is the ground truth.
+2. **Read second** — use the parser's line range to read the specific function body.
+   Claude reads for semantic understanding (business logic, intent, relationships).
+3. **Combine** — parser data + Claude reasoning = reliable answer.
 
-The parser catches things grep misses: functions split across partial modules,
-implicit line continuations, calls inside nested If/Select Case blocks, Array6
-argument counts. It also avoids grep false positives from comments, strings, and
-naming collisions.
+The parser handles things that grep/regex CANNOT: functions split across Partial
+modules, implicit VB.NET line continuations, calls inside nested If/Select Case
+blocks, interface implementation prefixes (IIQCommon_), Array6 argument counts,
+overloaded functions with different signatures.
+
+**Grep is for file discovery ONLY** — finding which files contain a name. Once
+you have the file, always use the parser to understand what's in it.
 
 **If paths.md is missing (degraded mode):** Fall back to Grep/Read only. Note
-in the report: "Parser unavailable — results based on text search only."
+in the report: `"⚠ Parser unavailable — results based on text search only.
+Structural accuracy is not guaranteed. Run /iq-init to enable parser."`
 
 ### Pattern Library lookups
 Use the Read tool to read `.iq-workstreams/pattern-library.yaml`. For specific
