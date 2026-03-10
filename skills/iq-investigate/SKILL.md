@@ -70,22 +70,27 @@ active workstream. It works in three modes:
 ### Step 0: Load Context
 
 1. Read `.iq-workstreams/paths.md` if it exists — this gives you `plugin_root`,
-   `carrier_root`, `python_cmd`, and all resolved paths. Use these for the session.
-   Then check if `.iq-workstreams/config.yaml` exists. If yes, load carrier metadata
-   (provinces, LOBs, naming patterns, codebase root).
+   `carrier_root`, `python_cmd`, `vb_parser`, and all resolved paths. Use these
+   for the session. Then check if `.iq-workstreams/config.yaml` exists. If yes,
+   load carrier metadata (provinces, LOBs, naming patterns, codebase root).
 
-2. Check if `.iq-workstreams/pattern-library.yaml` exists. If yes, load it for
+2. **Load the VB parser path** from paths.md (`vb_parser` key). The parser is
+   the primary structural analysis tool for ALL investigation types. If paths.md
+   exists but `vb_parser` is missing, fall back to grep-only with a warning.
+
+3. Check if `.iq-workstreams/pattern-library.yaml` exists. If yes, load it for
    instant lookups. If not, note that direct scanning will be used.
 
-3. Check if an active workstream exists (look for non-archived directories in
+4. Check if an active workstream exists (look for non-archived directories in
    `.iq-workstreams/changes/` with `manifest.yaml` where `state != COMPLETED`).
    If yes, record the workstream path for potential finding saves.
 
-4. Report context to the developer:
+5. Report context to the developer:
    ```
    ===========================================================================
     /iq-investigate — Codebase Investigation
    ===========================================================================
+    VB Parser:       {Available (Roslyn) | Not found — grep-only mode}
     Pattern Library: {Available (N functions indexed) | Not found — using direct scan}
     Config:          {Loaded (carrier: X, N provinces) | Not found — scanning from cwd}
     Workstream:      {active-ws-name | None (findings won't be saved)}
@@ -190,7 +195,11 @@ Execute the appropriate investigation type.
    call_sites count and status (DEAD/ACTIVE/HIGH_USE)
 3. **Verify with live scan:** Grep all `.vb` files in scope for `\b{name}\b`
 4. Exclude definition lines and commented lines
-5. Group results by file and show:
+5. **Parser enrichment:** Once the definition file is found, run
+   `{vb_parser} function {file} {name}` to get the function's full structure —
+   call inventory, assignments, Select Case blocks, parameter list. Include this
+   in the report so the developer sees what the function does, not just where it's called.
+6. Group results by file and show:
 
 ```
 [Investigate] Call Site Search: {name}
@@ -248,7 +257,12 @@ Recommendation: Use Pattern A ({accessor_pattern})
    - Functions/Subs: `^\s*(Public|Private|Friend)?\s*(Shared)?\s*(Function|Sub)\s+{name}`
    - Constants: `\bConst\s+{name}\b`
    - Variables: `\b(Dim|Public|Private)\s+{name}\b`
-4. Show all definitions found (there may be multiple across provinces/dates):
+4. **Parser deep-dive:** For each file containing a definition, run:
+   - `{vb_parser} parse {file}` — get full file structure (all functions, their line ranges)
+   - `{vb_parser} function {file} {name}` — get the target function's complete structure:
+     calls made, variables assigned, Select Case blocks, parameter list, line range.
+   This gives machine-verified data about the function, not just its location.
+5. Show all definitions found (there may be multiple across provinces/dates):
 
 ```
 [Investigate] Definition Search: {name}
@@ -288,14 +302,24 @@ Verdict: {
 #### Type 5: VALUE TRACE
 
 1. Extract the variable name and optional function/file context from the question
-2. Find the variable's assignment(s) in the target function or file:
-   - Direct assignment: `{varname} = {expression}`
-   - Parameter: function parameter list
+2. **Parser-first approach:** If the target function is known, run
+   `{vb_parser} function {file} {function_name}` to get the full assignment
+   inventory. The parser lists every variable assignment with line numbers — use
+   this to find where `{varname}` is set, rather than grepping for `{varname} =`.
+3. Find the variable's assignment(s) in the target function or file:
+   - Direct assignment: `{varname} = {expression}` (confirmed by parser assignments)
+   - Parameter: function parameter list (confirmed by parser parameters)
    - Loop variable: `For Each {varname} In {collection}`
-3. For each assignment, trace one level deeper:
-   - If assigned from a function call, show that function's definition
+4. For each assignment, trace one level deeper:
+   - If assigned from a function call, run `{vb_parser} function` on that function
+     to get its return value assignments and call chain
    - If assigned from a collection iteration, show how the collection is accessed
-4. Show the trace chain:
+5. **Cross-function tracing:** Use the parser's call inventory to follow the chain:
+   - `{vb_parser} function {file} {caller}` → see what calls the target function
+   - `{vb_parser} function {file} {callee}` → see what the target function calls
+   This builds an accurate trace without relying on grep, which misses indirect
+   calls and produces false positives from comments.
+6. Show the trace chain:
 
 ```
 [Investigate] Value Trace: {varname}
@@ -588,6 +612,30 @@ Together they ensure the plugin gets smarter with every investigation.
 
 When executing this skill, use these specific tool strategies:
 
+### VB Parser — PRIMARY structural tool
+The VB parser (`vb_parser` from paths.md) is the go-to tool for understanding
+VB.NET code structure. Use it BEFORE reading files manually:
+
+```
+{vb_parser} parse {file_path}            → full file structure (all functions, line ranges, constants)
+{vb_parser} function {file_path} {name}  → single function detail (calls, assignments, cases, params)
+```
+
+**Strategy: Parser first, Read second.**
+1. Run the parser to get machine-verified structure (exact line ranges, call counts,
+   assignment inventories, Select Case block counts)
+2. Read the specific lines Claude needs for semantic understanding (business logic,
+   intent, relationships between values)
+3. Combine parser data + Claude reasoning for the answer
+
+The parser catches things grep misses: functions split across partial modules,
+implicit line continuations, calls inside nested If/Select Case blocks, Array6
+argument counts. It also avoids grep false positives from comments, strings, and
+naming collisions.
+
+**If paths.md is missing (degraded mode):** Fall back to Grep/Read only. Note
+in the report: "Parser unavailable — results based on text search only."
+
 ### Pattern Library lookups
 Use the Read tool to read `.iq-workstreams/pattern-library.yaml`. For specific
 function lookups, use Grep with the function name on the YAML file (faster than
@@ -595,7 +643,9 @@ reading the entire file for large libraries).
 
 ### Code file scanning
 Use Grep for searching `.vb` files. Use Glob to find files matching patterns.
-Run multiple Grep calls in parallel when searching across provinces.
+Run multiple Grep calls in parallel when searching across provinces. The parser
+complements grep — use grep for codebase-wide searches, parser for per-file/
+per-function deep dives.
 
 ### Scope narrowing
 When province/LOB is detected, construct the specific Code/ directory path from

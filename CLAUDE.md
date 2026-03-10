@@ -143,6 +143,7 @@ workstream files. These six commands cover the full workflow.
 19. **Windows path safety** -- NEVER use `sed`, `awk`, or bash string manipulation for file paths. Use Python `os.path` for path operations, Python `xml.etree.ElementTree` for XML parsing, and Python `os.path.exists()` for file existence checks.
 20. **Python-only for scripting** -- when generating YAML, parsing files, or processing data, ALWAYS use Python (with the `python_cmd` from config.yaml). NEVER use Perl, Ruby, Node, or other scripting languages. Python + PyYAML is the only verified runtime.
 21. **Contract registry** -- `contracts/contract_registry.yaml` defines all inter-agent artifact schemas. It is the source of truth. Inline schema examples in agent specs are illustrative only -- if they conflict with the registry, the registry wins.
+22. **Parser-first for VB.NET questions** -- When the developer asks about a function, variable, call chain, or code structure (even outside a `/iq-*` command), use the VB parser (`vb_parser` from paths.md) as the primary tool: `{vb_parser} parse {file}` for file structure, `{vb_parser} function {file} {name}` for function detail. Combine parser output with Read for semantic understanding. The parser gives exact line ranges, call inventories, Array6 counts, and Select Case structures — never rely on grep alone for structural questions about VB.NET code.
 
 ## Province Codes
 
