@@ -312,21 +312,48 @@ Resume from the next operation in plan/execution_order.yaml
 When no resume is needed (or the developer chose "start new"), set up a fresh
 workflow.
 
-### Step 4.1: Ticket-Driven Workstream Naming
+### Step 4.0: Reviewer Choice
 
-Ask the developer for a ticket reference:
+Before starting the workflow, ask the developer ONE question about the review
+strategy. This determines how the independent plan review (Step 4b) will run.
 
 ```
-Ticket reference? You can:
-  - Enter a ticket ID or URL to auto-fetch from Azure DevOps (e.g., 24778)
-  - Enter a reference key (e.g., JIRA-122)
-  - Press Enter for ad-hoc
+Review strategy for this ticket?
+
+  1. Codex CLI (GPT-5.4) — thorough cross-model review (recommended for complex tickets)
+     ⏱ Takes 10-20 minutes. A completely independent model reads your code from scratch.
+
+  2. Claude built-in reviewer — faster independent review (good for medium-complexity tickets)
+     ⏱ Takes 2-3 minutes. Fresh Claude context with no pipeline artifacts.
+
+Enter 1 or 2 (default: 1):
+>
+```
+
+Store the choice:
+- `1` (or Enter) → `reviewer_mode: "codex"` — will use Codex CLI at Step 4b
+- `2` → `reviewer_mode: "claude"` — will use Claude sub-agent at Step 4b
+
+**If Codex CLI is not available** (codex path from paths.md is "NOT FOUND"):
+Skip this question entirely — auto-set `reviewer_mode: "claude"` and print:
+```
+Review: Claude built-in reviewer (Codex CLI not installed)
+```
+
+The choice is stored in the workstream's `manifest.yaml` and used at Step 4b.0.
+
+### Step 4.1: Ticket-Driven Workstream Creation
+
+Ask the developer for a ticket number — one question, then auto-create everything:
+
+```
+Ticket number (or press Enter for ad-hoc):
 >
 ```
 
 **Process the response:**
 
-**If ticket reference provided (ticketed mode):**
+**If ticket number provided (ticketed mode):**
 1. Normalize the key: extract alphanumeric + hyphens, lowercase
    - `24778` -> key: `24778`
    - `DEVOPS-24778` -> key: `devops-24778`
@@ -360,33 +387,26 @@ Ticket reference? You can:
      that the description omits. The Intake agent needs ALL of this to understand
      the ticket correctly.
 
-     Show the developer:
+     Print a brief confirmation (NO confirmation prompt — just proceed):
      ```
-     Fetched ticket {key}: {title}
-     Auto-generated description: {short_description}
-     Ticket has {N} comments and {M} attachments — all will be analyzed.
+     ✓ Fetched ticket {key}: {title}
+       {N} comments, {M} attachments — all will be analyzed.
+     ```
 
-     Use this as the change description? [Y/n]
-     ```
      **CARRIER MISMATCH CHECK:** Before proceeding, compare the ticket content
      against `carrier_name` from config.yaml. Look for carrier names in the ticket
      title and body (e.g., "Portage Mutual", "Intact", "Wawanesa", "SGI", etc.).
-     - If the ticket mentions a DIFFERENT carrier than `carrier_name`: WARN:
+     - If the ticket mentions a DIFFERENT carrier than `carrier_name`: WARN and STOP:
        ```
-       WARNING: This ticket mentions "{detected_carrier}" but you are working
+       ⚠ WARNING: This ticket mentions "{detected_carrier}" but you are working
        in the {carrier_name} folder. Are you sure this is the right ticket?
 
        Type "yes" to continue or "no" to enter a different ticket.
        ```
-     - If the ticket does NOT mention any carrier name: NOTE (non-blocking):
-       ```
-       NOTE: No carrier name found in the ticket. This workspace is configured
-       for {carrier_name}. Proceeding — just confirm this ticket is for {carrier_name}.
-       ```
-     - If the ticket mentions `carrier_name`: proceed silently.
+     - If the ticket does NOT mention any carrier name, or mentions `carrier_name`:
+       proceed silently (no prompt).
 
-     If yes: store the full context as the raw input, **skip Step 4.2**.
-     If no: proceed to Step 4.2 for manual input.
+     Store the full context as the raw input, **skip Step 4.2**.
    - **On failure:** Warn and continue normally:
      ```
      Could not auto-fetch ticket {key}: {error}
@@ -417,14 +437,10 @@ Ticket reference? You can:
 - If duplicate: auto-append `-02`, `-03`, etc.
   - `24778-sk-hab-rate-increase` exists -> `24778-sk-hab-rate-increase-02`
 
-**Present and confirm:**
+**Auto-create the workstream** (no confirmation prompt):
 ```
-Workstream ID: {generated-id}
-Press Enter to accept, or type a different name:
->
+✓ Workstream: {generated-id}
 ```
-
-If the developer types a custom name, use it (sanitized) instead.
 
 **Sanitization rules:**
 1. Lowercase all characters
@@ -1376,14 +1392,15 @@ The Plan agent has NO developer interaction — it is fully automated.
    An independent review — reading the code fresh with zero inherited assumptions —
    breaks the error propagation chain.
 
-   **4b.0 Choose the reviewer:**
+   **4b.0 Choose the reviewer (uses Step 4.0 decision):**
 
-   Read the `codex` value from paths.md (already loaded in Check 1).
-   If the value is a valid path (not "NOT FOUND"), Codex CLI is available.
+   Read `reviewer_mode` from the workstream's `manifest.yaml` (set in Step 4.0).
 
-   - **If codex path is valid:** Use GPT-5.4 via Codex CLI (cross-model review).
-     Two different models with different training data catch different things.
-   - **If codex is NOT found:** Spawn a Claude sub-agent as an independent
+   - **If `reviewer_mode: "codex"`:** Use GPT-5.4 via Codex CLI (cross-model review).
+     Verify the `codex` path from paths.md is still valid. If the path is gone
+     (uninstalled since Step 4.0), fall back to Claude sub-agent and print:
+     `"Codex CLI no longer available — falling back to Claude reviewer."`
+   - **If `reviewer_mode: "claude"`:** Spawn a Claude sub-agent as an independent
      reviewer. The sub-agent gets a fresh context window with NO pipeline
      artifacts — only the plan, the ticket, and the raw source files. It must
      read the code and trace the logic from scratch.

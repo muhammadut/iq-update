@@ -200,34 +200,20 @@ the whole init because one province is malformed).
 
    **If `.env` is missing entirely:**
 
-   6a. **Prompt for org** — ask the developer:
+   6a. **Auto-create** `.iq-workstreams/.env` with defaults (no prompts for org/project):
    ```
-   What is your Azure DevOps organization name? (default: rivalitinc)
-   ```
-   If they press Enter or say "default", use `rivalitinc`.
-   Then ask:
-   ```
-   What is your Azure DevOps project name? (default: Rival Insurance Technology)
-   ```
-   If they press Enter or say "default", use `Rival Insurance Technology`.
-
-   6b. **Auto-create** `.iq-workstreams/.env`:
-
-   **IMPORTANT:** Always quote values that may contain spaces. Use double quotes
-   around ALL values to be safe:
-   ```
-   ADO_ORG="{org_from_6a}"
-   ADO_PROJECT="{project_from_6a}"
+   ADO_ORG="rivalitinc"
+   ADO_PROJECT="Rival Insurance Technology"
    ADO_USE_VSCOM=1
    ADO_PAT=
    ```
 
-   6c. **Verify secrets are not exposed:**
+   6b. **Verify secrets are not exposed:**
    - If `{carrier_root}/.git` exists → check `.gitignore` includes `.iq-workstreams/`
    - If `{carrier_root}/.svn` exists → print: `NOTE: SVN project — ensure .iq-workstreams/ is in svn:ignore`
    - If neither → skip silently
 
-   6d. **Prompt for PAT** — ask the developer:
+   6c. **Prompt for PAT** — go straight to the token:
    ```
    ═══════════════════════════════════════════════════════
      Azure DevOps PAT Setup
@@ -235,25 +221,25 @@ the whole init because one province is malformed).
 
    To fetch tickets automatically, this plugin needs a Personal Access Token.
 
-   Generate one at: https://{ADO_ORG}.visualstudio.com/_usersettings/tokens
+   Generate one at: https://rivalitinc.visualstudio.com/_usersettings/tokens
      → Click "New Token"
      → Name: "IQ Update Plugin"
      → Scopes: Work Items (Read)
      → Expiration: 90 days (or custom)
      → Click "Create" and copy the token
 
-   Paste your Azure DevOps Personal Access Token (or type "skip"):
+   Paste your Personal Access Token (or type "skip"):
    ═══════════════════════════════════════════════════════
    ```
 
    Wait for the developer to paste their PAT value.
 
-   6e. **Write the PAT** into the `.env` file. Confirm:
+   6d. **Write the PAT** into the `.env` file. Confirm:
    ```
    Azure DevOps:  ✓ PAT saved to .iq-workstreams/.env
    ```
 
-   6f. **If developer declines** (says "skip", "later", etc.):
+   6e. **If developer declines** (says "skip", "later", etc.):
    ```
    Azure DevOps:  ⚠ .env created but ADO_PAT is empty — /iq-plan will require manual ticket paste
    ```
