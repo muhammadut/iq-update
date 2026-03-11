@@ -1,6 +1,6 @@
 {
   "name": "@muhammadut/iq-update",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "AI-powered ticket implementation pipeline for TBW/IntelliQuote VB.NET rating engines. 7 agents (Intake, Understand, Plan, Change Engine, Reviewer, Semantic Verifier) with Roslyn parser and 6 automated verification gates.",
   "keywords": ["claude-code-plugin", "vbnet", "insurance", "rating-engine", "rate-update", "intelliquote"],
   "license": "MIT",

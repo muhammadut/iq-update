@@ -1442,6 +1442,42 @@ HAZARD: hidden_consumer
 
 Record all hazards in the CR's `understanding.hazards[]` list.
 
+### Step U.9.5: Dual-Impact Analysis (Calculation + Display)
+
+**MANDATORY for every CR.** Every code change has TWO potential impacts:
+
+1. **Calculation impact** — what changes in the premium math (values, subtotals, totals)
+2. **Display impact** — what changes on the TBW front-end (line order, running totals,
+   labels, formatting shown to the broker/underwriter)
+
+These are often coupled in the same function. In TBW/IntelliQuote code:
+- `AddToArray()` calls build the **display output** line by line — the order of calls
+  determines what the user sees on screen. Moving code blocks changes display order.
+- `AddToDiscountArray()` calls populate the **discount breakdown** visible in the UI.
+- `AddPolicyTermToPPVCoverageArray()` calls store values to **policy term fields** that
+  both the totals engine AND the display engine consume.
+- Running totals (e.g., `intSubTotal3`) are shown as the right-hand column in the
+  coverage details view — reordering additions changes every running total below.
+
+**For every CR, answer BOTH questions:**
+- "How does this change affect the **calculated premium**?" (math correctness)
+- "How does this change affect what the **user sees on screen**?" (display correctness)
+
+If the CR only mentions one (e.g., "fix the calculation"), actively check whether the
+fix also changes the display. If it does, flag it — either as a bonus fix (like
+ticket 21333 CR-002) or as a potential side effect requiring a separate CR.
+
+Record display impacts in the CR's `understanding.display_impact` field:
+```yaml
+display_impact:
+  affected: true
+  description: "Line order changes — HighTheft now appears after All Perils"
+  display_lines_affected:
+    - "AddToArray('  - High Theft Vehicle Surcharge', ...)"
+    - "AddPolicyTermToPPVCoverageArray generates 'All Perils Adjustment' line"
+  running_totals_changed: true
+```
+
 ---
 
 ### Step U.10: Check Caller Chain

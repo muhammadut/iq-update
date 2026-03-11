@@ -1182,7 +1182,41 @@ def build_caller_fix_intent(intent_id, original_intent, caller_hazard):
     }
 ```
 
-#### P.4.3 Shared Module Deduplication
+#### P.4.3a Dual-Impact Check (Calculation + Display)
+
+For every intent, verify that BOTH impacts are accounted for:
+
+1. **Calculation impact** — How does this change affect premium math? What subtotals,
+   totals, or factor applications change?
+2. **Display impact** — How does this change affect what the broker/underwriter sees
+   in the TBW application? `AddToArray` calls build display lines top-to-bottom;
+   `AddToDiscountArray` populates discount breakdowns; running totals (`intSubTotal3`,
+   etc.) appear as the right-hand column in coverage details.
+
+```python
+def check_display_impact(intent, understanding_data):
+    """Check if an intent has display side effects beyond its primary purpose."""
+
+    display_impact = understanding_data.get("display_impact", {})
+
+    # If the Understand agent flagged display impact, carry it forward
+    if display_impact.get("affected"):
+        intent.setdefault("verification_notes", []).append(
+            f"DISPLAY IMPACT: {display_impact.get('description', 'check display order')}"
+        )
+
+    # For flow_modification intents (code reorder), display is ALWAYS affected
+    if intent.get("capability") == "flow_modification":
+        intent.setdefault("verification_notes", []).append(
+            "Code reorder changes AddToArray display sequence — verify "
+            "line order and running totals in TBW coverage details view"
+        )
+```
+
+If a CR only mentions calculation but the intent changes display order (or vice versa),
+add a verification note so the developer tests both.
+
+#### P.4.3b Shared Module Deduplication
 
 Ensure shared modules are edited ONCE, not per LOB.
 
